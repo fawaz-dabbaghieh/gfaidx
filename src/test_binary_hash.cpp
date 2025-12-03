@@ -10,10 +10,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-//---------------------------------------------
+
 // 64-bit FNV-1a hash
-//---------------------------------------------
-uint64_t hash_id(std::string_view s) {
+uint64_t fnv1a_hash(std::string_view s) {
     const uint64_t FNV_OFFSET = 1469598103934665603ULL;
     const uint64_t FNV_PRIME  = 1099511628211ULL;
     uint64_t h = FNV_OFFSET;
@@ -24,45 +23,45 @@ uint64_t hash_id(std::string_view s) {
     return h;
 }
 
-//---------------------------------------------
-// A single index entry (16 bytes)
-//---------------------------------------------
+// the hash entries, size of 16 bytes, probably can be made smaller
+// at the moment there are 4 bits padding which are wasted, I can use them for another smaller hash to avoid collisions
+// i.e., do another has that is 32 bits, and first look at the 64 then the 32 bit hash, even for a couple hundred million
+// strings, it'll be almost impossible to get a hash collision.
 struct IndexEntry {
     uint64_t hash;          // 8 bytes
     uint32_t community_id;  // 4 bytes
-    uint32_t padding;       // 4 bytes (explicit padding for alignment)
-}; // sizeof(IndexEntry) == 16
+};
 
-//---------------------------------------------
-// Build the index file on disk
-//---------------------------------------------
+
+// building index of strings
 void build_index(const std::vector<std::pair<std::string, uint32_t>>& nodes,
                  const std::string& out_path)
 {
     std::vector<IndexEntry> entries;
     entries.reserve(nodes.size());
 
+    // later this should read from some stream of node ids and their communities instead of reading from some pairs
+    // stored on RAM
     for (const auto& p : nodes) {
-        IndexEntry e;
-        e.hash         = hash_id(p.first);
+        IndexEntry e{};
+        e.hash = fnv1a_hash(p.first);
         e.community_id = p.second;
-        e.padding      = 0;
         entries.push_back(e);
     }
 
-    // Sort by hash for binary search
+    // Sorting hash
     std::sort(entries.begin(), entries.end(),
               [](const IndexEntry& a, const IndexEntry& b) {
                   return a.hash < b.hash;
               });
 
-    // Write the binary file
+    // writing binary
     std::ofstream out(out_path, std::ios::binary);
-    if (!out) throw std::runtime_error("Failed to open output file");
+    if (!out) {
+        throw std::runtime_error("Failed to open output file");
+    }
 
-    out.write(reinterpret_cast<const char*>(entries.data()),
-              entries.size() * sizeof(IndexEntry));
-
+    out.write(reinterpret_cast<const char*>(entries.data()),entries.size() * sizeof(IndexEntry));
     out.close();
 }
 
@@ -93,14 +92,15 @@ public:
             throw std::runtime_error("mmap failed");
     }
 
+    // destructor
     ~OnDiskIndex() {
         if (data_) munmap(const_cast<IndexEntry*>(data_), file_size_);
         if (fd_ != -1) close(fd_);
     }
 
-    // Lookup the community ID for a node name
+    // Binary search lookup
     bool lookup(std::string_view name, uint32_t& out_com) const {
-        uint64_t h = hash_id(name);
+        uint64_t h = fnv1a_hash(name);
 
         size_t lo = 0, hi = n_entries_;
         while (lo < hi) {
@@ -124,49 +124,105 @@ private:
     size_t n_entries_ = 0;
 };
 
-//---------------------------------------------
-// Main demonstration
-//---------------------------------------------
-int main() {
-    const std::string index_file = "node_index.bin";
+class OnDiskIndexStreaming {
+public:
+    explicit OnDiskIndexStreaming(const std::string& path) {
+        file_.open(path, std::ios::binary);
+        if (!file_)
+            throw std::runtime_error("Failed to open index file");
 
-    //--------------------------------------------------
-    // 1. Build a test index file
-    //--------------------------------------------------
-    std::vector<std::pair<std::string, uint32_t>> test_nodes = {
-        {"nodeA", 1},
-        {"nodeB", 1},
-        {"nodeC", 2},
-        {"nodeXYZ", 5},
-        {"scaffold12", 3}
-    };
+        // Get file size
+        file_.seekg(0, std::ios::end);
+        file_size_ = file_.tellg();
+        file_.seekg(0, std::ios::beg);
 
-    build_index(test_nodes, index_file);
-    std::cout << "Index built: " << index_file << "\n";
+        if (file_size_ % sizeof(IndexEntry) != 0)
+            throw std::runtime_error("Index file size is invalid");
 
-    //--------------------------------------------------
-    // 2. Load the index from disk (memory-mapped)
-    //--------------------------------------------------
-    OnDiskIndex idx(index_file);
-
-    //--------------------------------------------------
-    // 3. Test lookups
-    //--------------------------------------------------
-    const std::vector<std::string> queries = {
-        "nodeA",
-        "nodeXYZ",
-        "scaffold12",
-        "not_in_index"
-    };
-
-    for (const auto& q : queries) {
-        uint32_t com;
-        bool ok = idx.lookup(q, com);
-        if (ok)
-            std::cout << q << " → community " << com << "\n";
-        else
-            std::cout << q << " → not found\n";
+        n_entries_ = file_size_ / sizeof(IndexEntry);
     }
 
+    // Lookup the community ID for a node name
+    bool lookup(std::string_view name, uint32_t& out_com) const {
+        uint64_t h = fnv1a_hash(name);
+
+        size_t lo = 0, hi = n_entries_;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+
+            // Seek to the entry and read it
+            file_.seekg(mid * sizeof(IndexEntry), std::ios::beg);
+            IndexEntry entry;
+            file_.read(reinterpret_cast<char*>(&entry), sizeof(IndexEntry));
+
+            if (!file_)
+                throw std::runtime_error("Failed to read from index file");
+
+            uint64_t mh = entry.hash;
+
+            if (mh < h) lo = mid + 1;
+            else if (mh > h) hi = mid;
+            else {
+                out_com = entry.community_id;
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    mutable std::ifstream file_;
+    size_t file_size_ = 0;
+    size_t n_entries_ = 0;
+};
+
+
+int main(int argc, char** argv) {
+    if (argc < 3) { std::cerr << "usage: " << argv[0] << " nodes_communites file then queries file\n"; return 1; }
+
+    const std::string index_file = "node_index.bin";
+
+    // some sample data to build an index for
+    std::ifstream in_nodes_file(argv[1]);
+    std::vector<std::pair<std::string, uint32_t>> nodes;
+    std::string node_id;
+    int community_id;
+    while (in_nodes_file >> node_id >> community_id) {
+        nodes.emplace_back(node_id, community_id);
+    }
+    build_index(nodes, index_file);
+    std::cout << "Index built: " << index_file << "\n";
+
+    std::ifstream in_queries(argv[2]);
+    std::vector<std::string> queries;
+    while (in_queries >> node_id) {
+        queries.push_back(node_id);
+    }
+
+    // {
+    //     OnDiskIndex disk_hash(index_file);
+    //
+    //     for (const auto& q : queries) {
+    //         uint32_t com;
+    //         bool ok = disk_hash.lookup(q, com);
+    //         if (ok)
+    //             std::cout << q << " → community " << com << "\n";
+    //         else
+    //             std::cout << q << " → not found\n";
+    //     }
+    // }
+
+    {
+        OnDiskIndexStreaming disk_hash(index_file);
+
+        for (const auto& q : queries) {
+            uint32_t com;
+            bool ok = disk_hash.lookup(q, com);
+            if (ok)
+                std::cout << q << " → community " << com << "\n";
+            else
+                std::cout << q << " → not found\n";
+        }
+    }
     return 0;
 }
