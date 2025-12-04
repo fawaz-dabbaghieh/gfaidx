@@ -178,51 +178,59 @@ private:
 
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::cerr << "usage: " << argv[0] << " nodes_communites file then queries file\n"; return 1; }
+    if (argc < 5) { std::cerr << "usage: " << argv[0] << " nodes_communites file then queries file then the index 0 for building the index and 1 for querying\n"; return 1; }
 
-    const std::string index_file = "node_index.bin";
 
-    // some sample data to build an index for
-    std::ifstream in_nodes_file(argv[1]);
-    std::vector<std::pair<std::string, uint32_t>> nodes;
-    std::string node_id;
-    int community_id;
-    while (in_nodes_file >> node_id >> community_id) {
-        nodes.emplace_back(node_id, community_id);
-    }
-    build_index(nodes, index_file);
-    std::cout << "Index built: " << index_file << "\n";
+    if (strcmp(argv[4], "0") == 0) {
+        const std::string index_file = argv[3];
 
-    std::ifstream in_queries(argv[2]);
-    std::vector<std::string> queries;
-    while (in_queries >> node_id) {
-        queries.push_back(node_id);
+        // some sample data to build an index for
+        std::ifstream in_nodes_file(argv[1]);
+        std::vector<std::pair<std::string, uint32_t>> nodes;
+        std::string node_id;
+        int community_id;
+        while (in_nodes_file >> node_id >> community_id) {
+            nodes.emplace_back(node_id, community_id);
+        }
+        build_index(nodes, index_file);
+        std::cout << "Index built: " << index_file << "\n";
     }
 
-    // {
-    //     OnDiskIndex disk_hash(index_file);
-    //
-    //     for (const auto& q : queries) {
-    //         uint32_t com;
-    //         bool ok = disk_hash.lookup(q, com);
-    //         if (ok)
-    //             std::cout << q << " → community " << com << "\n";
-    //         else
-    //             std::cout << q << " → not found\n";
-    //     }
-    // }
 
-    {
-        OnDiskIndexStreaming disk_hash(index_file);
+    if (strcmp(argv[4], "1") == 0) {
+        std::string node_id;
+        std::ifstream in_queries(argv[2]);
+        std::vector<std::string> queries;
+        while (in_queries >> node_id) {
+            queries.push_back(node_id);
+        }
 
-        for (const auto& q : queries) {
-            uint32_t com;
-            bool ok = disk_hash.lookup(q, com);
-            if (ok)
-                std::cout << q << " → community " << com << "\n";
-            else
-                std::cout << q << " → not found\n";
+        // {
+        //     OnDiskIndex disk_hash(index_file);
+        //
+        //     for (const auto& q : queries) {
+        //         uint32_t com;
+        //         bool ok = disk_hash.lookup(q, com);
+        //         if (ok)
+        //             std::cout << q << " → community " << com << "\n";
+        //         else
+        //             std::cout << q << " → not found\n";
+        //     }
+        // }
+
+        {
+            OnDiskIndexStreaming disk_hash(argv[3]);
+
+            for (const auto& q : queries) {
+                uint32_t com;
+                bool ok = disk_hash.lookup(q, com);
+                if (ok)
+                    std::cout << q << " → community " << com << "\n";
+                else
+                    std::cout << q << " → not found\n";
+            }
         }
     }
+
     return 0;
 }

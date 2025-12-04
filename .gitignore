@@ -1,6 +1,9 @@
 # Prerequisites
 *.d
 
+*.idx
+scripts/*txt
+
 .idea/
 # Compiled Object files
 *.slo

@@ -24,6 +24,9 @@ with open(sys.argv[1], 'w') as outfile:
         random_string = ''.join(random.choice(characters) for i in range(9))
         if random.choice(choices):
             queries.append(random_string)
-            if len(queries) == n_queries:
+            if len(queries) == n_queries + 1:
                 choices = [False]
         outfile.write(random_string + " " + str(random.choice(communities)) + "\n")
+
+with open(sys.argv[1].split(".")[0] + "_queries.txt", 'w') as outfile:
+    outfile.write("\n".join(queries))
