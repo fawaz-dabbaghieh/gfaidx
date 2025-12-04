@@ -1,6 +1,8 @@
 # Prerequisites
 *.d
 
+test_graphs/
+
 *.idx
 scripts/*txt
 

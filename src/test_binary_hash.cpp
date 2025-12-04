@@ -131,37 +131,43 @@ public:
         if (!file_)
             throw std::runtime_error("Failed to open index file");
 
+        // I can probably replace this by adding the size
+        // of the index as the first uint_32 or 64 value
+        // so I just need to read the first 8 or 4 bytes
+        // and the binary search starts from the entry after.
+
         // Get file size
         file_.seekg(0, std::ios::end);
         file_size_ = file_.tellg();
         file_.seekg(0, std::ios::beg);
 
-        if (file_size_ % sizeof(IndexEntry) != 0)
+        if (file_size_ % index_entry_size_ != 0)
             throw std::runtime_error("Index file size is invalid");
 
-        n_entries_ = file_size_ / sizeof(IndexEntry);
+        n_entries_ = file_size_ / index_entry_size_;
     }
 
     // Lookup the community ID for a node name
-    bool lookup(std::string_view name, uint32_t& out_com) const {
-        uint64_t h = fnv1a_hash(name);
+    bool lookup(std::string_view node_id, uint32_t& out_com) const {
+        // binary search implementation for the on-disk
+        const uint64_t query_hash = fnv1a_hash(node_id);
 
-        size_t lo = 0, hi = n_entries_;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
+        size_t low_val = 0, high_val = n_entries_;
+        while (low_val < high_val) {
+            const size_t mid_val = low_val + (high_val - low_val) / 2;
 
             // Seek to the entry and read it
-            file_.seekg(mid * sizeof(IndexEntry), std::ios::beg);
-            IndexEntry entry;
-            file_.read(reinterpret_cast<char*>(&entry), sizeof(IndexEntry));
+            file_.seekg(mid_val * index_entry_size_, std::ios::beg);
+            IndexEntry entry{};
+            file_.read(reinterpret_cast<char*>(&entry), index_entry_size_);
 
             if (!file_)
                 throw std::runtime_error("Failed to read from index file");
 
-            uint64_t mh = entry.hash;
+            uint64_t mid_val_hash = entry.hash;
 
-            if (mh < h) lo = mid + 1;
-            else if (mh > h) hi = mid;
+            if (mid_val_hash < query_hash) low_val = mid_val + 1;
+            else if (mid_val_hash > query_hash) high_val = mid_val;
             else {
                 out_com = entry.community_id;
                 return true;
@@ -172,6 +178,7 @@ public:
 
 private:
     mutable std::ifstream file_;
+    size_t index_entry_size_ = sizeof(IndexEntry);
     size_t file_size_ = 0;
     size_t n_entries_ = 0;
 };
@@ -205,21 +212,8 @@ int main(int argc, char** argv) {
             queries.push_back(node_id);
         }
 
-        // {
-        //     OnDiskIndex disk_hash(index_file);
-        //
-        //     for (const auto& q : queries) {
-        //         uint32_t com;
-        //         bool ok = disk_hash.lookup(q, com);
-        //         if (ok)
-        //             std::cout << q << " → community " << com << "\n";
-        //         else
-        //             std::cout << q << " → not found\n";
-        //     }
-        // }
-
         {
-            OnDiskIndexStreaming disk_hash(argv[3]);
+            OnDiskIndex disk_hash(argv[3]);
 
             for (const auto& q : queries) {
                 uint32_t com;
@@ -230,6 +224,19 @@ int main(int argc, char** argv) {
                     std::cout << q << " → not found\n";
             }
         }
+
+        // {
+        //     OnDiskIndexStreaming disk_hash(argv[3]);
+        //
+        //     for (const auto& q : queries) {
+        //         uint32_t com;
+        //         bool ok = disk_hash.lookup(q, com);
+        //         if (ok)
+        //             std::cout << q << " → community " << com << "\n";
+        //         else
+        //             std::cout << q << " → not found\n";
+        //     }
+        // }
     }
 
     return 0;
