@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 
+.clang-format
 test_graphs/
 
 *.idx

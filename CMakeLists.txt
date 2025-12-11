@@ -3,7 +3,7 @@ project(louvain_method)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ansi -ggdb -O3 -Wall")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ansi -ggdb -Wall")
 
 # Linker flags from Makefile
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ansi")
@@ -27,13 +27,11 @@ add_executable(hierarchy
 
 add_executable(test_binary_hash
         src/test_binary_hash.cpp)
-#
-### Keep the original executable if needed
-#add_executable(louvain_method
-#        main.cpp
-#        src/main_community.cpp
-#        src/graph_binary.cpp
-#        src/community.cpp
-#        src/main_convert.cpp
-#        src/graph.cpp
-#        src/main_hierarchy.cpp)
+
+add_executable(gfa_to_edge_list
+        scripts/gfa_to_edge_list.cpp
+        src/graph.cpp
+        src/graph_binary.cpp)
+
+add_executable(test_file_reading
+        scripts/test_file_reading.cpp)

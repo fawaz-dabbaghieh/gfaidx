@@ -7,10 +7,10 @@
 //
 // This program must not be distributed without agreement of the above mentionned authors.
 //-----------------------------------------------------------------------------
-// Author   : E. Lefebvre, adapted by J.-L. Guillaume
-// Email    : jean-loup.guillaume@lip6.fr
+// Author     : E. Lefebvre, adapted by J.-L. Guillaume
+// Email        : jean-loup.guillaume@lip6.fr
 // Location : Paris, France
-// Time	    : February 2008
+// Time	        : February 2008
 //-----------------------------------------------------------------------------
 // see readme.txt for more details
 
@@ -27,22 +27,23 @@
 #include <set>
 #include <algorithm>
 
-#define WEIGHTED   0
+#define WEIGHTED     0
 #define UNWEIGHTED 1
 
 using namespace std;
 
 class Graph {
- public:
-  vector<vector<pair<int,float> > > links;
-  vector<int> nodes;
-  
-  Graph (char *filename, int type);
-  
-  void clean(int type);
-  void renumber(int type);
-  void display(int type);
-  void display_binary(char *filename, char *filename_w, int type);
+  public:
+    vector<vector<pair<int,float> > > links;
+    vector<unsigned int> nodes;
+    
+    Graph (char *filename, int type);
+    // Graph (const std::string& filename, int type);
+    Graph ();
+    void clean(int type);
+    void renumber(int type);
+    void display(int type);
+    void display_binary(char *filename, char *filename_w, int type);
 };
 
 #endif // GRAPH_H

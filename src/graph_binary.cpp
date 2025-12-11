@@ -19,13 +19,13 @@
 #include "graph_binary.h"
 #include "math.h"
 
-Graph::Graph() {
+BGraph::BGraph() {
   nb_nodes     = 0;
   nb_links     = 0;
   total_weight = 0;
 }
 
-Graph::Graph(char *filename, char *filename_w, int type) {
+BGraph::BGraph(char *filename, char *filename_w, int type) {
   ifstream finput;
   finput.open(filename,fstream::in | fstream::binary);
 
@@ -66,7 +66,7 @@ Graph::Graph(char *filename, char *filename_w, int type) {
   }
 }
 
-Graph::Graph(int n, int m, double t, int *d, int *l, float *w) {
+BGraph::BGraph(int n, int m, double t, int *d, int *l, float *w) {
 /*  nb_nodes     = n;
   nb_links     = m;
   total_weight = t;
@@ -75,7 +75,7 @@ Graph::Graph(int n, int m, double t, int *d, int *l, float *w) {
   weights      = w;*/
 }
 
-Graph::Graph(vector<vector<int> >& c_nodes) {
+BGraph::BGraph(vector<vector<int> >& c_nodes) {
   nb_nodes     = 0;
   nb_links     = 0;
   total_weight = 0;
@@ -87,14 +87,14 @@ Graph::Graph(vector<vector<int> >& c_nodes) {
 }
 
 void 
-Graph::add_node(vector<int>& n) {
+BGraph::add_node(vector<int>& n) {
     //Graph::Node node;
     //node.actual_nodes = n;
     nodes.push_back(n);
 }
 
 void
-Graph::display() {
+BGraph::display() {
   /*
   for (unsigned int node=0 ; node<nb_nodes ; node++) {
     pair<vector<unsigned int>::iterator, vector<float>::iterator > p = neighbors(node);
@@ -119,7 +119,7 @@ Graph::display() {
 }
 
 void
-Graph::write_community(const char *filename_w) {
+BGraph::write_community(const char *filename_w) {
   FILE* fOut = fopen(filename_w, "wt");
   for (size_t i=0; i<nodes.size(); i++) {
     for (size_t j=0; j<nodes[i].size(); j++) {
@@ -130,7 +130,7 @@ Graph::write_community(const char *filename_w) {
 }
 
 void
-Graph::display_reverse() {
+BGraph::display_reverse() {
   cerr << "[in reverse display] and n nodes is " << nb_nodes << "\n";
   cerr << "[in reverse display] and n links is " << nb_links << "\n";
   for (unsigned int node=0 ; node<nb_nodes ; node++) {
@@ -148,7 +148,7 @@ Graph::display_reverse() {
 
 
 bool
-Graph::check_symmetry() {
+BGraph::check_symmetry() {
   int error=0;
   for (unsigned int node=0 ; node<nb_nodes ; node++) {
     pair<vector<unsigned int>::iterator, vector<float>::iterator > p = neighbors(node);
@@ -174,7 +174,7 @@ Graph::check_symmetry() {
 
 
 void
-Graph::display_binary(char *outfile) {
+BGraph::display_binary(char *outfile) {
   ofstream foutput;
   foutput.open(outfile ,fstream::out | fstream::binary);
 

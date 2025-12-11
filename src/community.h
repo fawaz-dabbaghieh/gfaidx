@@ -35,7 +35,7 @@ class Community {
   vector<unsigned int> neigh_pos;
   unsigned int neigh_last;
 
-  Graph g; // network to compute communities for
+  BGraph g; // network to compute communities for
   int size; // nummber of nodes in the network and size of all vectors
   vector<int> n2c; // community to which each node belongs
   vector<double> in,tot; // used to compute the modularity participation of each community
@@ -54,7 +54,7 @@ class Community {
   // type defined the weighted/unweighted status of the graph file
   Community (char *filename, char *filename_w, int type, int nb_pass, double min_modularity);
   // copy graph
-  Community (Graph g, int nb_pass, double min_modularity);
+  Community (BGraph g, int nb_pass, double min_modularity);
 
   // initiliazes the partition with something else than all nodes alone
   void init_partition(char *filename_part);
@@ -92,7 +92,7 @@ class Community {
   void display_partition();
 
   // generates the binary graph of communities as computed by one_level
-  Graph partition2graph_binary();
+  BGraph partition2graph_binary();
 
   // compute communities of the graph for one level
   // return true if some nodes have been moved

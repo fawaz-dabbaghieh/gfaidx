@@ -14,25 +14,25 @@
 //-----------------------------------------------------------------------------
 // see readme.txt for more details
 
-#ifndef GRAPH_H
-#define GRAPH_H
+#ifndef BGRAPH_H
+#define BGRAPH_H
 
 #include <stdlib.h>
-#include <stdio.h>
+// #include <stdio.h>
 #include <assert.h>
 #include <iostream>
-#include <iomanip>
+// #include <iomanip>
 #include <fstream>
 #include <vector>
 #include <map>
-#include <algorithm>
+// #include <algorithm>
 
 #define WEIGHTED   0
 #define UNWEIGHTED 1
 
 using namespace std;
 
-class Graph {
+class BGraph {
 public:
   class Node
   {
@@ -49,18 +49,18 @@ public:
   vector<unsigned int> links;
   vector<float> weights;
 
-  Graph();
+  BGraph();
 
   // binary file format is
-  // 4 bytes for the number of nodes in the graph
+  // 4 bytes for the number of nodes in the BGraph
   // 8*(nb_nodes) bytes for the cumulative degree for each node:
   //    deg(0)=degrees[0]
   //    deg(k)=degrees[k]-degrees[k-1]
   // 4*(sum_degrees) bytes for the links
   // IF WEIGHTED 4*(sum_degrees) bytes for the weights in a separate file
-  Graph(char *filename, char *filename_w, int type);
-  Graph(vector<vector<int> >& c_nodes);
-  Graph(int nb_nodes, int nb_links, double total_weight, int *degrees, int *links, float *weights);
+  BGraph(char *filename, char *filename_w, int type);
+  explicit BGraph(vector<vector<int> >& c_nodes);
+  BGraph(int nb_nodes, int nb_links, double total_weight, int *degrees, int *links, float *weights);
   
   void add_node(vector<int>& n);
   void display(void);
@@ -85,7 +85,7 @@ public:
 
 
 inline unsigned int
-Graph::nb_neighbors(unsigned int node) {
+BGraph::nb_neighbors(unsigned int node) {
   assert(node>=0 && node<nb_nodes);
 
   if (node==0)
@@ -95,7 +95,7 @@ Graph::nb_neighbors(unsigned int node) {
 }
 
 inline double
-Graph::nb_selfloops(unsigned int node) {
+BGraph::nb_selfloops(unsigned int node) {
   assert(node>=0 && node<nb_nodes);
 
   pair<vector<unsigned int>::iterator, vector<float>::iterator > p = neighbors(node);
@@ -111,7 +111,7 @@ Graph::nb_selfloops(unsigned int node) {
 }
 
 inline double
-Graph::weighted_degree(unsigned int node) {
+BGraph::weighted_degree(unsigned int node) {
   assert(node>=0 && node<nb_nodes);
 
   if (weights.size()==0)
@@ -127,7 +127,7 @@ Graph::weighted_degree(unsigned int node) {
 }
 
 inline pair<vector<unsigned int>::iterator, vector<float>::iterator >
-Graph::neighbors(unsigned int node) {
+BGraph::neighbors(unsigned int node) {
   assert(node>=0 && node<nb_nodes);
 
   if (node==0)
@@ -139,4 +139,4 @@ Graph::neighbors(unsigned int node) {
 }
 
 
-#endif // GRAPH_H
+#endif // BGRAPH_H

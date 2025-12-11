@@ -13,9 +13,21 @@
 
 // 64-bit FNV-1a hash
 uint64_t fnv1a_hash(std::string_view s) {
-    const uint64_t FNV_OFFSET = 1469598103934665603ULL;
+    constexpr uint64_t FNV_OFFSET = 1469598103934665603ULL;
     const uint64_t FNV_PRIME  = 1099511628211ULL;
     uint64_t h = FNV_OFFSET;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+// 32-bit FNV-1a hash
+uint32_t hash_id_32(std::string_view s) {
+    constexpr uint32_t FNV_OFFSET = 2166136261U;
+    const uint32_t FNV_PRIME  = 16777619U;
+    uint32_t h = FNV_OFFSET;
     for (unsigned char c : s) {
         h ^= c;
         h *= FNV_PRIME;
@@ -50,6 +62,7 @@ void build_index(const std::vector<std::pair<std::string, uint32_t>>& nodes,
     }
 
     // Sorting hash
+    // if I add a second 32 bits hash, then I need to change this comparison here in the sort
     std::sort(entries.begin(), entries.end(),
               [](const IndexEntry& a, const IndexEntry& b) {
                   return a.hash < b.hash;

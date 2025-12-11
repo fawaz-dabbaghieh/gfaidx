@@ -1,4 +1,0 @@
-nodeA 12
-nodeXYZ 16
-scaffold12 123
-not_in_index 6567

@@ -1,5 +1,0 @@
-nodeA
-nodeXYZ
-scaffold12
-not_in_index
-something_new

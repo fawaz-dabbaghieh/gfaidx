@@ -19,7 +19,7 @@
 using namespace std;
 
 Community::Community(char * filename, char * filename_w, int type, int nbp, double minm) {
-  g = Graph(filename, filename_w, type);
+  g = BGraph(filename, filename_w, type);
   // when displaying reverse, the graph seems correct
   // g.display_reverse();
   size = g.nb_nodes;
@@ -42,7 +42,7 @@ Community::Community(char * filename, char * filename_w, int type, int nbp, doub
   min_modularity = minm;
 }
 
-Community::Community(Graph gc, int nbp, double minm) {
+Community::Community(BGraph gc, int nbp, double minm) {
   g = gc;
   size = g.nb_nodes;
 
@@ -205,7 +205,7 @@ Community::display_partition() {
 }
 
 
-Graph
+BGraph
 Community::partition2graph_binary() {
   // Renumber communities
   vector<int> renumber(size, -1);
@@ -245,7 +245,7 @@ Community::partition2graph_binary() {
   }
   printf("%s %d \n", __FILE__, __LINE__);
   */
-  Graph g2(communities);  
+  BGraph g2(communities);
   
   g2.nb_nodes = comm_nodes.size();
   g2.degrees.resize(comm_nodes.size());

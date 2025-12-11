@@ -17,12 +17,12 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <math.h>
-#include <string>
-#include <iostream> 
+#include <iostream>
 #include <fstream>
-#include <sstream>
-#include <vector>
-#include <algorithm>
+// #include <string>
+// #include <sstream>
+// #include <vector>
+// #include <algorithm>
 
 #include "graph_binary.h"
 #include "community.h"
@@ -129,7 +129,7 @@ main(int argc, char **argv) {
   Community c(filename, filename_w, type, -1, precision);
   if (filename_part!=NULL)
     c.init_partition(filename_part);
-  Graph g;
+  BGraph g;
   bool improvement=true;
   double mod=c.modularity(), new_mod;
   int level=0;
@@ -172,6 +172,6 @@ main(int argc, char **argv) {
   if (write_community) {
     g.write_community(filename_comm);
   }
-  cerr << new_mod << endl;
+  cerr << "Final modularity: " << new_mod << endl;
 }
 
