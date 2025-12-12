@@ -18,7 +18,7 @@
 
 using namespace std;
 
-Graph::Graph(char *filename, int type) {
+Graph::Graph(const char *filename, int type) {
     ifstream finput;
     finput.open(filename,fstream::in);
     set<int> s; 
@@ -136,7 +136,7 @@ Graph::display(int type) {
 }
 
 void
-Graph::display_binary(char *filename, char *filename_w, int type) {
+Graph::display_binary(const char* filename, char *filename_w, int type) {
     ofstream foutput;
     foutput.open(filename, fstream::out | fstream::binary);
 

@@ -2,10 +2,13 @@
 // Created by Fawaz Dabbaghie on 05/12/2025.
 //
 
-#include <iostream>
-#include <fstream>
-#include <map>
 #include <chrono>
+#include <fstream>
+#include <iostream>
+#include <map>
+
+#include <argparse/argparse.hpp>
+#include <sys/stat.h>
 
 #include "../src/graph.h"
 #include "../src/graph_binary.h"
@@ -16,6 +19,29 @@
 
 unsigned int N_LINKS = 0;
 
+
+bool file_exists(const char* file_name) {
+    struct stat st{};
+    return stat(file_name, &st) == 0;
+}
+
+bool dir_exists(const char* dir_name) {
+    struct stat st{};
+    return stat(dir_name, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool file_writable(const char* file_name) {
+    std::ofstream f(file_name);
+    return f.good();
+}
+
+bool remove_file(const char * file ) {
+    if (std::remove(file) != 0){
+        std::cerr << "Error: could not remove file " << file << std::endl;
+        return false;
+    }
+    return true;
+}
 
 inline std::string get_time() {
     std::chrono::time_point now = std::chrono::system_clock::now();
@@ -35,12 +61,19 @@ bool command_exists(const std::string& command="sort") {
 
 bool run_sort(const std::string& input_edges, const std::string& output_edges, const std::string& tmpdir = ".",
     const std::string& mem="50%", const bool unique = true, const int threads = 1) {
+
+    if (!command_exists("sort")) {
+        std::cout << get_time() << ": the command 'sort' does not exist";
+        return false;
+    }
+
+    // if (!dir_exists(tmpdir))
     // todo add checks for input, output and tmp directory
     std::string command = "sort -k1,1 -k2,2 -n --parallel " + std::to_string(threads) + " -S " + mem;
     if (unique) command += " -u";
     command += " -T " + tmpdir;
     command += " -o " + output_edges + " " + input_edges;
-    std::cout << command << std::endl;
+    std::cout << get_time() << ": Running command: " << command << std::endl;
     int code = std::system(command.c_str());
 
     return (WEXITSTATUS(code) == 0);
@@ -87,13 +120,38 @@ inline void get_int_node_id(std::map<std::string, unsigned int>& node_id_map, co
 // do the community detection on the binary graph file
 // output the highest level to disk (or maybe I can access it internally easily, not sure yet)
 // read the sorted node_str_ids but only the first column and put that in a vector
-// load the community IDS (I think -1 because the 0 points to nothing it seems)
 // I can put that in a vector as well I think because the node IDs are ints and sorted
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::cerr << "usage: " << argv[0] << " <input_gfa> <output_edges>\n"; return 1;
+    // if (argc < 3) {
+    //     std::cerr << "usage: " << argv[0] << " <input_gfa> <output_edges>\n"; return 1;
+    // }
+
+    argparse::ArgumentParser program("program_name");
+
+    std::string input_gfa;
+    program.add_argument("in_gfa")
+      .help("input GFA graph").store_into(input_gfa);
+
+    std::string output_bin;
+    program.add_argument("out_bin")
+      .help("output binary graph").store_into(output_bin);
+
+    try {
+        program.parse_args(argc, argv);
     }
-    const std::string input_gfa = argv[1];
+    catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        std::cerr << program;
+        return 1;
+    }
+
+    std::cout << input_gfa << " " << output_bin << std::endl;
+
+    if (!file_exists(input_gfa.c_str())) {
+        std::cerr << "Input file does not exist: " << argv[1] << std::endl; return 1;
+    }
+
+    // const std::string input_gfa = argv[1];
     std::string line;
     std::ifstream in(input_gfa);
     if (!in.good()) {
@@ -127,16 +185,6 @@ int main(int argc, char** argv) {
                 if (src > dest) out << "\n" << dest << " " << src;
                 else out << "\n" << src << " " << dest;
             }
-            // unsigned int src, dest;
-            // double weight=1.;
-
-            // if (graph.links.size()<=max(src,dest)+1) {
-                // graph.links.resize(max(src,dest)+1);
-            // }
-
-            // graph.links[src].emplace_back(dest,weight);
-            // if (src!=dest)
-                // graph.links[dest].emplace_back(src,weight);
         }
     }
     out.close();
@@ -148,7 +196,6 @@ int main(int argc, char** argv) {
         // graph.nodes[pair.second - 1] = pair.second;
     // }
 
-    if (command_exists("sort")) std::cout << get_time() << " :sort exists" << std::endl;
     std::string edge_list = "../test_graphs/tmp_edgelist.txt";
     std::string sorted_edge_list = "../test_graphs/tmp_edgelist_sorted.txt";
     std::string temp_dir = "../test_graphs/";
@@ -159,7 +206,7 @@ int main(int argc, char** argv) {
 
     std::cout << get_time() << ": Loading the graph from disk" << std::endl;
     // std::string x = "../test_graphs/tmp_edgelist_sorted.txt";
-    int x_size = sorted_edge_list.length() + 1;
+    size_t x_size = sorted_edge_list.length() + 1;
     char x_array[x_size];
     // Copy the content using strcpy
     strcpy(x_array, sorted_edge_list.c_str());
@@ -168,13 +215,12 @@ int main(int argc, char** argv) {
     std::cout << get_time() << ": Finished loading the graph from disk" << std::endl;
 
     // graph.renumber(UNWEIGHTED);
-    std::cout <<  get_time() << ": Saving the graph as a binary to disk to: " << argv[2] << std::endl;
-    graph.display_binary(argv[2], nullptr, UNWEIGHTED);
+    std::cout <<  get_time() << ": Saving the graph as a binary to disk to: " << output_bin << std::endl;
+    graph.display_binary(output_bin.c_str(), nullptr, UNWEIGHTED);
     std::cout <<  get_time() << ": Finished saving the binary graph to disk" << std::endl;
 
-
-    BGraph bgraph(argv[2], nullptr, UNWEIGHTED);
-    std::cout << bgraph.nb_nodes << std::endl;
+    std::cout << get_time () << ": Loading the binary graph from disk" << std::endl;
+    BGraph bgraph(output_bin.c_str(), nullptr, UNWEIGHTED);
     // bgraph.display();
     // Graph g("../test_graphs/", 1);
     // std::cout << n_nodes << std::endl;

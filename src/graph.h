@@ -37,13 +37,13 @@ class Graph {
     vector<vector<pair<int,float> > > links;
     vector<unsigned int> nodes;
     
-    Graph (char *filename, int type);
+    Graph (const char* filename, int type);
     // Graph (const std::string& filename, int type);
     Graph ();
     void clean(int type);
     void renumber(int type);
     void display(int type);
-    void display_binary(char *filename, char *filename_w, int type);
+    void display_binary(const char *filename, char *filename_w, int type);
 };
 
 #endif // GRAPH_H

@@ -25,7 +25,7 @@ BGraph::BGraph() {
   total_weight = 0;
 }
 
-BGraph::BGraph(char *filename, char *filename_w, int type) {
+BGraph::BGraph(const char *filename, char *filename_w, int type) {
   ifstream finput;
   finput.open(filename,fstream::in | fstream::binary);
 
