@@ -11,31 +11,34 @@ link_libraries(m)
 
 # Add external includes
 include_directories(${CMAKE_SOURCE_DIR}/external/argparse/include)
+include_directories(${CMAKE_SOURCE_DIR}/external/louvain_method)
 
 
 # Community executable (graph_binary.o community.o main_community.o)
-add_executable(community
-        src/main_community.cpp
-        src/graph_binary.cpp
-        src/community.cpp)
+#add_executable(community
+#        src/main_community.cpp
+#        src/graph_binary.cpp
+#        src/community.cpp
+#        src/gfa_to_edge_list.cpp)
 
 # Convert executable (graph.o main_convert.o)
-add_executable(convert
-        src/main_convert.cpp
-        src/graph.cpp)
+#add_executable(convert
+#        src/main_convert.cpp
+#        src/graph.cpp)
 
 # Hierarchy executable (main_hierarchy.o)
-add_executable(hierarchy
-        src/main_hierarchy.cpp)
+#add_executable(hierarchy
+#        src/main_hierarchy.cpp)
 
 
 add_executable(test_binary_hash
         src/test_binary_hash.cpp)
 
-add_executable(gfa_to_edge_list
-        scripts/gfa_to_edge_list.cpp
-        src/graph.cpp
-        src/graph_binary.cpp)
+add_executable(index_gfa
+        src/index_gfa.cpp
+        external/louvain_method/graph.cpp
+        external/louvain_method/graph_binary.cpp
+        external/louvain_method/community.cpp)
 
 add_executable(test_file_reading
         scripts/test_file_reading.cpp)

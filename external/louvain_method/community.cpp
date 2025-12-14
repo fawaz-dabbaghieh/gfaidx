@@ -18,7 +18,7 @@
 
 using namespace std;
 
-Community::Community(char * filename, char * filename_w, int type, int nbp, double minm) {
+Community::Community(const char * filename, char * filename_w, int type, int nbp, double minm) {
   g = BGraph(filename, filename_w, type);
   // when displaying reverse, the graph seems correct
   // g.display_reverse();
