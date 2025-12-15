@@ -8,11 +8,10 @@
 #include <map>
 
 #include <argparse/argparse.hpp>
+#include <community.h>
+#include <graph.h>
+#include <graph_binary.h>
 #include <sys/stat.h>
-
-#include "../external/louvain_method/graph.h"
-#include "../external/louvain_method//graph_binary.h"
-#include "../external/louvain_method/community.h"
 
 
 #define WEIGHTED     0
@@ -22,8 +21,27 @@ int nb_pass    = 0;
 double precision = 0.000001;
 int display_level = -1;
 int k1 = 16;
+unsigned int N_NODES = 0;
+unsigned int N_EDGES = 0;
 
-unsigned int N_LINKS = 0;
+
+
+class Timer {
+    using Clock = std::chrono::steady_clock;
+
+    Clock::time_point m_beg {
+        Clock::now()
+    };
+
+    public:
+        void reset() {
+            m_beg = Clock::now();
+        }
+        // Returns elapsed time in seconds as a double
+        [[nodiscard]] double elapsed() const {
+            return std::chrono::duration_cast<std::chrono::duration<double>>(Clock::now() - m_beg).count();
+        }
+    };
 
 
 bool file_exists(const char* file_name) {
@@ -107,11 +125,11 @@ std::pair<std::string, std::string> split_string(const std::string& line, char d
 }
 
 
-inline void get_int_node_id(std::map<std::string, unsigned int>& node_id_map, const std::string& node_id, unsigned int &int_id) {
+inline void get_int_node_id(std::unordered_map<std::string, unsigned int>& node_id_map, const std::string& node_id, unsigned int &int_id) {
     if (node_id_map.find(node_id) == node_id_map.end()) { // new node
-        node_id_map[node_id] = N_LINKS;
-        int_id = N_LINKS;
-        N_LINKS++;
+        node_id_map[node_id] = N_NODES;
+        int_id = N_NODES;
+        N_NODES++;
         // return node_id_map.size();
     } else {
         int_id = node_id_map[node_id];
@@ -145,7 +163,7 @@ void parse_args(int argc, char** argv, argparse::ArgumentParser& parser) {
 
 
 void generate_edgelist(const std::string& input_gfa, const std::string& output_edges, const std::string& tmp_edgelist,
-    std::map<std::string, unsigned int>& node_id_map) {
+    std::unordered_map<std::string, unsigned int>& node_id_map) {
     std::string line;
 
     std::ifstream in(input_gfa);
@@ -157,11 +175,14 @@ void generate_edgelist(const std::string& input_gfa, const std::string& output_e
     // Graph graph;
     bool first_line = true;
     unsigned int line_counter = 0;
+    std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
+
     while (std::getline(in, line)) {
         if (line_counter % 500000 == 0) std::cout << get_time() << ": Read " << line_counter << " lines" << std::endl;
         line_counter++;
         // todo: need to change this later to better way of reading the big GFA files, buffer or mmap
         if (line[0] == 'L') {
+            N_EDGES++;
             std::pair<std::string, std::string> edge = split_string(line);
             unsigned int src, dest;
             get_int_node_id(node_id_map, edge.first, src);
@@ -183,7 +204,7 @@ void generate_edgelist(const std::string& input_gfa, const std::string& output_e
 }
 
 
-inline void print_c_stats(Community& c, int level) {
+inline void print_c_stats(const Community& c, const int level) {
     std::cout << get_time () << ": level " << level
     << ": network size: "
     << c.g.nb_nodes << " nodes, "
@@ -191,7 +212,10 @@ inline void print_c_stats(Community& c, int level) {
 }
 
 
-void output_communities(BGraph& g, const std::string& out_file) {
+void output_communities(const BGraph& g, const std::string& out_file, const std::unordered_map<std::string, unsigned int>& node_id_map) {
+    std::vector<std::string> id_to_node(node_id_map.size());
+    for (const auto& p : node_id_map) id_to_node[p.second] = p.first;
+
     if (!file_writable(out_file.c_str())) {
         std::cerr << "Output file is not writable: " << out_file << std::endl;
         exit(1);
@@ -201,7 +225,8 @@ void output_communities(BGraph& g, const std::string& out_file) {
     for (size_t i = 0; i < g.nodes.size(); i++) {
         out << "Community_" << i << ": ";
         for (int j : g.nodes[i]) {
-            out<< j << " ";
+            out << id_to_node[j] << " ";
+            // out<< j << " ";
         }
         out << std::endl;
     }
@@ -213,16 +238,15 @@ void generate_communities(const std::string& binary_graph, BGraph& g, int displa
     // BGraph g;
     bool improvement = true;
     double mod = c.modularity();
-    double new_mod;
     int level=0;
 
     int iterations = 0;
-    // added the upper bound on iteration just to not stuck in an endless loops during bugs
+    // added the upper bound on iteration just to not get stuck in an endless loop during bugs
     while ((iterations < 50) & improvement) {
         iterations++;
         print_c_stats(c, level);
         improvement = c.one_level();
-        new_mod = c.modularity();
+        const double new_mod = c.modularity();
         level++;
         g = c.partition2graph_binary();
         c = Community(g, -1, precision);
@@ -232,21 +256,13 @@ void generate_communities(const std::string& binary_graph, BGraph& g, int displa
 }
 
 
-// I can start filling the graph from louvain method here by adding one connection at a time
-// convert to binary graph.display_binary()
-// clean everything to save memory
-// output the node_str_id -> int_id map into a file
-// sort it on disk with sort to save memory
-// do the community detection on the binary graph file
-// output the highest level to disk (or maybe I can access it internally easily, not sure yet)
-// read the sorted node_str_ids but only the first column and put that in a vector
-// I can put that in a vector as well I think because the node IDs are ints and sorted
 int main(int argc, char** argv) {
-    // if (argc < 3) {
-    //     std::cerr << "usage: " << argv[0] << " <input_gfa> <output_edges>\n"; return 1;
-    // }
 
-    argparse::ArgumentParser program("gfaidx");
+    /*
+     * parse arguments and check inputs/outputs
+     */
+    Timer total_time;
+    argparse::ArgumentParser program("gfaidx", "0.1.0");
     parse_args(argc, argv, program);
 
     auto input_gfa = program.get<std::string>("in_gfa");
@@ -267,64 +283,79 @@ int main(int argc, char** argv) {
         std::cerr << "Could not open input file: " << input_gfa << std::endl; return 1;
     }
 
+    Timer timer;
+    /*
+     * creating the edge list from the GFA file
+     */
     // todo: I probably want to change this
-    std::map<std::string, unsigned int> node_id_map;
+    //     also change the hard-coded tmp locations to be in the specified tmp file
+    std::unordered_map<std::string, unsigned int> node_id_map;
     std::string tmp_edgelist = "../test_graphs/tmp_edgelist.txt";
-    // generates the edges list from the GFA with integer node IDs
+    // generates the edge list from the GFA with integer node IDs
     std::cout << get_time() << ": Generating the edges list" << std::endl;
+    timer.reset();
     generate_edgelist(input_gfa, tmp_edgelist, tmp_edgelist, node_id_map);
-    std::cout << get_time() << ": Finished generating the edges list" << std::endl;
+    std::cout << get_time() << ": Finished generating the edges list in " << timer.elapsed() << " seconds" << std::endl;
+    std::cout << get_time() << ": The GFA has " << N_NODES << " S lines, and " << N_EDGES << " L lines"<< std::endl;
 
-    // uint32_t n_nodes = node_id_map.size();
-    // graph.nodes.resize(n_nodes);
-    // for (auto& pair : node_id_map) {
-        // graph.nodes[pair.second - 1] = pair.second;
-    // }
-
+    /*
+     * sorting the edge list with linux sort
+     */
     std::string sorted_tmp_edgelist = "../test_graphs/tmp_edgelist_sorted.txt";
     std::string tmp_dir = "../test_graphs/";
-
+    timer.reset();
     std::cout << get_time() << ": Sorting the edges" << std::endl;
     run_sort(tmp_edgelist, sorted_tmp_edgelist, tmp_dir);
-    std::cout << get_time() << ": Finished sorting the edges: " << std::endl;
+    std::cout << get_time() << ": Finished sorting the edges in " << timer.elapsed() << " seconds" << std::endl;
 
-    // std::string x = "../test_graphs/tmp_edgelist_sorted.txt";
-
-    // Graph graph(x_array, UNWEIGHTED);
+    /*
+     * loading the graph from the edge list with the louvain graph class
+     */
+    std::cout << get_time() << ": Loading the edge list from disk" << std::endl;
+    timer.reset();
     Graph graph(sorted_tmp_edgelist.c_str(), UNWEIGHTED);
-    std::cout << get_time() << ": Finished loading the graph from disk" << std::endl;
+    std::cout << get_time() << ": Finished loading the edge list from disk in " << timer.elapsed() << " seconds" << std::endl;
 
+    /*
+     * converting the graph to binary format for faster processing
+     */
     // graph.renumber(UNWEIGHTED);
     std::string tmp_binary = "../test_graphs/tmp_binary.bin";
-    std::cout <<  get_time() << ": Saving the graph as a binary to disk to: " << out_comms << std::endl;
+    std::cout <<  get_time() << ": Saving the graph as compressed a binary to disk to: " << out_comms << std::endl;
+    timer.reset();
     graph.display_binary(tmp_binary.c_str(), nullptr, UNWEIGHTED);
-    std::cout <<  get_time() << ": Finished saving the binary graph to disk" << std::endl;
+    std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
 
-    std::cout << get_time () << ": Loading the binary graph from disk" << std::endl;
-    // BGraph bgraph(output_bin.c_str(), nullptr, UNWEIGHTED);
+    /*
+     * performing community detection on the binary graph
+     */
+    timer.reset();
+    std::cout << get_time () << ": Starting community detection" << std::endl;
+    BGraph final_graph;
+    generate_communities(tmp_binary, final_graph, display_level);
+    std::cout << get_time () << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
+
+    std::cout << get_time () << ": Outputting the communities" << std::endl;
+    output_communities(final_graph, out_comms, node_id_map);
+
     if (!keep_tmp) {
         std::cout << get_time () << ": Removing the temporary files" << std::endl;
         remove_file(tmp_edgelist.c_str());
         remove_file(sorted_tmp_edgelist.c_str());
+        remove_file(tmp_binary.c_str());
     }
 
-    std::cout << get_time () << ": Starting community detection" << std::endl;
-    BGraph final_graph;
-    generate_communities(tmp_binary, final_graph, display_level);
-    std::cout << get_time () << ": Finished community detection" << std::endl;
-    // final_graph.display();
-    std::cout << get_time () << ": Outputting the communities" << std::endl;
-    output_communities(final_graph, out_comms);
-    std::cout << get_time () << ": Done!" << std::endl;
-    // the groupings are in the final graph
-    // final_graph.nodes is a vector of vectors of ints, the indx is the community number
-    // and the inside vector has the node IDs groupings basically
-    // so I now have the association between the int node IDs, and the community ID
-    // I can fill this information in the map maybe
-    // so I have string_id: <int_id, community_id>
-    // I can now loop through the original GFA file and start sorting the lines
-    // i.e., for each line in the GFA, write it in its corresponding community file
-    //    if an edge belong to two different communities, write it in its own file
+    std::cout << get_time () << ": Finished in " << total_time.elapsed() << " seconds" << std::endl;
 
     return 0;
 }
+
+// the groupings are in the final graph
+// final_graph.nodes is a vector of vectors of ints, the index is the community number
+// and the inside vector has the node IDs groupings basically
+// so I now have the association between the int node IDs, and the community ID
+// I can fill this information in the map maybe
+// so I have string_id: <int_id, community_id>
+// I can now loop through the original GFA file and start sorting the lines
+// i.e., for each line in the GFA, write it in its corresponding community file
+//    if an edge belong to two different communities, write it in its own file
