@@ -11,7 +11,10 @@
 #include <community.h>
 #include <graph.h>
 #include <graph_binary.h>
-#include <sys/stat.h>
+
+#include "fs/fs_helpers.h"
+#include "fs/Reader.h"
+#include "utils/Timer.h"
 
 
 #define WEIGHTED     0
@@ -23,57 +26,6 @@ int display_level = -1;
 int k1 = 16;
 unsigned int N_NODES = 0;
 unsigned int N_EDGES = 0;
-
-
-
-class Timer {
-    using Clock = std::chrono::steady_clock;
-
-    Clock::time_point m_beg {
-        Clock::now()
-    };
-
-    public:
-        void reset() {
-            m_beg = Clock::now();
-        }
-        // Returns elapsed time in seconds as a double
-        [[nodiscard]] double elapsed() const {
-            return std::chrono::duration_cast<std::chrono::duration<double>>(Clock::now() - m_beg).count();
-        }
-    };
-
-
-bool file_exists(const char* file_name) {
-    struct stat st{};
-    return stat(file_name, &st) == 0;
-}
-
-bool dir_exists(const char* dir_name) {
-    struct stat st{};
-    return stat(dir_name, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-bool file_writable(const char* file_name) {
-    std::ofstream f(file_name);
-    return f.good();
-}
-
-bool remove_file(const char * file ) {
-    if (std::remove(file) != 0){
-        std::cerr << "Error: could not remove file " << file << std::endl;
-        return false;
-    }
-    return true;
-}
-
-inline std::string get_time() {
-    std::chrono::time_point now = std::chrono::system_clock::now();
-    time_t in_time_t = std::chrono::system_clock::to_time_t(now);
-    std::string time_str = std::ctime(&in_time_t);
-    time_str.pop_back();
-    return time_str;
-}
 
 
 bool command_exists(const std::string& command="sort") {
@@ -345,7 +297,7 @@ int main(int argc, char** argv) {
         remove_file(tmp_binary.c_str());
     }
 
-    std::cout << get_time () << ": Finished in " << total_time.elapsed() << " seconds" << std::endl;
+    std::cout << get_time () << ": Finished in total time of " << total_time.elapsed() << " seconds" << std::endl;
 
     return 0;
 }
