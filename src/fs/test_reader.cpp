@@ -12,7 +12,10 @@ int main(int argc, char** argv) {
     std::string test_out = "../test_graphs/test_reader_out.gfa";
 
     Reader r;
-    if (!r.open(argv[1])) { /* handle error */ }
+    if (!r.open(argv[1])) {
+        std::cerr << "Could not open file: " << argv[1] << std::endl;
+        return 1;
+    }
 
     std::string_view line;
     uint s_number = 0;
@@ -20,7 +23,7 @@ int main(int argc, char** argv) {
     int counter = 0;
 
     std::ofstream out(test_out);
-    while (r.readLine(line)) {
+    while (r.read_line(line)) {
         if (line.empty()) continue;
         counter ++;
         // if (counter < 200) std::cout << line     << std::endl;

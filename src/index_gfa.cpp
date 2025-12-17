@@ -77,6 +77,34 @@ std::pair<std::string, std::string> split_string(const std::string& line, char d
 }
 
 
+void offending_line(const std::string_view line) {
+    std::cerr << "Offending line: " << line << std::endl;
+    exit(1);
+}
+
+std::pair<std::string, std::string> extract_L_endpoints(std::string_view line) {
+
+    size_t t1 = line.find('\t');
+    if (t1 == std::string_view::npos) offending_line(line);
+
+    size_t t2 = line.find('\t', t1 + 1);
+    if (t2 == std::string_view::npos) offending_line(line);
+
+    size_t t3 = line.find('\t', t2 + 1);
+    if (t3 == std::string_view::npos) offending_line(line);
+
+    size_t t4 = line.find('\t', t3 + 1);
+    if (t4 == std::string_view::npos) offending_line(line);
+
+    // token[1] = (t1+1 .. t2-1), token[3] = (t3+1 .. t4-1)
+    std::string_view from = line.substr(t1 + 1, t2 - (t1 + 1));
+    std::string_view to   = line.substr(t3 + 1, t4 - (t3 + 1));
+
+    return {std::string(from), std::string(to)};
+
+}
+
+
 inline void get_int_node_id(std::unordered_map<std::string, unsigned int>& node_id_map, const std::string& node_id, unsigned int &int_id) {
     if (node_id_map.find(node_id) == node_id_map.end()) { // new node
         node_id_map[node_id] = N_NODES;
@@ -116,12 +144,19 @@ void parse_args(int argc, char** argv, argparse::ArgumentParser& parser) {
 
 void generate_edgelist(const std::string& input_gfa, const std::string& output_edges, const std::string& tmp_edgelist,
     std::unordered_map<std::string, unsigned int>& node_id_map) {
-    std::string line;
+    std::string_view line;
 
-    std::ifstream in(input_gfa);
-    if (!in.good()) {
-        std::cerr << "Could not open input file: " << input_gfa << std::endl; exit(1);
+    Reader file_reader;
+    if (!file_reader.open(input_gfa)) {
+        std::cerr << "Could not open file: " << input_gfa << std::endl;
+        exit(1);
     }
+
+    // std::ifstream in(input_gfa);
+    // if (!in.good()) {
+        // std::cerr << "Could not open input file: " << input_gfa << std::endl; exit(1);
+    // }
+
     ofstream out;
     out.open(tmp_edgelist);
     // Graph graph;
@@ -129,13 +164,13 @@ void generate_edgelist(const std::string& input_gfa, const std::string& output_e
     unsigned int line_counter = 0;
     std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
 
-    while (std::getline(in, line)) {
+    // while (std::getline(in, line)) {
+    while (file_reader.read_line(line)) {
         if (line_counter % 500000 == 0) std::cout << get_time() << ": Read " << line_counter << " lines" << std::endl;
         line_counter++;
-        // todo: need to change this later to better way of reading the big GFA files, buffer or mmap
         if (line[0] == 'L') {
             N_EDGES++;
-            std::pair<std::string, std::string> edge = split_string(line);
+            std::pair<std::string, std::string> edge = extract_L_endpoints(line);
             unsigned int src, dest;
             get_int_node_id(node_id_map, edge.first, src);
             get_int_node_id(node_id_map, edge.second, dest);
@@ -152,7 +187,7 @@ void generate_edgelist(const std::string& input_gfa, const std::string& output_e
         }
     }
     out.close();
-    in.close();
+    // in.close();
 }
 
 

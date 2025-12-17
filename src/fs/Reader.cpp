@@ -21,21 +21,20 @@
 #include <unistd.h>
 
 
-
-void Reader::ensureBufferAllocated() {
+void Reader::ensure_buffer_allocated() {
     if (!buf_.empty()) return;
 
-    if (opt_.readSize == 0) opt_.readSize = 8192; // safety
-    buf_.resize(opt_.readSize * 2 + 1);
+    if (opt_.read_size == 0) opt_.read_size = 64 * 1024; // safety
+    buf_.resize(opt_.read_size * 2 + 1);
 }
 
-// Reader::Reader() {
-//     // opt_ already has defaults; just allocate
-//     ensureBufferAllocated();
-// }
+Reader::Reader() {
+    // opt_ already has defaults; just allocate
+    ensure_buffer_allocated();
+}
 
 Reader::Reader(const Options& opt) : opt_(opt) {
-    ensureBufferAllocated();
+    ensure_buffer_allocated();
 }
 
 // Reader::Reader(const Options& opt) : opt_(opt) {
@@ -76,7 +75,7 @@ Reader::~Reader() { close(); }
 
 bool Reader::open(const std::string& path) {
     close();
-    ensureBufferAllocated();
+    ensure_buffer_allocated();
 
     last_errno_ = 0;
     eof_ = false;
@@ -114,7 +113,7 @@ bool Reader::refill() {
     end_ = rem;
 
     const std::size_t cap = buf_.size() - end_;
-    const std::size_t want = opt_.readSize < cap ? opt_.readSize : cap;
+    const std::size_t want = opt_.read_size < cap ? opt_.read_size : cap;
 
     ssize_t n = ::read(fd_, buf_.data() + end_, want);
     if (n < 0) {
@@ -129,7 +128,7 @@ bool Reader::refill() {
     return true;
 }
 
-bool Reader::ensureEolOrEof() {
+bool Reader::ensure_Eol_or_EoF() {
     const char* base = buf_.data();
     const std::size_t avail = (end_ > cur_) ? (end_ - cur_) : 0;
 
@@ -148,9 +147,9 @@ bool Reader::ensureEolOrEof() {
 
     for (;;) {
         // append remainder
-        const std::size_t r = (end_ > cur_) ? (end_ - cur_) : 0;
-        if (r > 0) {
-            long_line_.append(base + cur_, r);
+        const std::size_t remainder = (end_ > cur_) ? (end_ - cur_) : 0;
+        if (remainder > 0) {
+            long_line_.append(base + cur_, remainder);
             cur_ = end_;
         }
 
@@ -166,7 +165,7 @@ bool Reader::ensureEolOrEof() {
 }
 
 
-bool Reader::readLine(std::string_view& out) {
+bool Reader::read_line(std::string_view& out) {
     out = {};
 
     // If last call returned a view into long_line_, it's now safe to clear it.
@@ -185,7 +184,7 @@ bool Reader::readLine(std::string_view& out) {
     }
 
     // Ensure we have an EOL or EOF (possibly long-line assembly)
-    if (!ensureEolOrEof()) return false;
+    if (!ensure_Eol_or_EoF()) return false;
 
     const char* base = buf_.data();
 
@@ -196,7 +195,7 @@ bool Reader::readLine(std::string_view& out) {
         const char* nl = (avail > 0) ? static_cast<const char*>(std::memchr(base + cur_, '\n', avail)) : nullptr;
 
         if (nl) {
-            const std::size_t take = static_cast<std::size_t>(nl - (base + cur_));
+            const auto take = static_cast<std::size_t>(nl - (base + cur_));
             long_line_.append(base + cur_, take);
             file_off_ += take;
 
@@ -211,7 +210,7 @@ bool Reader::readLine(std::string_view& out) {
         }
 
         // Strip CR if requested
-        if (opt_.stripCR && !long_line_.empty() && long_line_.back() == '\r') {
+        if (opt_.strip_cr && !long_line_.empty() && long_line_.back() == '\r') {
             long_line_.pop_back();
         }
 
@@ -219,6 +218,7 @@ bool Reader::readLine(std::string_view& out) {
         out = std::string_view(long_line_.data(), long_line_.size());
         assembling_long_ = false;
         long_ready_ = true;
+
         return true;
     }
 
@@ -227,16 +227,14 @@ bool Reader::readLine(std::string_view& out) {
     const char* nl = (avail > 0) ? static_cast<const char*>(std::memchr(base + cur_, '\n', avail)) : nullptr;
 
     if (nl) {
-        const std::size_t len = static_cast<std::size_t>(nl - (base + cur_));
+        const auto len = static_cast<std::size_t>(nl - (base + cur_));
         std::size_t out_len = len;
 
         // Handle CRLF
-        if (opt_.stripCR && out_len > 0 && base[cur_ + out_len - 1] == '\r') {
+        if (opt_.strip_cr && out_len > 0 && base[cur_ + out_len - 1] == '\r') {
             --out_len;
         }
-
         out = std::string_view(base + cur_, out_len);
-
         // Consume line + '\n'
         cur_ += len + 1;
         file_off_ += (len + 1);
@@ -248,7 +246,7 @@ bool Reader::readLine(std::string_view& out) {
     // No '\n' found: must be EOF and unterminated last line
     if (eof_) {
         std::size_t len = avail;
-        if (opt_.stripCR && len > 0 && base[cur_ + len - 1] == '\r') --len;
+        if (opt_.strip_cr && len > 0 && base[cur_ + len - 1] == '\r') --len;
 
         out = std::string_view(base + cur_, len);
 
@@ -260,11 +258,11 @@ bool Reader::readLine(std::string_view& out) {
     }
 
     // Should not happen due to ensureEolOrEof(), but keep it safe:
-    return readLine(out);
+    return read_line(out);
 }
 
-std::string_view Reader::readLineView(bool& ok) {
+std::string_view Reader::read_line_view(bool& ok) {
     std::string_view v;
-    ok = readLine(v);
+    ok = read_line(v);
     return v;
 }

@@ -26,11 +26,11 @@
 class Reader {
 public:
     struct Options {
-        std::size_t readSize = 8192;    // similar to IOUNIT-ish defaults
-        bool stripCR = true;            // handle Windows CRLF files
+        std::size_t read_size = 64 * 1024;    // similar to IOUNIT-ish defaults
+        bool strip_cr = true;            // handle Windows CRLF files
     };
 
-    Reader() = default;
+    Reader();
     explicit Reader(const Options& opt);
 
     Reader(const Reader&) = delete;
@@ -47,30 +47,36 @@ public:
     // Close the file (safe to call multiple times).
     void close();
 
-    bool isOpen() const { return fd_ >= 0; }
+    [[nodiscard]] bool is_open() const { return fd_ >= 0; }
 
     // Reads the next line. Returns false on EOF (or error; check lastErrno()).
     // The returned view excludes the trailing '\n' (and optional '\r').
-    bool readLine(std::string_view& out);
+    bool read_line(std::string_view& out);
 
     // Convenience overload returning a view.
-    std::string_view readLineView(bool& ok);
+    std::string_view read_line_view(bool& ok);
 
     // 0 if no error, else errno from the last failing syscall.
-    int lastErrno() const { return last_errno_; }
+    [[nodiscard]] int last_error_no() const {
+        return last_errno_;
+    }
 
     // Number of lines successfully produced by readLine().
-    std::uint64_t lineNumber() const { return line_no_; }
+    [[nodiscard]] std::uint64_t line_number() const {
+        return line_no_;
+    }
 
     // Approximate file offset of the start of the *next unread* byte.
     // (Useful for debugging/progress; not required for parsing.)
-    std::uint64_t fileOffset() const { return file_off_; }
+    [[nodiscard]] std::uint64_t file_offset() const {
+        return file_off_;
+    }
 
 private:
-    void ensureBufferAllocated();   // <-- add this
+    void ensure_buffer_allocated();   // <-- add this
 
     bool refill();    // "slurp": move remainder to front, read more
-    bool ensureEolOrEof(); // make sure we either find '\n' or hit EOF (or build long line)
+    bool ensure_Eol_or_EoF(); // make sure we either find '\n' or hit EOF (or build long line)
 
     Options opt_;
 

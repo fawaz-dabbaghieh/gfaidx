@@ -3,6 +3,7 @@ A new implementation of my graph index, I wanted to start from scratch.
 Now using a different Louvain Method implementation that uses much less memory.
 
 # TODO
+- [x] Add fast buffer based GFA reader, inspired by `strangepg`
 - [x] Generate edge lists from a GFA
     - [ ] Integrate `strangepg` file reading for faster GFA loading
 - [x] On disk binary search for node IDs to their community ID
