@@ -83,11 +83,17 @@ void parseFileEfficiently(const std::string& filename, size_t bufferSize = 65536
 void normal_reading(const char *filename) {
     std::ifstream in(filename);
     std::string line;
+    long int s_lines = 0;
+    long int l_lines = 0;
     long int n_lines = 0;
     while (std::getline(in, line)) {
+	if (line[0] == 'S') s_lines++;
+	else if (line[0] == 'L') l_lines++;
         n_lines++;
     }
     std::cout << "Number of lines: " << n_lines << std::endl;
+    std::cout << "Number of nodes: " << s_lines << std::endl;
+    std::cout << "Number of edges: " << l_lines << std::endl;
 }
 
 

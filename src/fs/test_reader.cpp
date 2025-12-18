@@ -26,8 +26,9 @@ int main(int argc, char** argv) {
     while (r.read_line(line)) {
         if (line.empty()) continue;
         counter ++;
+	// if (counter % 1000000 == 0) std::cout << "Lines processed: " << counter << std::endl;
         // if (counter < 200) std::cout << line     << std::endl;
-        out << line << std::endl;
+        // out << line << std::endl;
         if (line[0] == 'S') {
             s_number++;
             // parse segment fields by scanning for '\t'
@@ -36,7 +37,7 @@ int main(int argc, char** argv) {
             // parse link fields by scanning for '\t'
         }
     }
-    out.close();
+    // out.close();
     std::cout << "Number of segments: " << s_number << std::endl;
     std::cout << "Number of links: " << l_number << std::endl;
     std::cout << "Number of total lines: " << counter << std::endl;
