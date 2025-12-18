@@ -174,7 +174,10 @@ bool Reader::read_line(std::string_view& out) {
         long_ready_ = false;
     }
 
-    if (fd_ < 0) { last_errno_ = EBADF; return false; }
+    // EBADF is a Bad file descriptor
+    if (fd_ < 0) {
+        last_errno_ = EBADF; return false;
+    }
     last_errno_ = 0;
 
     // If buffer exhausted, refill

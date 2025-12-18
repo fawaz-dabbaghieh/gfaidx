@@ -73,16 +73,16 @@ public:
     }
 
 private:
-    void ensure_buffer_allocated();   // <-- add this
+    void ensure_buffer_allocated();
 
-    bool refill();    // "slurp": move remainder to front, read more
+    bool refill();    // similar to slurp from strangepg: move remainder to front and read more
     bool ensure_Eol_or_EoF(); // make sure we either find '\n' or hit EOF (or build long line)
 
     Options opt_;
 
-    int fd_ = -1;
+    int fd_ = -1;  // file descriptor
     int last_errno_ = 0;
-    bool assembling_long_ = false;   // we are currently assembling a long line spanning refills
+    bool assembling_long_ = false;   // are we assembling a long line or not
     bool long_ready_ = false;        // last call returned a view into long_line_; clear on next call
 
     // Buffer layout:
