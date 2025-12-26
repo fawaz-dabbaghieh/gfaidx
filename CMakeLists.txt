@@ -59,8 +59,8 @@ add_executable(rle_test
 
 add_executable(vle_test
         src/compressors/vle_test.cpp
-        src/compressors/compressors.cpp
         src/fs/Reader.cpp
+        src/fs/gfa_line_parsers.cpp
 )
 
 target_link_libraries(index_gfa louvain_method)

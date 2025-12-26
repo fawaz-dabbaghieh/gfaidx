@@ -57,26 +57,25 @@ bool run_sort(const std::string& input_edges, const std::string& output_edges, c
     return (WEXITSTATUS(code) == 0);
 }
 
-std::pair<std::string, std::string> split_string(const std::string& line, char delimiter = '\t') {
-    std::vector<std::string> tokens;
-    std::string currentToken;
-    for (char c : line) {
-        if (c == delimiter) {
-            tokens.push_back(currentToken);
-            currentToken.clear();
-        } else {
-            currentToken += c;
-        }
-    }
-    tokens.push_back(currentToken); // Add the last token
-    // an L line should be at least 5 items
-    if (tokens.size() < 5) {
-        std::cerr << "Offending L line: " << line << std::endl;
-        exit(1);
-    }
-    return {tokens[1], tokens[3]};
-}
-
+// std::pair<std::string, std::string> split_string(const std::string& line, char delimiter = '\t') {
+//     std::vector<std::string> tokens;
+//     std::string currentToken;
+//     for (const char c : line) {
+//         if (c == delimiter) {
+//             tokens.push_back(currentToken);
+//             currentToken.clear();
+//         } else {
+//             currentToken += c;
+//         }
+//     }
+//     tokens.push_back(currentToken); // Add the last token
+//     // an L line should be at least 5 items
+//     if (tokens.size() < 5) {
+//         std::cerr << "Offending L line: " << line << std::endl;
+//         exit(1);
+//     }
+//     return {tokens[1], tokens[3]};
+// }
 
 
 inline void get_int_node_id(std::unordered_map<std::string, unsigned int>& node_id_map, const std::string& node_id, unsigned int &int_id) {
@@ -84,11 +83,9 @@ inline void get_int_node_id(std::unordered_map<std::string, unsigned int>& node_
         node_id_map[node_id] = N_NODES;
         int_id = N_NODES;
         N_NODES++;
-        // return node_id_map.size();
     } else {
         int_id = node_id_map[node_id];
     }
-    // return node_id_map[node_id];
 }
 
 void parse_args(int argc, char** argv, argparse::ArgumentParser& parser) {
@@ -131,7 +128,7 @@ void generate_edgelist(const std::string& input_gfa, const std::string& tmp_edge
         // std::cerr << "Could not open input file: " << input_gfa << std::endl; exit(1);
     // }
 
-    ofstream out;
+    std::ofstream out;
     out.open(tmp_edgelist);
     // Graph graph;
     bool first_line = true;
@@ -164,7 +161,7 @@ void generate_edgelist(const std::string& input_gfa, const std::string& tmp_edge
         else if (line[0] == 'P'){
             std::string path_name;
             std::vector<std::string> node_list;
-            extract_P_endpoints(line, path_name, node_list);
+            extract_P_nodes(line, path_name, node_list);
             paths_map[path_name] = node_list;
         }
     }
