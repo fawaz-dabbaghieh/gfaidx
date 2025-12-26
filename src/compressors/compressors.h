@@ -12,6 +12,8 @@
 #include <vector>
 #include <stdexcept>
 #include <utility>
+#include <unordered_map>
+#include <charconv>
 
 
 // runlength encoding of the sequences in the S line
