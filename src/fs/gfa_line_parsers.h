@@ -17,4 +17,6 @@ std::pair<std::string, std::string> extract_L_nodes(std::string_view line);
 void extract_P_nodes(std::string_view line, std::string& path_name,
     std::vector<std::string>& node_list);
 
+void extract_S_node(std::string_view line, std::string& seq_name, std::string& seq);
+
 #endif //GFAIDX_GFA_LINE_PARSERS_H

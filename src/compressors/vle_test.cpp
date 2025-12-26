@@ -34,16 +34,18 @@ int main(int argc, char** argv) {
     long int progress_counter = 0;
     while (r.read_line(line)) {
         // I know that all the L lines will be first
-        if (line[0] == 'L') {
+        if (line[0] == 'S') {
             progress_counter++;
             if (progress_counter % 5000000 == 0) {
                 std::cout << "Number of L lines processed: " << progress_counter << std::endl;
             }
-
-            auto [first, second] = extract_L_nodes(line);
-            unsigned int src, dest;
-            get_int_node_id(node_id_map, first, src);
-            get_int_node_id(node_id_map, second, dest);
+            std::string node_name;
+            std::string node_seq;
+            extract_S_node(line, node_name, node_seq);
+            get_int_node_id(node_id_map, node_name, N_NODES);
+            // unsigned int src, dest;
+            // get_int_node_id(node_id_map, first, src);
+            // get_int_node_id(node_id_map, second, dest);
         }
     }
     r.close();
