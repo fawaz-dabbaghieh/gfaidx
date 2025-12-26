@@ -14,6 +14,7 @@
 
 #include "fs/fs_helpers.h"
 #include "fs/Reader.h"
+#include "fs/gfa_line_parsers.h"
 #include "utils/Timer.h"
 
 
@@ -77,33 +78,6 @@ std::pair<std::string, std::string> split_string(const std::string& line, char d
 }
 
 
-void offending_line(const std::string_view line) {
-    std::cerr << "Offending line: " << line << std::endl;
-    exit(1);
-}
-
-std::pair<std::string, std::string> extract_L_endpoints(std::string_view line) {
-
-    size_t t1 = line.find('\t');
-    if (t1 == std::string_view::npos) offending_line(line);
-
-    size_t t2 = line.find('\t', t1 + 1);
-    if (t2 == std::string_view::npos) offending_line(line);
-
-    size_t t3 = line.find('\t', t2 + 1);
-    if (t3 == std::string_view::npos) offending_line(line);
-
-    size_t t4 = line.find('\t', t3 + 1);
-    if (t4 == std::string_view::npos) offending_line(line);
-
-    // token[1] = (t1+1 .. t2-1), token[3] = (t3+1 .. t4-1)
-    std::string_view from = line.substr(t1 + 1, t2 - (t1 + 1));
-    std::string_view to   = line.substr(t3 + 1, t4 - (t3 + 1));
-
-    return {std::string(from), std::string(to)};
-
-}
-
 
 inline void get_int_node_id(std::unordered_map<std::string, unsigned int>& node_id_map, const std::string& node_id, unsigned int &int_id) {
     if (node_id_map.find(node_id) == node_id_map.end()) { // new node
@@ -142,7 +116,7 @@ void parse_args(int argc, char** argv, argparse::ArgumentParser& parser) {
 }
 
 
-void generate_edgelist(const std::string& input_gfa, const std::string& output_edges, const std::string& tmp_edgelist,
+void generate_edgelist(const std::string& input_gfa, const std::string& tmp_edgelist,
     std::unordered_map<std::string, unsigned int>& node_id_map) {
     std::string_view line;
 
@@ -165,15 +139,17 @@ void generate_edgelist(const std::string& input_gfa, const std::string& output_e
     std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
 
     // while (std::getline(in, line)) {
+    std::unordered_map<std::string, std::vector<std::string>> paths_map;
+
     while (file_reader.read_line(line)) {
         if (line_counter % 500000 == 0) std::cout << get_time() << ": Read " << line_counter << " lines" << std::endl;
         line_counter++;
         if (line[0] == 'L') {
             N_EDGES++;
-            std::pair<std::string, std::string> edge = extract_L_endpoints(line);
+            auto [fst, snd] = extract_L_nodes(line);
             unsigned int src, dest;
-            get_int_node_id(node_id_map, edge.first, src);
-            get_int_node_id(node_id_map, edge.second, dest);
+            get_int_node_id(node_id_map, fst, src);
+            get_int_node_id(node_id_map, snd, dest);
 
             // to avoid the last empty line
             if (first_line) {
@@ -184,6 +160,12 @@ void generate_edgelist(const std::string& input_gfa, const std::string& output_e
                 if (src > dest) out << "\n" << dest << " " << src;
                 else out << "\n" << src << " " << dest;
             }
+        }
+        else if (line[0] == 'P'){
+            std::string path_name;
+            std::vector<std::string> node_list;
+            extract_P_endpoints(line, path_name, node_list);
+            paths_map[path_name] = node_list;
         }
     }
     out.close();
@@ -281,7 +263,7 @@ int main(int argc, char** argv) {
     // generates the edge list from the GFA with integer node IDs
     std::cout << get_time() << ": Generating the edges list" << std::endl;
     timer.reset();
-    generate_edgelist(input_gfa, tmp_edgelist, tmp_edgelist, node_id_map);
+    generate_edgelist(input_gfa, tmp_edgelist, node_id_map);
     std::cout << get_time() << ": Finished generating the edges list in " << timer.elapsed() << " seconds" << std::endl;
     std::cout << get_time() << ": The GFA has " << N_NODES << " S lines, and " << N_EDGES << " L lines"<< std::endl;
 

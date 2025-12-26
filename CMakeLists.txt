@@ -40,6 +40,7 @@ add_executable(index_gfa
         src/index_gfa.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
+        src/fs/gfa_line_parsers.cpp
 #        external/louvain_method/community.cpp
 #        external/louvain_method/graph.cpp
 #        external/louvain_method/graph_binary.cpp
@@ -47,6 +48,18 @@ add_executable(index_gfa
 
 add_executable(test_reader
         src/fs/test_reader.cpp
+        src/fs/Reader.cpp
+)
+
+add_executable(rle_test
+        src/compressors/rle_test.cpp
+        src/compressors/compressors.cpp
+        src/fs/Reader.cpp
+)
+
+add_executable(vle_test
+        src/compressors/vle_test.cpp
+        src/compressors/compressors.cpp
         src/fs/Reader.cpp
 )
 

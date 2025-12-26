@@ -10,15 +10,20 @@
  *
  * readLine() returns a string_view valid until the next readLine() call.
  * Long lines (> buffer) are supported via an internal fallback string.
+ *
+ * I need to check if I can change the lon_line_ string assembly and not use append
+ * Maybe I can just keep adding to the buffer, however, this will introduce other edge cases:
+ * e.g., the buffer can get way too big if there's a really long line, so I need to limit the buffer size
+ * which will introduce too much complexity to the code...hmmm, I think for now I'll leave it as is with the append
+ * In the end, majority of lines are smaller than the buffer, so it's only the annoying path lines that are very long
  */
-
-#include "Reader.h"
 
 #include <cerrno>
 #include <cstring>
-
 #include <fcntl.h>
 #include <unistd.h>
+
+#include "Reader.h"
 
 
 void Reader::ensure_buffer_allocated() {
@@ -49,7 +54,6 @@ Reader::Reader(Reader&& other) noexcept {
 Reader& Reader::operator=(Reader&& other) noexcept {
     if (this == &other) return *this;
     close();
-
     opt_ = other.opt_;
     fd_ = other.fd_;
     last_errno_ = other.last_errno_;
@@ -71,7 +75,9 @@ Reader& Reader::operator=(Reader&& other) noexcept {
     return *this;
 }
 
-Reader::~Reader() { close(); }
+Reader::~Reader() {
+    close();
+}
 
 bool Reader::open(const std::string& path) {
     close();
@@ -84,7 +90,8 @@ bool Reader::open(const std::string& path) {
     line_no_ = 0;
     long_line_.clear();
 
-    fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    // O_RDONLY open for reading only
+    fd_ = ::open(path.c_str(), O_RDONLY);
     if (fd_ < 0) {
         last_errno_ = errno;
         return false;
@@ -103,19 +110,21 @@ bool Reader::refill() {
     // Equivalent to strangepg's slurp():
     // - if there is remainder [cur_, end_), memmove it to front
     // - read more into the tail
-    if (eof_) return true;
 
-    const std::size_t rem = (end_ > cur_) ? (end_ - cur_) : 0;
-    if (rem && cur_ > 0) {
-        std::memmove(buf_.data(), buf_.data() + cur_, rem);
+    if (eof_) return true;  // nothing more to read
+
+    const std::size_t remainder = (end_ > cur_) ? (end_ - cur_) : 0;
+    if (remainder && cur_ > 0) {
+        std::memmove(buf_.data(), buf_.data() + cur_, remainder);
     }
     cur_ = 0;
-    end_ = rem;
+    end_ = remainder;
 
+    // when empty, the cap is the complete size
     const std::size_t cap = buf_.size() - end_;
     const std::size_t want = opt_.read_size < cap ? opt_.read_size : cap;
 
-    ssize_t n = ::read(fd_, buf_.data() + end_, want);
+    const ssize_t n = ::read(fd_, buf_.data() + end_, want);
     if (n < 0) {
         last_errno_ = errno;
         return false;
@@ -130,11 +139,11 @@ bool Reader::refill() {
 
 bool Reader::ensure_Eol_or_EoF() {
     const char* base = buf_.data();
-    const std::size_t avail = (end_ > cur_) ? (end_ - cur_) : 0;
+    const std::size_t available = (end_ > cur_) ? (end_ - cur_) : 0;
 
     // Fast path: newline already present in buffer remainder
-    if (avail > 0) {
-        if (std::memchr(base + cur_, '\n', avail) != nullptr) return true;
+    if (available > 0) {
+        if (std::memchr(base + cur_, '\n', available) != nullptr) return true;
         if (eof_) return true; // final unterminated line
     }
 
@@ -145,6 +154,7 @@ bool Reader::ensure_Eol_or_EoF() {
     assembling_long_ = true;
     long_line_.clear();
 
+    // dealing with long file lines
     for (;;) {
         // append remainder
         const std::size_t remainder = (end_ > cur_) ? (end_ - cur_) : 0;
@@ -156,7 +166,9 @@ bool Reader::ensure_Eol_or_EoF() {
         if (!refill()) return false;
         if (cur_ >= end_ && eof_) return true;
 
+        // how much available in buffer
         const std::size_t a = (end_ > cur_) ? (end_ - cur_) : 0;
+        // is there \n
         const void* p = (a > 0) ? std::memchr(base + cur_, '\n', a) : nullptr;
         if (p) return true;
 
@@ -166,6 +178,11 @@ bool Reader::ensure_Eol_or_EoF() {
 
 
 bool Reader::read_line(std::string_view& out) {
+    // We have several cases here:
+    // 1: Buffer is exhausted (empty) so we'll go into refill, e.g., first line
+    // 2: buffer already have data, we need to look for next \n and adjust current and end
+    // 3: We have a long line that doesn't fit in the buffer, so we need use the long_line_ string
+    // Note: I think I need to look into the long_line_ string, maybe there's a better way to do this
     out = {};
 
     // If last call returned a view into long_line_, it's now safe to clear it.
@@ -186,7 +203,8 @@ bool Reader::read_line(std::string_view& out) {
         if (cur_ >= end_ && eof_) return false;
     }
 
-    // Ensure we have an EOL or EOF (possibly long-line assembly)
+    // Ensure we have an \n or we reached the end of the file
+    // possible long line
     if (!ensure_Eol_or_EoF()) return false;
 
     const char* base = buf_.data();
@@ -194,8 +212,8 @@ bool Reader::read_line(std::string_view& out) {
     // If long_line_ is in use, we are assembling a line spanning refills
     if (assembling_long_) {
         // Find '\n' in current buffer chunk (or EOF)
-        const std::size_t avail = (end_ > cur_) ? (end_ - cur_) : 0;
-        const char* nl = (avail > 0) ? static_cast<const char*>(std::memchr(base + cur_, '\n', avail)) : nullptr;
+        const std::size_t available = (end_ > cur_) ? (end_ - cur_) : 0;
+        const char* nl = (available > 0) ? static_cast<const char*>(std::memchr(base + cur_, '\n', available)) : nullptr;
 
         if (nl) {
             const auto take = static_cast<std::size_t>(nl - (base + cur_));
@@ -207,8 +225,8 @@ bool Reader::read_line(std::string_view& out) {
             file_off_ += 1;
         } else {
             // EOF-terminated
-            long_line_.append(base + cur_, avail);
-            file_off_ += avail;
+            long_line_.append(base + cur_, available);
+            file_off_ += available;
             cur_ = end_;
         }
 
@@ -226,9 +244,10 @@ bool Reader::read_line(std::string_view& out) {
     }
 
     // Normal fast path: the whole line is in the buffer
-    const std::size_t avail = (end_ > cur_) ? (end_ - cur_) : 0;
-    const char* nl = (avail > 0) ? static_cast<const char*>(std::memchr(base + cur_, '\n', avail)) : nullptr;
+    const std::size_t available = (end_ > cur_) ? (end_ - cur_) : 0;
+    const char* nl = (available > 0) ? static_cast<const char*>(std::memchr(base + cur_, '\n', available)) : nullptr;
 
+    // line is in buffer, process it
     if (nl) {
         const auto len = static_cast<std::size_t>(nl - (base + cur_));
         std::size_t out_len = len;
@@ -248,19 +267,19 @@ bool Reader::read_line(std::string_view& out) {
 
     // No '\n' found: must be EOF and unterminated last line
     if (eof_) {
-        std::size_t len = avail;
+        std::size_t len = available;
         if (opt_.strip_cr && len > 0 && base[cur_ + len - 1] == '\r') --len;
 
         out = std::string_view(base + cur_, len);
 
         cur_ = end_;
-        file_off_ += avail;
+        file_off_ += available;
 
         ++line_no_;
         return true;
     }
 
-    // Should not happen due to ensureEolOrEof(), but keep it safe:
+    // just to be safe, but shouldn't go in here
     return read_line(out);
 }
 

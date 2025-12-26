@@ -25,9 +25,11 @@
 
 class Reader {
 public:
+
+    // passing this Options struct to keep it more flexible in case I wanted to add more features later
     struct Options {
         std::size_t read_size = 64 * 1024;    // similar to IOUNIT-ish defaults
-        bool strip_cr = true;            // handle Windows CRLF files
+        bool strip_cr = false;            // handle Windows CRLF files
     };
 
     Reader();
