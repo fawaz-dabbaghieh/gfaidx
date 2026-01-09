@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <list>
+#include <functional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -441,7 +442,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
 
     // now we need to map int ID to community ID
     std::vector<uint32_t> node_to_comm(node_id_map.size());
-    for (int c=0 ; c < g.nodes.size() ; c++) {
+    for (int c = 0 ;c < g.nodes.size() ;c++) {
         for (const auto n : g.nodes[c]) {
             node_to_comm[n] = c;
         }

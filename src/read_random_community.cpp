@@ -5,6 +5,7 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <graph_binary.h>
 
 #include "split_gfa_to_comms.h"
