@@ -16,6 +16,7 @@
 #include "fs/Reader.h"
 #include "fs/gfa_line_parsers.h"
 #include "utils/Timer.h"
+#include "split_gfa_to_comms.h"
 
 
 #define WEIGHTED     0
@@ -94,13 +95,16 @@ void parse_args(int argc, char** argv, argparse::ArgumentParser& parser) {
       .help("input GFA graph");
 
     // std::string output_bin;
-    parser.add_argument("out_communities")
+    parser.add_argument("out_gz")
       .help("output node communities");
 
     // bool keep_tmp;
     parser.add_argument("--keep_tmp").default_value(false)
       .implicit_value(true)
       .help("keep temporary files");
+
+    parser.add_argument("--tmp_dir").default_value(std::string("."))
+      .help("temporary directory to use");
 
     try {
         parser.parse_args(argc, argv);
@@ -136,7 +140,7 @@ void generate_edgelist(const std::string& input_gfa, const std::string& tmp_edge
     std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
 
     // while (std::getline(in, line)) {
-    std::unordered_map<std::string, std::vector<std::string>> paths_map;
+    // std::unordered_map<std::string, std::vector<std::string>> paths_map;
 
     while (file_reader.read_line(line)) {
         if (line_counter % 500000 == 0) std::cout << get_time() << ": Read " << line_counter << " lines" << std::endl;
@@ -158,12 +162,12 @@ void generate_edgelist(const std::string& input_gfa, const std::string& tmp_edge
                 else out << "\n" << src << " " << dest;
             }
         }
-        else if (line[0] == 'P'){
-            std::string path_name;
-            std::vector<std::string> node_list;
-            extract_P_nodes(line, path_name, node_list);
-            paths_map[path_name] = node_list;
-        }
+        // else if (line[0] == 'P'){
+        //     std::string path_name;
+        //     std::vector<std::string> node_list;
+        //     extract_P_nodes(line, path_name, node_list);
+        //     paths_map[path_name] = node_list;
+        // }
     }
     out.close();
     // in.close();
@@ -177,15 +181,25 @@ inline void print_c_stats(const Community& c, const int level) {
     << c.g.nb_links << " edges" << std::endl;
 }
 
+// void split_original_gfa(const BGraph& g,
+//     const std::string& input_gfa,
+//     const std::string& out_dir,
+//     const std::unordered_map<std::string, unsigned int>& node_id_map) {
+//
+// }
 
 void output_communities(const BGraph& g, const std::string& out_file, const std::unordered_map<std::string, unsigned int>& node_id_map) {
     std::vector<std::string> id_to_node(node_id_map.size());
-    for (const auto& p : node_id_map) id_to_node[p.second] = p.first;
+
+    for (const auto& p : node_id_map) {
+        id_to_node[p.second] = p.first;
+    }
 
     if (!file_writable(out_file.c_str())) {
         std::cerr << "Output file is not writable: " << out_file << std::endl;
         exit(1);
     }
+
     ofstream out;
     out.open(out_file);
     for (size_t i = 0; i < g.nodes.size(); i++) {
@@ -236,9 +250,9 @@ int main(int argc, char** argv) {
         std::cerr << "Input file does not exist: " << input_gfa << std::endl; return 1;
     }
 
-    auto out_comms = program.get<std::string>("out_communities");
-    if (!file_writable(out_comms.c_str())) {
-        std::cerr << "Output file is not writable: " << out_comms << std::endl; return 1;
+    auto out_gzip = program.get<std::string>("out_gz");
+    if (!file_writable(out_gzip.c_str())) {
+        std::cerr << "Output file is not writable: " << out_gzip << std::endl; return 1;
     }
 
     bool keep_tmp = program.get<bool>("keep_tmp");
@@ -255,8 +269,17 @@ int main(int argc, char** argv) {
      */
     // todo: I probably want to change this
     //     also change the hard-coded tmp locations to be in the specified tmp file
+    auto tmp_dir = program.get<std::string>("tmp_dir");
+    if (!dir_exists(tmp_dir.c_str())) {
+        std::filesystem::create_directory(tmp_dir);
+    } else {
+        std::filesystem::remove_all(tmp_dir);
+        std::filesystem::create_directory(tmp_dir);
+    }
+
+    std::string sep = "/";
     std::unordered_map<std::string, unsigned int> node_id_map;
-    std::string tmp_edgelist = "../test_graphs/tmp_edgelist.txt";
+    std::string tmp_edgelist = tmp_dir + sep + "tmp_edgelist.txt";
     // generates the edge list from the GFA with integer node IDs
     std::cout << get_time() << ": Generating the edges list" << std::endl;
     timer.reset();
@@ -267,8 +290,8 @@ int main(int argc, char** argv) {
     /*
      * sorting the edge list with linux sort
      */
-    std::string sorted_tmp_edgelist = "../test_graphs/tmp_edgelist_sorted.txt";
-    std::string tmp_dir = "../test_graphs/";
+    std::string sorted_tmp_edgelist = tmp_dir + sep + "tmp_edgelist_sorted.txt";
+    // std::string sort_tmp_dir = "../test_graphs/";
     timer.reset();
     std::cout << get_time() << ": Sorting the edges" << std::endl;
     run_sort(tmp_edgelist, sorted_tmp_edgelist, tmp_dir);
@@ -286,8 +309,8 @@ int main(int argc, char** argv) {
      * converting the graph to binary format for faster processing
      */
     // graph.renumber(UNWEIGHTED);
-    std::string tmp_binary = "../test_graphs/tmp_binary.bin";
-    std::cout <<  get_time() << ": Saving the graph as compressed a binary to disk to: " << out_comms << std::endl;
+    std::string tmp_binary = tmp_dir + sep + "tmp_binary.bin";
+    std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
     timer.reset();
     graph.display_binary(tmp_binary.c_str(), nullptr, UNWEIGHTED);
     std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
@@ -302,13 +325,16 @@ int main(int argc, char** argv) {
     std::cout << get_time () << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
 
     std::cout << get_time () << ": Outputting the communities" << std::endl;
-    output_communities(final_graph, out_comms, node_id_map);
+    // output_communities(final_graph, out_comms, node_id_map);
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 500, node_id_map);
+    
 
     if (!keep_tmp) {
         std::cout << get_time () << ": Removing the temporary files" << std::endl;
         remove_file(tmp_edgelist.c_str());
         remove_file(sorted_tmp_edgelist.c_str());
         remove_file(tmp_binary.c_str());
+        std::filesystem::remove_all(tmp_dir);
     }
 
     std::cout << get_time () << ": Finished in total time of " << total_time.elapsed() << " seconds" << std::endl;

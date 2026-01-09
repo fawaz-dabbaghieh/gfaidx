@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
         if (line[0] == 'S') {
             progress_counter++;
             if (progress_counter % 5000000 == 0) {
-                std::cout << "Number of L lines processed: " << progress_counter << std::endl;
+                std::cout << "Number of S lines processed: " << progress_counter << std::endl;
             }
             std::string node_name;
             std::string node_seq;
@@ -53,6 +53,9 @@ int main(int argc, char** argv) {
     int n_paths = 0;
     std::ofstream out(argv[2], std::ios::binary);
     r.open(argv[1]);
+    // processing of the P lines seems to be very slow, I need to profile it I guess :/
+    // maybe instead of pushing_back to a vector, initialize the vector with some big value
+    //
     while (r.read_line(line)) {
         if (line[0] == 'P') {
             n_paths++;

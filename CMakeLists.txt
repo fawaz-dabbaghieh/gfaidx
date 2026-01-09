@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ansi -ggdb -Wall")
 
+find_package(ZLIB REQUIRED)
+
 # Linker flags from Makefile
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ansi")
 link_libraries(m)
@@ -63,7 +65,20 @@ add_executable(vle_test
         src/fs/gfa_line_parsers.cpp
 )
 
-target_link_libraries(index_gfa louvain_method)
+
+add_executable(chunked_gzip
+        src/compressors/chunked_gzip_old.cpp
+        src/fs/Reader.cpp)
+
+add_executable(chunked_gzip_tmpfiles
+        src/compressors/chunked_gzip_new.cpp
+        src/fs/Reader.cpp)
+
+
+target_link_libraries(index_gfa louvain_method ZLIB::ZLIB)
+
+target_link_libraries(chunked_gzip ZLIB::ZLIB)
+target_link_libraries(chunked_gzip_tmpfiles ZLIB::ZLIB)
 #target_link_libraries(index_gfa louvain_method strangepg)
 #target_link_libraries(index_gfa PRIVATE strangepg)
 
