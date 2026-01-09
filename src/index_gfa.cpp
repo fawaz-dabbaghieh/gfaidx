@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
     timer.reset();
     std::cout << get_time () << ": Starting splitting and gzipping" << std::endl;
     // output_communities(final_graph, out_comms, node_id_map);
-    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 500, node_id_map);
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 50, node_id_map);
 
     std::cout << get_time () << ": Finished splitting and gzipping" << std::endl;
 

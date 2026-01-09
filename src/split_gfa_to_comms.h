@@ -380,7 +380,14 @@ private:
 
         // Evict if needed
         if (open_.size() >= max_open_) {
-            std::cout << "Evicting file " << paths_.at(lru_.back()) << std::endl;
+            try {
+                std::cout << "Evicting file " << paths_.at(lru_.back()) << std::endl;
+            } catch (const std::out_of_range& e) {
+                std::cout << "Eviction failed: " << e.what() << std::endl;
+                std::cout << lru_.back() << std::endl;
+                exit(1);
+            }
+
             std::uint32_t evict = lru_.back();
             lru_.pop_back();
             auto eit = open_.find(evict);
@@ -390,7 +397,13 @@ private:
             }
         }
 
-        const fs::path& p = paths_.at(cid);
+        try {
+            const fs::path& p = paths_.at(cid);
+        } catch (const std::out_of_range& e) {
+            std::cerr << "Failed to find path for community " << cid << ": " << e.what() << std::endl;
+            exit(1);
+        }
+
         fs::create_directories(p.parent_path());
 
         // Append mode; create if missing.
@@ -492,7 +505,14 @@ inline void split_gzip_gfa(const std::string& in_gfa,
         node_id = process_lines(line);
         if (node_id.empty()) continue;
         // todo: add check if something went wrong and the node is not in the map
-        unsigned int node_int_id = node_id_map.at(node_id);
+        unsigned int node_int_id;
+        try {
+            node_int_id = node_id_map.at(node_id);
+        } catch (const std::out_of_range& e) {
+            std::cerr << "Node " << node_id << " not found in the map" << std::endl;
+            exit(1);
+        }
+
         uint32_t c = node_to_comm[node_int_id];
         cache.write_line(c, line);
         uncomp[c] += (line.size() + 1);
