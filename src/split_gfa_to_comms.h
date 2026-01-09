@@ -399,21 +399,23 @@ private:
 
         try {
             const fs::path& p = paths_.at(cid);
+
+            fs::create_directories(p.parent_path());
+
+            // Append mode; create if missing.
+            std::ofstream f(p, std::ios::binary | std::ios::out | std::ios::app);
+            if (!f) throw std::runtime_error("Failed to open temp text file: " + p.string());
+
+            lru_.push_front(cid);
+            OpenRec rec{std::move(f), lru_.begin()};
+            auto [ins_it, ok] = open_.emplace(cid, std::move(rec));
+            return ins_it->second.file;
+
         } catch (const std::out_of_range& e) {
             std::cerr << "Failed to find path for community " << cid << ": " << e.what() << std::endl;
             exit(1);
         }
 
-        fs::create_directories(p.parent_path());
-
-        // Append mode; create if missing.
-        std::ofstream f(p, std::ios::binary | std::ios::out | std::ios::app);
-        if (!f) throw std::runtime_error("Failed to open temp text file: " + p.string());
-
-        lru_.push_front(cid);
-        OpenRec rec{std::move(f), lru_.begin()};
-        auto [ins_it, ok] = open_.emplace(cid, std::move(rec));
-        return ins_it->second.file;
     }
 
     std::vector<fs::path> paths_;
