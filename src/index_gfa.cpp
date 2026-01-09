@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <cstdlib>
+#include <sys/wait.h>
 
 #include <argparse/argparse.hpp>
 #include <community.h>
@@ -324,10 +326,12 @@ int main(int argc, char** argv) {
     generate_communities(tmp_binary, final_graph, display_level);
     std::cout << get_time () << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
 
-    std::cout << get_time () << ": Outputting the communities" << std::endl;
+    timer.reset();
+    std::cout << get_time () << ": Starting splitting and gzipping" << std::endl;
     // output_communities(final_graph, out_comms, node_id_map);
     split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 500, node_id_map);
-    
+
+    std::cout << get_time () << ": Finished splitting and gzipping" << std::endl;
 
     if (!keep_tmp) {
         std::cout << get_time () << ": Removing the temporary files" << std::endl;

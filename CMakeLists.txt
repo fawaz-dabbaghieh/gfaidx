@@ -3,12 +3,12 @@ project(gfaidx LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ansi -ggdb -Wall")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ggdb -Wall")
 
 find_package(ZLIB REQUIRED)
 
 # Linker flags from Makefile
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ansi")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 link_libraries(m)
 
 # Add external includes
@@ -73,6 +73,11 @@ add_executable(chunked_gzip
 add_executable(chunked_gzip_tmpfiles
         src/compressors/chunked_gzip_new.cpp
         src/fs/Reader.cpp)
+
+add_executable(read_random_community
+               src/read_random_community.cpp
+               )
+target_link_libraries(read_random_community louvain_method ZLIB::ZLIB)
 
 
 target_link_libraries(index_gfa louvain_method ZLIB::ZLIB)

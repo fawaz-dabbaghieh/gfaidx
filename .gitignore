@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 
+build/
 .clang-format
 test_graphs/
 
