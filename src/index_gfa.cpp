@@ -7,7 +7,10 @@
 #include <iostream>
 #include <map>
 #include <cstdlib>
+#include <cstdint>
+#ifdef __linux__
 #include <sys/wait.h>
+#endif
 
 #include <argparse/argparse.hpp>
 #include <community.h>

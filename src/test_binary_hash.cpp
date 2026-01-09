@@ -1,6 +1,11 @@
 #include <iostream>
 #include <vector>
 #include <string>
+#ifdef __linux__
+#include <cstdint>
+#include<cstring>
+#include <sys/wait.h>
+#endif
 #include <string_view>
 #include <fstream>
 #include <algorithm>
