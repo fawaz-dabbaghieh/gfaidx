@@ -349,6 +349,12 @@ int main(int argc, char** argv) {
     return 0;
 }
 
+// todo: need to deal with singletons. I guess I can put them in their own community, otherwise they'll end up each
+//       in a community and that's bad, too much overhead
+//       but to detect them, I might have to go through the GFA file twice unfortunately
+//       and basically any S line that is not in the dictionary (i.e., doesn't have an intID)
+//       gets added to the final binary graph as a new community
+//       if I do this, then the splitting function should just work as intended
 // the groupings are in the final graph
 // final_graph.nodes is a vector of vectors of ints, the index is the community number
 // and the inside vector has the node IDs groupings basically
