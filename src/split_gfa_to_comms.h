@@ -380,14 +380,6 @@ private:
 
         // Evict if needed
         if (open_.size() >= max_open_) {
-            try {
-                std::cout << "Evicting file " << paths_.at(lru_.back()) << std::endl;
-            } catch (const std::out_of_range& e) {
-                std::cout << "Eviction failed: " << e.what() << std::endl;
-                std::cout << lru_.back() << std::endl;
-                exit(1);
-            }
-
             std::uint32_t evict = lru_.back();
             lru_.pop_back();
             auto eit = open_.find(evict);
@@ -397,24 +389,19 @@ private:
             }
         }
 
-        try {
-            const fs::path& p = paths_.at(cid);
+        const fs::path& p = paths_.at(cid);
 
-            fs::create_directories(p.parent_path());
+        fs::create_directories(p.parent_path());
 
-            // Append mode; create if missing.
-            std::ofstream f(p, std::ios::binary | std::ios::out | std::ios::app);
-            if (!f) throw std::runtime_error("Failed to open temp text file: " + p.string());
+        // Append mode; create if missing.
+        std::ofstream f(p, std::ios::binary | std::ios::out | std::ios::app);
+        if (!f) throw std::runtime_error("Failed to open temp text file: " + p.string());
 
-            lru_.push_front(cid);
-            OpenRec rec{std::move(f), lru_.begin()};
-            auto [ins_it, ok] = open_.emplace(cid, std::move(rec));
-            return ins_it->second.file;
+        lru_.push_front(cid);
+        OpenRec rec{std::move(f), lru_.begin()};
+        auto [ins_it, ok] = open_.emplace(cid, std::move(rec));
+        return ins_it->second.file;
 
-        } catch (const std::out_of_range& e) {
-            std::cerr << "Failed to find path for community " << cid << ": " << e.what() << std::endl;
-            exit(1);
-        }
 
     }
 

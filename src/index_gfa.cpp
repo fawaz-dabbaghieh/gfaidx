@@ -240,6 +240,43 @@ void generate_communities(const std::string& binary_graph, BGraph& g, int displa
     }
 }
 
+void add_singleton_community(const std::string& input_gfa,
+    std::unordered_map<std::string, unsigned int>& node_id_map,
+    BGraph& g) {
+    std::string_view line;
+    Reader file_reader;
+    if (!file_reader.open(input_gfa)) {
+        std::cerr << "Could not open file: " << input_gfa << std::endl;
+        exit(1);
+    }
+
+    std::vector<int> singleton_nodes;
+    std::string node_id;
+    std::string node_seq;
+
+    while (file_reader.read_line(line)) {
+        if (line.empty() || line[0] != 'S') {
+            continue;
+        }
+        extract_S_node(line, node_id, node_seq);
+        if (node_id_map.find(node_id) != node_id_map.end()) {
+            continue;
+        }
+
+        unsigned int int_id = 0;
+        get_int_node_id(node_id_map, node_id, int_id);
+        singleton_nodes.push_back(static_cast<int>(int_id));
+    }
+
+    if (!singleton_nodes.empty()) {
+        g.nodes.push_back(singleton_nodes);
+        g.nb_nodes = g.nodes.size();
+        std::cout << get_time() << ": Added " << singleton_nodes.size()
+                  << " singleton nodes to community " << (g.nodes.size() - 1) << std::endl;
+    } else {
+        std::cout << get_time() << ": No singleton nodes found" << std::endl;
+    }
+}
 
 int main(int argc, char** argv) {
 
@@ -330,9 +367,15 @@ int main(int argc, char** argv) {
     std::cout << get_time () << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
 
     timer.reset();
+    std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
+    add_singleton_community(input_gfa, node_id_map, final_graph);
+    std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
+
+
+    timer.reset();
     std::cout << get_time () << ": Starting splitting and gzipping" << std::endl;
     // output_communities(final_graph, out_comms, node_id_map);
-    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 50, node_id_map);
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map);
 
     std::cout << get_time () << ": Finished splitting and gzipping" << std::endl;
 
