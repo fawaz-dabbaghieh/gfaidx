@@ -8,7 +8,7 @@
 #include <functional>
 #include <graph_binary.h>
 
-#include "split_gfa_to_comms.h"
+#include "chunk/split_gfa_to_comms.h"
 
 
 namespace fs = std::filesystem;

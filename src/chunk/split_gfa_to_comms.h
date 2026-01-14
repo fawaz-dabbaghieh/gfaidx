@@ -268,9 +268,9 @@ inline void stream_community_lines_from_gz_range(
   inflateEnd(&strm);
 
   // If file didn't end with newline, you may want to emit the last partial line.
-  if (!stop && !pending.empty()) {
-    on_line(pending);
-  }
+  // if (!stop && !pending.empty()) {
+  //   on_line(pending);
+  // }
 }
 
 // Convenience wrapper: takes index path + gz path + community id.
@@ -450,7 +450,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
         }
     }
 
-    int n_communities = g.nodes.size();
+    size_t n_communities = g.nodes.size();
 
     // now when we loop through the file, if it's an S line, easy, get the node ID and map to community
     // then write in that community file
@@ -499,6 +499,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
             node_int_id = node_id_map.at(node_id);
         } catch (const std::out_of_range& e) {
             std::cerr << "Node " << node_id << " not found in the map" << std::endl;
+            std::cerr << e.what() << std::endl;
             exit(1);
         }
 

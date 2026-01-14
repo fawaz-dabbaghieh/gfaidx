@@ -13,6 +13,7 @@ link_libraries(m)
 
 # Add external includes
 include_directories(${CMAKE_SOURCE_DIR}/external/argparse/include)
+include_directories(${CMAKE_SOURCE_DIR}/src)
 add_subdirectory(external/louvain_method)
 #add_subdirectory(external/strangepg)
 
@@ -38,14 +39,14 @@ add_executable(test_binary_hash
         src/test_binary_hash.cpp)
 
 
-add_executable(index_gfa
-        src/index_gfa.cpp
+add_executable(gfaidx
+        src/gfaidx.cpp
+        src/chunk/get_chunk_command.cpp
+        src/indexer/index_gfa_main.cpp
+        src/indexer/index_gfa_helpers.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
         src/fs/gfa_line_parsers.cpp
-#        external/louvain_method/community.cpp
-#        external/louvain_method/graph.cpp
-#        external/louvain_method/graph_binary.cpp
 )
 
 add_executable(test_reader
@@ -80,7 +81,7 @@ add_executable(read_random_community
 target_link_libraries(read_random_community louvain_method ZLIB::ZLIB)
 
 
-target_link_libraries(index_gfa louvain_method ZLIB::ZLIB)
+target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
 
 target_link_libraries(chunked_gzip ZLIB::ZLIB)
 target_link_libraries(chunked_gzip_tmpfiles ZLIB::ZLIB)
