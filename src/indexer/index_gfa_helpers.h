@@ -7,6 +7,8 @@
 #include <argparse/argparse.hpp>
 #include <graph_binary.h>
 
+#include "fs/Reader.h"
+
 namespace gfaidx::indexer {
 
 extern int nb_pass;
@@ -27,7 +29,8 @@ bool run_sort(const std::string& input_edges,
 
 void generate_edgelist(const std::string& input_gfa,
                        const std::string& tmp_edgelist,
-                       std::unordered_map<std::string, unsigned int>& node_id_map);
+                       std::unordered_map<std::string, unsigned int>& node_id_map,
+                       const Reader::Options& reader_options);
 
 void generate_communities(const std::string& binary_graph,
                           BGraph& g,
@@ -36,7 +39,8 @@ void generate_communities(const std::string& binary_graph,
 
 void add_singleton_community(const std::string& input_gfa,
                              std::unordered_map<std::string, unsigned int>& node_id_map,
-                             BGraph& g);
+                             BGraph& g,
+                             const Reader::Options& reader_options);
 
 void output_communities(const BGraph& g,
                         const std::string& out_file,

@@ -72,8 +72,11 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
       .implicit_value(true)
       .help("keep temporary files");
 
-    parser.add_argument("--tmp_dir").default_value(std::string("."))
-      .help("temporary directory to use");
+    parser.add_argument("--tmp_dir").default_value(std::string(""))
+      .help("temporary directory base (default: create a unique temp dir)");
+
+    parser.add_argument("--progress_every").default_value(std::string("1000000"))
+      .help("print progress every N lines (default: 1000000), give 0 to disable");
 }
 
 bool run_sort(const std::string& input_edges,
@@ -103,10 +106,11 @@ bool run_sort(const std::string& input_edges,
 
 void generate_edgelist(const std::string& input_gfa,
                        const std::string& tmp_edgelist,
-                       std::unordered_map<std::string, unsigned int>& node_id_map) {
+                       std::unordered_map<std::string, unsigned int>& node_id_map,
+                       const Reader::Options& reader_options) {
     std::string_view line;
 
-    Reader file_reader;
+    Reader file_reader(reader_options);
     if (!file_reader.open(input_gfa)) {
         std::cerr << "Could not open file: " << input_gfa << std::endl;
         exit(1);
@@ -115,19 +119,15 @@ void generate_edgelist(const std::string& input_gfa,
     std::ofstream out;
     out.open(tmp_edgelist);
     bool first_line = true;
-    unsigned int line_counter = 0;
     std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
 
     while (file_reader.read_line(line)) {
-        if (line_counter % 500000 == 0) std::cout << get_time() << ": Read " << line_counter << " lines" << std::endl;
-        line_counter++;
         if (line[0] == 'L') {
             N_EDGES++;
             auto [fst, snd] = extract_L_nodes(line);
             unsigned int src, dest;
             get_int_node_id(node_id_map, fst, src);
             get_int_node_id(node_id_map, snd, dest);
-
             if (first_line) {
                 if (src > dest) out << dest << " " << src;
                 else out << src << " " << dest;
@@ -192,9 +192,10 @@ void generate_communities(const std::string& binary_graph,
 
 void add_singleton_community(const std::string& input_gfa,
                              std::unordered_map<std::string, unsigned int>& node_id_map,
-                             BGraph& g) {
+                             BGraph& g,
+                             const Reader::Options& reader_options) {
     std::string_view line;
-    Reader file_reader;
+    Reader file_reader(reader_options);
     if (!file_reader.open(input_gfa)) {
         std::cerr << "Could not open file: " << input_gfa << std::endl;
         exit(1);

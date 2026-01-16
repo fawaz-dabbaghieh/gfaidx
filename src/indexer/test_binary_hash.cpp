@@ -29,16 +29,16 @@ uint64_t fnv1a_hash(std::string_view s) {
 }
 
 // 32-bit FNV-1a hash
-uint32_t hash_id_32(std::string_view s) {
-    constexpr uint32_t FNV_OFFSET = 2166136261U;
-    const uint32_t FNV_PRIME  = 16777619U;
-    uint32_t h = FNV_OFFSET;
-    for (unsigned char c : s) {
-        h ^= c;
-        h *= FNV_PRIME;
-    }
-    return h;
-}
+// uint32_t hash_id_32(std::string_view s) {
+//     constexpr uint32_t FNV_OFFSET = 2166136261U;
+//     const uint32_t FNV_PRIME  = 16777619U;
+//     uint32_t h = FNV_OFFSET;
+//     for (unsigned char c : s) {
+//         h ^= c;
+//         h *= FNV_PRIME;
+//     }
+//     return h;
+// }
 
 // the hash entries, size of 16 bytes, probably can be made smaller
 // at the moment there are 4 bits padding which are wasted, I can use them for another smaller hash to avoid collisions

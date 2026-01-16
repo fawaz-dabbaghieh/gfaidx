@@ -432,7 +432,8 @@ inline void split_gzip_gfa(const std::string& in_gfa,
                       const std::string& out_dir,
                       const BGraph& g,
                       std::size_t max_open_text,
-                      const std::unordered_map<std::string, unsigned int>& node_id_map) {
+                      const std::unordered_map<std::string, unsigned int>& node_id_map,
+                      const Reader::Options& reader_options = Reader::Options{}) {
 
     // a vector with [node1, node2, node3...] and can be accessed with the int ID. So, int to string ID mapping
     std::vector<std::string> id_to_node(node_id_map.size());
@@ -479,7 +480,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
 
 
     std::string_view line;
-    Reader file_reader;
+    Reader file_reader(reader_options);
     if (!file_reader.open(in_gfa)) {
         std::cerr << "Could not open file: " << in_gfa << std::endl;
         exit(1);

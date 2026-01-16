@@ -1,5 +1,6 @@
 #include "indexer/index_gfa_main.h"
 
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 
@@ -29,12 +30,34 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
 
     auto out_gzip = program.get<std::string>("out_gz");
+    if (file_exists(out_gzip.c_str())) {
+        std::cerr << "Output file already exists: " << out_gzip << std::endl;
+        return 1;
+    }
     if (!file_writable(out_gzip.c_str())) {
         std::cerr << "Output file is not writable: " << out_gzip << std::endl;
         return 1;
     }
 
     bool keep_tmp = program.get<bool>("keep_tmp");
+
+    std::uint64_t progress_every;
+    const auto progress_str = program.get<std::string>("progress_every");
+    try {
+        long long parsed = std::stoll(progress_str);
+        if (parsed <= 0) {
+            throw std::invalid_argument("progress must be positive");
+        }
+
+        progress_every = static_cast<std::uint64_t>(parsed);
+    } catch (const std::exception& err) {
+        std::cerr << "Warning: invalid --progress_every value '" << progress_str
+                  << "', using default 1000000 (" << err.what() << ")" << std::endl;
+        progress_every = 1000000;
+    }
+
+    Reader::Options reader_options;
+    reader_options.progress_every = progress_every;
 
     std::ifstream in(input_gfa);
     if (!in.good()) {
@@ -48,13 +71,18 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
      */
     // todo: I probably want to change this
     //     also change the hard-coded tmp locations to be in the specified tmp file
-    auto tmp_dir = program.get<std::string>("tmp_dir");
-    if (!dir_exists(tmp_dir.c_str())) {
-        std::filesystem::create_directory(tmp_dir);
-    } else {
-        std::filesystem::remove_all(tmp_dir);
-        std::filesystem::create_directory(tmp_dir);
+    std::string tmp_base = program.get<std::string>("tmp_dir");
+    if (tmp_base.empty()) {
+        std::filesystem::path input_path(input_gfa);
+        auto parent = input_path.parent_path();
+        tmp_base = parent.empty() ? std::string("") : parent.string();
     }
+
+    auto tmp_dir = create_temp_dir(tmp_base,
+                                   "gfaidx_tmp_",
+                                   "latest",
+                                   keep_tmp);
+    std::cout << get_time() << ": Using temp directory " << tmp_dir << std::endl;
 
     std::string sep = "/";
     std::unordered_map<std::string, unsigned int> node_id_map;
@@ -62,7 +90,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     // generates the edge list from the GFA with integer node IDs
     std::cout << get_time() << ": Generating the edges list" << std::endl;
     timer.reset();
-    generate_edgelist(input_gfa, tmp_edgelist, node_id_map);
+    generate_edgelist(input_gfa, tmp_edgelist, node_id_map, reader_options);
     std::cout << get_time() << ": Finished generating the edges list in " << timer.elapsed() << " seconds" << std::endl;
     std::cout << get_time() << ": The GFA has " << N_NODES << " S lines, and " << N_EDGES << " L lines" << std::endl;
 
@@ -103,13 +131,13 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     timer.reset();
     std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
-    add_singleton_community(input_gfa, node_id_map, final_graph);
+    add_singleton_community(input_gfa, node_id_map, final_graph, reader_options);
     std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
 
 
     timer.reset();
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
-    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map);
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map, reader_options);
 
     std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
 
