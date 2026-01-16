@@ -56,6 +56,34 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         progress_every = 1000000;
     }
 
+    int gzip_level = 6;
+    const auto gzip_level_str = program.get<std::string>("gzip_level");
+    try {
+        long long parsed = std::stoll(gzip_level_str);
+        if (parsed < 1 || parsed > 9) {
+            throw std::invalid_argument("gzip level must be 1-9");
+        }
+        gzip_level = static_cast<int>(parsed);
+    } catch (const std::exception& err) {
+        std::cerr << "Warning: invalid --gzip_level value '" << gzip_level_str
+                  << "', using default 6 (" << err.what() << ")" << std::endl;
+        gzip_level = 6;
+    }
+
+    int gzip_mem_level = 8;
+    const auto gzip_mem_level_str = program.get<std::string>("gzip_mem_level");
+    try {
+        long long parsed = std::stoll(gzip_mem_level_str);
+        if (parsed < 1 || parsed > 9) {
+            throw std::invalid_argument("gzip mem level must be 1-9");
+        }
+        gzip_mem_level = static_cast<int>(parsed);
+    } catch (const std::exception& err) {
+        std::cerr << "Warning: invalid --gzip_mem_level value '" << gzip_mem_level_str
+                  << "', using default 8 (" << err.what() << ")" << std::endl;
+        gzip_mem_level = 8;
+    }
+
     Reader::Options reader_options;
     reader_options.progress_every = progress_every;
 
@@ -137,7 +165,15 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     timer.reset();
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
-    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map, reader_options);
+    split_gzip_gfa(input_gfa,
+                   out_gzip,
+                   tmp_dir,
+                   final_graph,
+                   150,
+                   node_id_map,
+                   reader_options,
+                   gzip_level,
+                   gzip_mem_level);
 
     std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
 

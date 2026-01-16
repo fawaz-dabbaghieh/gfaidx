@@ -73,10 +73,20 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
       .help("keep temporary files");
 
     parser.add_argument("--tmp_dir").default_value(std::string(""))
+      .nargs(1)
       .help("temporary directory base (default: create a unique temp dir)");
 
     parser.add_argument("--progress_every").default_value(std::string("1000000"))
+      .nargs(1)
       .help("print progress every N lines (default: 1000000), give 0 to disable");
+
+    parser.add_argument("--gzip_level").default_value(std::string("6"))
+      .nargs(1)
+      .help("gzip compression level 1-9 (default: 6)");
+
+    parser.add_argument("--gzip_mem_level").default_value(std::string("8"))
+      .nargs(1)
+      .help("gzip mem level 1-9 (default: 8)");
 }
 
 bool run_sort(const std::string& input_edges,
