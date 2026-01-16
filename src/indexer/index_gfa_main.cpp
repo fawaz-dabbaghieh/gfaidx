@@ -109,7 +109,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     auto tmp_dir = create_temp_dir(tmp_base,
                                    "gfaidx_tmp_",
                                    "latest",
-                                   keep_tmp);
+                                   true);
     std::cout << get_time() << ": Using temp directory " << tmp_dir << std::endl;
 
     std::string sep = "/";
@@ -183,6 +183,13 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         remove_file(sorted_tmp_edgelist.c_str());
         remove_file(tmp_binary.c_str());
         std::filesystem::remove_all(tmp_dir);
+        std::filesystem::path latest_path = std::filesystem::path(tmp_base.empty()
+            ? std::filesystem::current_path()
+            : std::filesystem::path(tmp_base)) / "latest";
+        std::error_code ec;
+        if (std::filesystem::exists(latest_path) || std::filesystem::is_symlink(latest_path)) {
+            std::filesystem::remove(latest_path, ec);
+        }
     }
 
     std::cout << get_time() << ": Finished in total time of " << total_time.elapsed() << " seconds" << std::endl;

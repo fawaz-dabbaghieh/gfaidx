@@ -73,6 +73,11 @@ Reader& Reader::operator=(Reader&& other) noexcept {
     file_off_ = other.file_off_;
     line_no_ = other.line_no_;
     long_line_ = std::move(other.long_line_);
+    is_gzip_ = other.is_gzip_;
+    gzip_eof_ = other.gzip_eof_;
+    z_init_ = other.z_init_;
+    strm_ = other.strm_;
+    gz_inbuf_ = std::move(other.gz_inbuf_);
 
     other.fd_ = -1;
     other.last_errno_ = 0;
@@ -81,6 +86,11 @@ Reader& Reader::operator=(Reader&& other) noexcept {
     other.file_off_ = 0;
     other.line_no_ = 0;
     other.long_line_.clear();
+    other.is_gzip_ = false;
+    other.gzip_eof_ = false;
+    other.z_init_ = false;
+    other.strm_ = {};
+    other.gz_inbuf_.clear();
     return *this;
 }
 
@@ -98,6 +108,10 @@ bool Reader::open(const std::string& path) {
     file_off_ = 0;
     line_no_ = 0;
     long_line_.clear();
+    is_gzip_ = false;
+    gzip_eof_ = false;
+    z_init_ = false;
+    strm_ = {};
 
     // O_RDONLY open for reading only
     fd_ = ::open(path.c_str(), O_RDONLY);
@@ -105,10 +119,46 @@ bool Reader::open(const std::string& path) {
         last_errno_ = errno;
         return false;
     }
+    // Peek at the first two bytes to detect gzip magic (0x1f, 0x8b).
+    unsigned char magic[2] = {0, 0};
+    const ssize_t n = ::read(fd_, magic, sizeof(magic));
+    if (n < 0) {
+        last_errno_ = errno;
+        close();
+        return false;
+    }
+    // checking the magic bytes to see if it's gzip file
+    if (n == static_cast<ssize_t>(sizeof(magic)) && magic[0] == 0x1f && magic[1] == 0x8b) {
+        is_gzip_ = true;
+    }
+    // Reset file descriptor to the start for normal reading.
+    if (::lseek(fd_, 0, SEEK_SET) < 0) {
+        last_errno_ = errno;
+        close();
+        return false;
+    }
+    if (is_gzip_) {
+        // Initialize zlib for gzip decoding (15 + 16 enables gzip wrapper).
+        if (inflateInit2(&strm_, 15 + 16) != Z_OK) {
+            last_errno_ = EINVAL;  // invalid argument
+            close();
+            return false;
+        }
+        z_init_ = true;
+        // Buffer for compressed input chunks.
+        if (opt_.read_size == 0) opt_.read_size = 64 * 1024;
+        gz_inbuf_.resize(opt_.read_size);
+    }
     return true;
 }
 
 void Reader::close() {
+    if (z_init_) {
+        inflateEnd(&strm_);
+        z_init_ = false;
+    }
+    is_gzip_ = false;
+    gzip_eof_ = false;
     if (fd_ >= 0) {
         ::close(fd_);
         fd_ = -1;
@@ -116,6 +166,10 @@ void Reader::close() {
 }
 
 bool Reader::refill() {
+    return is_gzip_ ? refill_gzip() : refill_plain();
+}
+
+bool Reader::refill_plain() {
     // Equivalent to strangepg's slurp():
     // - if there is remainder [cur_, end_), memmove it to front
     // - read more into the tail
@@ -143,6 +197,84 @@ bool Reader::refill() {
         return true;
     }
     end_ += static_cast<std::size_t>(n);
+    return true;
+}
+
+bool Reader::refill_gzip() {
+    if (eof_) return true;
+
+    // Preserve any unread bytes by moving them to the front of the buffer.
+    const std::size_t remainder = (end_ > cur_) ? (end_ - cur_) : 0;
+    if (remainder && cur_ > 0) {
+        std::memmove(buf_.data(), buf_.data() + cur_, remainder);
+    }
+    cur_ = 0;
+    end_ = remainder;
+
+    while (end_ < buf_.size()) {
+        // If the inflater has no input, read more compressed bytes.
+        if (strm_.avail_in == 0 && !gzip_eof_) {
+            const ssize_t n = ::read(fd_, gz_inbuf_.data(), gz_inbuf_.size());
+            if (n < 0) {
+                last_errno_ = errno;
+                return false;
+            }
+            if (n == 0) {
+                gzip_eof_ = true;
+            } else {
+                strm_.next_in = gz_inbuf_.data();
+                strm_.avail_in = static_cast<uInt>(n);
+            }
+        }
+
+        // No more compressed input and nothing left to feed the inflater.
+        if (strm_.avail_in == 0 && gzip_eof_) {
+            eof_ = true;
+            return true;
+        }
+
+        // Inflate into the remaining space in the output buffer.
+        strm_.next_out = reinterpret_cast<Bytef*>(buf_.data() + end_);
+        strm_.avail_out = static_cast<uInt>(buf_.size() - end_);
+
+        int ret = inflate(&strm_, Z_NO_FLUSH);
+        std::size_t produced = (buf_.size() - end_) - strm_.avail_out;
+        end_ += produced;
+
+        if (ret == Z_STREAM_END) {
+            // End of a gzip member. If there are leftover input bytes, start a new member.
+            const uInt remaining = strm_.avail_in;
+            Bytef* next_in = strm_.next_in;
+            inflateEnd(&strm_);
+            z_init_ = false;
+            if (remaining > 0) {
+                strm_ = {};
+                if (inflateInit2(&strm_, 15 + 16) != Z_OK) {
+                    last_errno_ = EINVAL;
+                    return false;
+                }
+                z_init_ = true;
+                strm_.next_in = next_in;
+                strm_.avail_in = remaining;
+                // If we already produced output, let the caller consume it first.
+                if (produced > 0) return true;
+                continue;
+            }
+            gzip_eof_ = true;
+            // Return if we produced output before hitting end-of-stream.
+            if (produced > 0) return true;
+            continue;
+        }
+
+        if (ret != Z_OK) {
+            last_errno_ = EINVAL;
+            return false;
+        }
+
+        // Return as soon as we have some decompressed data to parse.
+        if (produced > 0) return true;
+    }
+
     return true;
 }
 

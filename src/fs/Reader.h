@@ -10,6 +10,10 @@
  *
  * readLine() returns a string_view valid until the next readLine() call.
  * Long lines (> buffer) are supported via an internal fallback string.
+ *
+ * If the input is gzip-compressed (detected via magic bytes), the reader
+ * transparently inflates data into the same buffer and still returns
+ * line-oriented views over the decompressed stream.
  */
 
 
@@ -18,10 +22,11 @@
 
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <cstdint>
+#include <zlib.h>
 
 
 class Reader {
@@ -82,6 +87,8 @@ private:
     void report_progress() const;
 
     bool refill();    // similar to slurp from strangepg: move remainder to front and read more
+    bool refill_plain();
+    bool refill_gzip();
     bool ensure_Eol_or_EoF(); // make sure we either find '\n' or hit EOF (or build long line)
 
     Options opt_;
@@ -104,6 +111,12 @@ private:
 
     // For lines longer than the buffer.
     std::string long_line_;
+
+    bool is_gzip_ = false;
+    bool gzip_eof_ = false;
+    bool z_init_ = false;
+    z_stream strm_{};
+    std::vector<unsigned char> gz_inbuf_;
 };
 
 

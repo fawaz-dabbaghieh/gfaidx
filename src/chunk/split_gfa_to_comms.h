@@ -261,7 +261,7 @@ inline void stream_community_lines_from_gz_range(
 
     if (ret != Z_OK) {
       inflateEnd(&strm);
-      throw std::runtime_error("inflate failed ret=" + std::to_string(ret));
+      throw std::runtime_error("Make sure you gave the correct index, or the file wasn't modified, because inflate failed, ret=" + std::to_string(ret));
     }
   }
 
