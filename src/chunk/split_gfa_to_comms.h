@@ -432,24 +432,24 @@ inline void split_gzip_gfa(const std::string& in_gfa,
                       const std::string& out_dir,
                       const BGraph& g,
                       std::size_t max_open_text,
-                      const std::unordered_map<std::string, unsigned int>& node_id_map,
+                      const std::unordered_map<std::string, unsigned int>& node_to_id,
                       const Reader::Options& reader_options = Reader::Options{},
                       int gzip_level = 6,
                       int gzip_mem_level = 8) {
 
+    std::cout << get_time() << ": Generating id to node and community vectors" << std::endl;
     // a vector with [node1, node2, node3...] and can be accessed with the int ID. So, int to string ID mapping
-    std::vector<std::string> id_to_node(node_id_map.size());
-    for (const auto& p : node_id_map) {
+    std::vector<std::string> id_to_node(node_to_id.size());
+    for (const auto& p : node_to_id) {
         id_to_node[p.second] = p.first;
     }
 
     // the node_id_map maps string id to int
-
     // now we need to map int ID to community ID
-    std::vector<uint32_t> node_to_comm(node_id_map.size());
+    std::vector<uint32_t> id_to_comm(node_to_id.size());
     for (int c = 0 ;c < g.nodes.size() ;c++) {
         for (const auto n : g.nodes[c]) {
-            node_to_comm[n] = c;
+            id_to_comm[n] = c;
         }
     }
 
@@ -488,6 +488,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
     std::vector<std::uint64_t> uncomp(ncom, 0);
     std::vector<std::uint32_t> lines(ncom, 0);
 
+    std::cout << get_time() << ": Starting splitting the GFA into communities" << std::endl;
     while (file_reader.read_line(line)) {
         std::string node_id;
         node_id = process_lines(line);
@@ -495,14 +496,14 @@ inline void split_gzip_gfa(const std::string& in_gfa,
         // todo: add check if something went wrong and the node is not in the map
         unsigned int node_int_id;
         try {
-            node_int_id = node_id_map.at(node_id);
+            node_int_id = node_to_id.at(node_id);
         } catch (const std::out_of_range& e) {
             std::cerr << "Node " << node_id << " not found in the map" << std::endl;
             std::cerr << e.what() << std::endl;
             exit(1);
         }
 
-        uint32_t c = node_to_comm[node_int_id];
+        uint32_t c = id_to_comm[node_int_id];
         cache.write_line(c, line);
         uncomp[c] += (line.size() + 1);
         lines[c] += 1;
@@ -525,6 +526,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
     // todo: this part ca be parallelized in a "lazy" mode
     //        each thread compresses its own community file and writes to its own output file
     //       then at the end, we concatenate all output files into one final output file
+    std::cout << get_time() << ": Starting to compress and add to final file" << std::endl;
     for (std::uint32_t c = 0; c < ncom; ++c) {
         IndexEntry e;
         e.community_id = c;

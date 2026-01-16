@@ -9,6 +9,7 @@
 
 #include "fs/fs_helpers.h"
 #include "indexer/index_gfa_helpers.h"
+#include "indexer/node_hash_index.h"
 #include "chunk/split_gfa_to_comms.h"
 #include "utils/Timer.h"
 
@@ -36,6 +37,12 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
     if (!file_writable(out_gzip.c_str())) {
         std::cerr << "Output file is not writable: " << out_gzip << std::endl;
+        return 1;
+    }
+    // Write node hash index alongside the gzip output.
+    std::string node_index_path = out_gzip + ".ndx";
+    if (file_exists(node_index_path.c_str())) {
+        std::cerr << "Node index file already exists: " << node_index_path << std::endl;
         return 1;
     }
 
@@ -165,17 +172,27 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     timer.reset();
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
-    split_gzip_gfa(input_gfa,
-                   out_gzip,
-                   tmp_dir,
-                   final_graph,
-                   150,
-                   node_id_map,
-                   reader_options,
-                   gzip_level,
-                   gzip_mem_level);
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map,
+                   reader_options, gzip_level, gzip_mem_level);
 
     std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
+
+    timer.reset();
+    std::cout << get_time() << ": Writing node hash index to " << node_index_path << std::endl;
+    std::vector<std::uint32_t> id_to_comm(node_id_map.size());
+    // Build int-id -> community-id mapping for all nodes.
+    for (std::uint32_t c = 0; c < final_graph.nodes.size(); ++c) {
+        for (const auto n : final_graph.nodes[c]) {
+            id_to_comm[n] = c;
+        }
+    }
+    try {
+        write_node_hash_index(node_id_map, id_to_comm, node_index_path);
+        std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
 
     if (!keep_tmp) {
         std::cout << get_time() << ": Removing the temporary files" << std::endl;

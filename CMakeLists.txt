@@ -44,12 +44,12 @@ add_executable(gfaidx
         src/chunk/get_chunk_command.cpp
         src/indexer/index_gfa_main.cpp
         src/indexer/index_gfa_helpers.cpp
+        src/indexer/node_hash_index.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
         src/fs/gfa_line_parsers.cpp
 )
 target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
-
 
 #add_executable(test_reader
 #        src/fs/test_reader.cpp
