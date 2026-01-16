@@ -31,6 +31,7 @@ public:
     struct Options {
         std::size_t read_size = 64 * 1024;    // similar to IOUNIT-ish defaults
         bool strip_cr = false;            // handle Windows CRLF files
+        std::uint64_t progress_every = 0; // 0 disables progress reporting
     };
 
     Reader();
@@ -77,6 +78,8 @@ public:
 
 private:
     void ensure_buffer_allocated();
+
+    void report_progress() const;
 
     bool refill();    // similar to slurp from strangepg: move remainder to front and read more
     bool ensure_Eol_or_EoF(); // make sure we either find '\n' or hit EOF (or build long line)

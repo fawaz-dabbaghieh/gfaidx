@@ -13,6 +13,7 @@ link_libraries(m)
 
 # Add external includes
 include_directories(${CMAKE_SOURCE_DIR}/external/argparse/include)
+include_directories(${CMAKE_SOURCE_DIR}/src)
 add_subdirectory(external/louvain_method)
 #add_subdirectory(external/strangepg)
 
@@ -34,58 +35,59 @@ add_subdirectory(external/louvain_method)
 #        src/main_hierarchy.cpp)
 
 
-add_executable(test_binary_hash
-        src/test_binary_hash.cpp)
+#add_executable(test_binary_hash
+#        src/test_binary_hash.cpp)
 
 
-add_executable(index_gfa
-        src/index_gfa.cpp
+add_executable(gfaidx
+        src/gfaidx.cpp
+        src/chunk/get_chunk_command.cpp
+        src/indexer/index_gfa_main.cpp
+        src/indexer/index_gfa_helpers.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
         src/fs/gfa_line_parsers.cpp
-#        external/louvain_method/community.cpp
-#        external/louvain_method/graph.cpp
-#        external/louvain_method/graph_binary.cpp
 )
-
-add_executable(test_reader
-        src/fs/test_reader.cpp
-        src/fs/Reader.cpp
-)
-
-add_executable(rle_test
-        src/compressors/rle_test.cpp
-        src/compressors/compressors.cpp
-        src/fs/Reader.cpp
-)
-
-add_executable(vle_test
-        src/compressors/vle_test.cpp
-        src/fs/Reader.cpp
-        src/fs/gfa_line_parsers.cpp
-)
+target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
 
 
-add_executable(chunked_gzip
-        src/compressors/chunked_gzip_old.cpp
-        src/fs/Reader.cpp)
+#add_executable(test_reader
+#        src/fs/test_reader.cpp
+#        src/fs/Reader.cpp
+#)
 
-add_executable(chunked_gzip_tmpfiles
-        src/compressors/chunked_gzip_new.cpp
-        src/fs/Reader.cpp)
+#add_executable(rle_test
+#        src/compressors/rle_test.cpp
+#        src/compressors/compressors.cpp
+#        src/fs/Reader.cpp
+#)
 
-add_executable(read_random_community
-               src/read_random_community.cpp
-               )
-target_link_libraries(read_random_community louvain_method ZLIB::ZLIB)
+#add_executable(vle_test
+#        src/compressors/vle_test.cpp
+#        src/fs/Reader.cpp
+#        src/fs/gfa_line_parsers.cpp
+#)
 
 
-target_link_libraries(index_gfa louvain_method ZLIB::ZLIB)
+#add_executable(chunked_gzip
+#        src/compressors/chunked_gzip_old.cpp
+#        src/fs/Reader.cpp)
 
-target_link_libraries(chunked_gzip ZLIB::ZLIB)
-target_link_libraries(chunked_gzip_tmpfiles ZLIB::ZLIB)
+#add_executable(chunked_gzip_tmpfiles
+#        src/compressors/chunked_gzip_new.cpp
+#        src/fs/Reader.cpp)
+
+#add_executable(read_random_community
+#               src/read_random_community.cpp
+#               )
+#target_link_libraries(read_random_community louvain_method ZLIB::ZLIB)
+
+
+
+#target_link_libraries(chunked_gzip ZLIB::ZLIB)
+#target_link_libraries(chunked_gzip_tmpfiles ZLIB::ZLIB)
 #target_link_libraries(index_gfa louvain_method strangepg)
 #target_link_libraries(index_gfa PRIVATE strangepg)
 
-add_executable(test_file_reading
-        scripts/test_file_reading.cpp)
+#add_executable(test_file_reading
+#        scripts/test_file_reading.cpp)

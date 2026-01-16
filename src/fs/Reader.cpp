@@ -21,9 +21,11 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
+#include <iostream>
 #include <unistd.h>
 
 #include "Reader.h"
+#include "utils/Timer.h"
 
 
 void Reader::ensure_buffer_allocated() {
@@ -31,6 +33,13 @@ void Reader::ensure_buffer_allocated() {
 
     if (opt_.read_size == 0) opt_.read_size = 64 * 1024; // safety
     buf_.resize(opt_.read_size * 2 + 1);
+}
+
+void Reader::report_progress() const{
+    if (opt_.progress_every == 0) return;
+    if (line_no_ % opt_.progress_every == 0) {
+        std::cout << get_time() << ": Read " << line_no_ << " lines" << std::endl;
+    }
 }
 
 Reader::Reader() {
@@ -236,6 +245,7 @@ bool Reader::read_line(std::string_view& out) {
         }
 
         ++line_no_;
+        report_progress();
         out = std::string_view(long_line_.data(), long_line_.size());
         assembling_long_ = false;
         long_ready_ = true;
@@ -262,6 +272,7 @@ bool Reader::read_line(std::string_view& out) {
         file_off_ += (len + 1);
 
         ++line_no_;
+        report_progress();
         return true;
     }
 
@@ -276,6 +287,7 @@ bool Reader::read_line(std::string_view& out) {
         file_off_ += available;
 
         ++line_no_;
+        report_progress();
         return true;
     }
 

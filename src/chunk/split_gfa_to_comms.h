@@ -4,7 +4,7 @@
 
 #ifndef GFAIDX_SPLIT_GFA_TO_COMMS_H
 #define GFAIDX_SPLIT_GFA_TO_COMMS_H
-#include <zlib.h>
+    #include <zlib.h>
 
 #include <cstdint>
 #include <cstring>
@@ -268,9 +268,9 @@ inline void stream_community_lines_from_gz_range(
   inflateEnd(&strm);
 
   // If file didn't end with newline, you may want to emit the last partial line.
-  if (!stop && !pending.empty()) {
-    on_line(pending);
-  }
+  // if (!stop && !pending.empty()) {
+  //   on_line(pending);
+  // }
 }
 
 // Convenience wrapper: takes index path + gz path + community id.
@@ -285,12 +285,12 @@ inline void stream_community_lines(
 }
 
 
-
 // Stream-compress a whole text file into ONE gzip member appended to `out`.
 static void append_one_gzip_member_from_file(std::ofstream& out,
                                             const fs::path& in_path,
                                             int level = 6,
                                             int memLevel = 8) {
+
     std::ifstream in(in_path, std::ios::binary);
     if (!in) throw std::runtime_error("Failed to open temp text for read: " + in_path.string());
 
@@ -380,14 +380,6 @@ private:
 
         // Evict if needed
         if (open_.size() >= max_open_) {
-            try {
-                std::cout << "Evicting file " << paths_.at(lru_.back()) << std::endl;
-            } catch (const std::out_of_range& e) {
-                std::cout << "Eviction failed: " << e.what() << std::endl;
-                std::cout << lru_.back() << std::endl;
-                exit(1);
-            }
-
             std::uint32_t evict = lru_.back();
             lru_.pop_back();
             auto eit = open_.find(evict);
@@ -397,24 +389,19 @@ private:
             }
         }
 
-        try {
-            const fs::path& p = paths_.at(cid);
+        const fs::path& p = paths_.at(cid);
 
-            fs::create_directories(p.parent_path());
+        fs::create_directories(p.parent_path());
 
-            // Append mode; create if missing.
-            std::ofstream f(p, std::ios::binary | std::ios::out | std::ios::app);
-            if (!f) throw std::runtime_error("Failed to open temp text file: " + p.string());
+        // Append mode; create if missing.
+        std::ofstream f(p, std::ios::binary | std::ios::out | std::ios::app);
+        if (!f) throw std::runtime_error("Failed to open temp text file: " + p.string());
 
-            lru_.push_front(cid);
-            OpenRec rec{std::move(f), lru_.begin()};
-            auto [ins_it, ok] = open_.emplace(cid, std::move(rec));
-            return ins_it->second.file;
+        lru_.push_front(cid);
+        OpenRec rec{std::move(f), lru_.begin()};
+        auto [ins_it, ok] = open_.emplace(cid, std::move(rec));
+        return ins_it->second.file;
 
-        } catch (const std::out_of_range& e) {
-            std::cerr << "Failed to find path for community " << cid << ": " << e.what() << std::endl;
-            exit(1);
-        }
 
     }
 
@@ -445,7 +432,10 @@ inline void split_gzip_gfa(const std::string& in_gfa,
                       const std::string& out_dir,
                       const BGraph& g,
                       std::size_t max_open_text,
-                      const std::unordered_map<std::string, unsigned int>& node_id_map) {
+                      const std::unordered_map<std::string, unsigned int>& node_id_map,
+                      const Reader::Options& reader_options = Reader::Options{},
+                      int gzip_level = 6,
+                      int gzip_mem_level = 8) {
 
     // a vector with [node1, node2, node3...] and can be accessed with the int ID. So, int to string ID mapping
     std::vector<std::string> id_to_node(node_id_map.size());
@@ -463,16 +453,13 @@ inline void split_gzip_gfa(const std::string& in_gfa,
         }
     }
 
-    int n_communities = g.nodes.size();
+    size_t n_communities = g.nodes.size();
 
     // now when we loop through the file, if it's an S line, easy, get the node ID and map to community
     // then write in that community file
     // L lines a bit tricky
     // Temp directory next to output.
-    // fs::path out_path(out_gz);
     const fs::path tmp_dir = out_dir;
-    // tmp_dir += ".parts_text";
-    // fs::create_directories(tmp_dir);
 
     // Per-community raw temp files.
     std::vector<fs::path> part_txt;
@@ -490,9 +477,8 @@ inline void split_gzip_gfa(const std::string& in_gfa,
 
     TextHandleCache cache(part_txt, max_open_text);
 
-
     std::string_view line;
-    Reader file_reader;
+    Reader file_reader(reader_options);
     if (!file_reader.open(in_gfa)) {
         std::cerr << "Could not open file: " << in_gfa << std::endl;
         exit(1);
@@ -512,6 +498,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
             node_int_id = node_id_map.at(node_id);
         } catch (const std::out_of_range& e) {
             std::cerr << "Node " << node_id << " not found in the map" << std::endl;
+            std::cerr << e.what() << std::endl;
             exit(1);
         }
 
@@ -532,13 +519,12 @@ inline void split_gzip_gfa(const std::string& in_gfa,
     if (!idx) throw std::runtime_error("Failed to open " + out_idx);
     idx << "#community_id\tgz_offset\tgz_size\tuncompressed_size\tline_count\n";
 
-    // Choose compression level: 6 ~ gzip default, 9 best compression
-    const int level = 9;
-    const int memLevel = 9; // 8 is typical; 9 may slightly improve, uses more memory during compression
-
     std::vector<IndexEntry> entries;
     entries.reserve(ncom);
 
+    // todo: this part ca be parallelized in a "lazy" mode
+    //        each thread compresses its own community file and writes to its own output file
+    //       then at the end, we concatenate all output files into one final output file
     for (std::uint32_t c = 0; c < ncom; ++c) {
         IndexEntry e;
         e.community_id = c;
@@ -547,8 +533,12 @@ inline void split_gzip_gfa(const std::string& in_gfa,
         e.line_count = lines[c];
 
         if (fs::exists(part_txt[c]) && fs::file_size(part_txt[c]) > 0) {
-            append_one_gzip_member_from_file(out, part_txt[c], level, memLevel);
+            Timer member_timer;
+            std::cout << get_time() << ": Compressing community " << c << std::endl;
+            append_one_gzip_member_from_file(out, part_txt[c], gzip_level, gzip_mem_level);
             e.gz_size = static_cast<std::uint64_t>(out.tellp()) - e.gz_offset;
+            std::cout << get_time() << ": Finished community " << c
+                      << " in " << member_timer.elapsed() << " seconds" << std::endl;
         } else {
             e.gz_size = 0;
         }
