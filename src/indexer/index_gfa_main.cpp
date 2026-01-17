@@ -104,8 +104,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     /*
      * creating the edge list from the GFA file
      */
-    // todo: I probably want to change this
-    //     also change the hard-coded tmp locations to be in the specified tmp file
+
     std::string tmp_base = program.get<std::string>("tmp_dir");
     if (tmp_base.empty()) {
         std::filesystem::path input_path(input_gfa);

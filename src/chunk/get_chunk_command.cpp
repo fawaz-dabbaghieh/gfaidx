@@ -46,7 +46,7 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
         return 1;
     }
 
-    std::string index_path = program.get<std::string>("index");
+    auto index_path = program.get<std::string>("index");
     if (index_path.empty()) {
         index_path = input_gz + ".idx";
     }
@@ -56,13 +56,13 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
         return 1;
     }
 
-    const std::string node_id = program.get<std::string>("node_id");
-    const std::string community_id_str = program.get<std::string>("community_id");
+    const auto node_id = program.get<std::string>("node_id");
+    const auto community_id_str = program.get<std::string>("community_id");
 
     std::uint32_t community_id = 0;
     if (!node_id.empty()) {
         // Resolve node id to community id using the .ndx file.
-        std::string node_index_path = program.get<std::string>("node_index");
+        auto node_index_path = program.get<std::string>("node_index");
         if (node_index_path.empty()) {
             node_index_path = input_gz + ".ndx";
         }
@@ -70,6 +70,7 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
             std::cerr << "Node index file does not exist: " << node_index_path << std::endl;
             return 1;
         }
+        // getting the community of the node if it's in the hash table
         try {
             indexer::NodeHashIndex node_index(node_index_path);
             if (!node_index.lookup(node_id, community_id)) {

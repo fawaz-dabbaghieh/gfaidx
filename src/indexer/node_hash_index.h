@@ -20,7 +20,7 @@ struct NodeHashEntry {
 std::uint64_t fnv1a_hash(std::string_view s);
 
 // Build and write the binary node hash index from node->id and id->community maps.
-void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& node_id_map,
+void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& node_to_id,
                            const std::vector<std::uint32_t>& id_to_comm,
                            const std::string& out_path);
 
@@ -36,10 +36,18 @@ public:
     bool lookup(std::string_view node_id, std::uint32_t& out_com) const;
 
 private:
+// it mainly uses mmap but has a fallback to fstream
+#if defined(__unix__) || defined(__APPLE__)
+    int fd_ = -1;
+    const NodeHashEntry* data_ = nullptr;
+    std::size_t file_size_ = 0;
+    std::size_t n_entries_ = 0;
+#else
     mutable std::ifstream file_;
     std::size_t entry_size_ = sizeof(NodeHashEntry);
     std::size_t file_size_ = 0;
     std::size_t n_entries_ = 0;
+#endif
 };
 
 }  // namespace gfaidx::indexer

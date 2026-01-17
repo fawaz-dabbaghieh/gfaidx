@@ -493,7 +493,6 @@ inline void split_gzip_gfa(const std::string& in_gfa,
         std::string node_id;
         node_id = process_lines(line);
         if (node_id.empty()) continue;
-        // todo: add check if something went wrong and the node is not in the map
         unsigned int node_int_id;
         try {
             node_int_id = node_to_id.at(node_id);
@@ -523,9 +522,7 @@ inline void split_gzip_gfa(const std::string& in_gfa,
     std::vector<IndexEntry> entries;
     entries.reserve(ncom);
 
-    // todo: this part ca be parallelized in a "lazy" mode
-    //        each thread compresses its own community file and writes to its own output file
-    //       then at the end, we concatenate all output files into one final output file
+
     std::cout << get_time() << ": Starting to compress and add to final file" << std::endl;
     for (std::uint32_t c = 0; c < ncom; ++c) {
         IndexEntry e;
