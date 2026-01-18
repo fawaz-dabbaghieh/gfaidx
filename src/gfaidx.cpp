@@ -6,14 +6,14 @@
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/index_gfa_main.h"
 
-// todo: 1- need to make sure that if I run index_gfa with same input, it checks that these file exist already and stops
-//       2- parallelize the compressing and maybe the splitting
+// todo: 1- need to make sure that if I run index_gfa with same input, it checks that these file exist already and stops (done)
+//       2- parallelize the compressing and maybe the splitting (not necessary, with level 6 it's much faster now)
 //       3- ask codex to generate more test for both indexing and retrieval to make sure everything is working
 //       4- compress the community index or make into a binary file, which then can give us constant access as community
 //          IDs are ordered
-//       5- build the node_id->community_id binary index and add that to get_chunk
+//       5- build the node_id->community_id binary index and add that to get_chunk (done)
 int main(int argc, char** argv) {
-    argparse::ArgumentParser program("gfaidx", "0.2.0");
+    argparse::ArgumentParser program("gfaidx", "0.2.1");
 
     argparse::ArgumentParser index_gfa("index_gfa");
     index_gfa.add_description("Index and split a GFA file into communities");
