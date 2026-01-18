@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: pygfaidx
+Version: 0.1.0
+Summary: Python helpers for indexed GFA graphs
+License-File: LICENSE
+Dynamic: license-file
+Dynamic: summary
