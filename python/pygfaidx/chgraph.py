@@ -487,11 +487,11 @@ class ChGraph:
                 if n[0] in set_of_nodes:
                     if n[1] == 0:
                         edge = str("\t".join(("L", str(n1), "-", str(n[0]), "+", overlap)))
-                        edge += "\n"
+                        # edge += "\n"
                     # edges.append(edge)
                     else:
                         edge = str("\t".join(("L", str(n1), "-", str(n[0]), "-", overlap)))
-                        edge += "\n"
+                        # edge += "\n"
                     # edges.append(edge)
                     f.write(edge)
 
@@ -501,11 +501,11 @@ class ChGraph:
                 if n[0] in set_of_nodes:
                     if n[1] == 0:
                         edge = str("\t".join(("L", str(n1), "+", str(n[0]), "+", overlap)))
-                        edge += "\n"
+                        # edge += "\n"
                     # edges.append(edge)
                     else:
                         edge = str("\t".join(("L", str(n1), "+", str(n[0]), "-", overlap)))
-                        edge += "\n"
+                        # edge += "\n"
                     # edges.append(edge)
                     f.write(edge)
         #

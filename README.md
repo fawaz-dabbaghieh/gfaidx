@@ -2,7 +2,7 @@
 A new implementation of my graph index, I wanted to start from scratch.
 Now using a different Louvain Method implementation that uses much less memory.
 
-# TODO
+# TODO cpp
 - [x] Add fast buffer-based GFA reader, inspired by `strangepg`
 - [x] Generate edge lists from a GFA
     - [x] Integrate `strangepg` file reading for faster GFA loading
@@ -20,6 +20,10 @@ Now using a different Louvain Method implementation that uses much less memory.
 - [x] Add command line interface
 - [ ] Add unit tests
 - [ ] Benchmark against other graph clustering tools
-- [ ] Add Python interface
 - [ ] Add Rust interface
 - [ ] Add conda package
+
+# TODO Python
+- [x] Add command line interface
+- [x] Edit old ChGraph to work with the new indexes
+- [ ] Investigate why retrieving (node_id 3456 community 743) takes very long, and probably should investigate every chunk.
