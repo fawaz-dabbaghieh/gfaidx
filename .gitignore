@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 
+__pycache__
 *egg-info
 build/
 .clang-format
