@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 
+*egg-info
 build/
 .clang-format
 test_graphs/
