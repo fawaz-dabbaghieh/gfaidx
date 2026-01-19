@@ -280,7 +280,7 @@ class ChGraph:
         # with open(self.graph_name + "chunk" + str(chunk_id), "rb") as infile:
         # 	chunk = pickle.load(infile)
         if len(self.loaded_c) >= self.loaded_c_limit:
-            logger.info(f"There has been 10 chunks loaded, will be unloading old chunks!")
+            logger.info(f"There has been {self.loaded_c_limit} chunks loaded, will be unloading old chunks!")
             while len(self.loaded_c) >= self.loaded_c_limit:
                 c_id = self.loaded_c.popleft()
                 logger.info(f"Unloading chunk {c_id} and current loaded c are {self.loaded_c}")

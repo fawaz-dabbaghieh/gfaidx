@@ -13,10 +13,12 @@ Now using a different Louvain Method implementation that uses much less memory.
           and add to it <string, int> with node id and community ID. Need to test memory for both.
 - [x] Generate the community ID to file offset index (int: <int, int>, community ID: <start, end>)
     - [x] Need to look if I can then gzip the chunks separately and how will this change the offsets.
-- [ ] Separate the edges that belong to different communities to their own chunk.
-- [ ] As long as I'm hashing the sequence IDs later, maybe i should hash them first and use that sail dictionary that uses less memory.
-- [ ] Parallelize the GFA chunking/gzipping.
+- [ ] Separate the edges that belong to different communities to their own chunk. I don't think it's actually needed
+- [ ] As long as I'm hashing the sequence IDs later, maybe I should hash them first and use that absail dictionary that uses less memory.
+- [x] Parallelize the GFA chunking/gzipping. Not necessary, it's faster now with compression level 6 instead of 9.
 - [ ] Maybe make the community index a binary file that gets loaded into memory completely for faster access.
+- [ ] Index the Paths and other lines, these will be line by line indexed, should be easy
+- [ ] Recursive chunking, I think I should further chunk the communities that are too large. Do it on the separated file.
 - [x] Add command line interface
 - [ ] Add unit tests
 - [ ] Benchmark against other graph clustering tools

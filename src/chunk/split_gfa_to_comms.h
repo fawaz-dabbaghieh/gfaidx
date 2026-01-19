@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <fstream>
+#include <filesystem>
 #include <vector>
 
 #include <graph_binary.h>
