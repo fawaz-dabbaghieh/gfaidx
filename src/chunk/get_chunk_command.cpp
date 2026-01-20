@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 
-#include "chunk/split_gfa_to_comms.h"
+#include "chunk/chunk_reader.h"
 #include "fs/fs_helpers.h"
 #include "indexer/node_hash_index.h"
 

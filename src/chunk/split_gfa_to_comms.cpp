@@ -21,253 +21,15 @@
 #include <vector>
 #include <graph_binary.h>
 
-#include "text_handle_cache.h"
+#include "chunk/text_handle_cache.h"
 #include "fs/gfa_line_parsers.h"
 #include "utils/Timer.h"
 
-
+namespace fs = std::filesystem;
 
 static void throw_zlib(const char* where, int zret) {
     throw std::runtime_error(std::string(where) + " (zlib ret=" + std::to_string(zret) + ")");
 }
-
-// Parses the TSV index and finds (gz_offset, gz_size) for a given community_id.
-// Expected columns:
-// community_id<TAB>gz_offset<TAB>gz_size<TAB>uncompressed_size<TAB>line_count
-CommunitySpan lookup_community_span_tsv(const std::string& index_path,
-                                        const std::uint32_t community_id){
-
-  std::ifstream idx(index_path);
-  if (!idx) throw std::runtime_error("Failed to open index file: " + index_path);
-
-  std::string line;
-  while (std::getline(idx, line)) {
-    if (line.empty() || line[0] == '#') continue;
-
-    // Split on tabs (fast/simple).
-    // col0: community_id, col1: gz_offset, col2: gz_size
-    std::size_t p0 = line.find('\t');
-    if (p0 == std::string::npos) continue;
-    std::size_t p1 = line.find('\t', p0 + 1);
-    if (p1 == std::string::npos) continue;
-    std::size_t p2 = line.find('\t', p1 + 1);
-
-    auto col0 = std::string_view(line).substr(0, p0);
-    auto col1 = std::string_view(line).substr(p0 + 1, p1 - (p0 + 1));
-    auto col2 = (p2 == std::string::npos)
-                  ? std::string_view(line).substr(p1 + 1)
-                  : std::string_view(line).substr(p1 + 1, p2 - (p1 + 1));
-
-    std::uint32_t cid = static_cast<std::uint32_t>(std::stoul(std::string(col0)));
-    if (cid != community_id) continue;
-
-    CommunitySpan s;
-    s.gz_offset = std::stoull(std::string(col1));
-    s.gz_size   = std::stoull(std::string(col2));
-    return s;
-  }
-
-  throw std::runtime_error("Community id not found in index: " + std::to_string(community_id));
-}
-
-// ---------- streaming inflate of a byte-range ----------
-//
-// Calls `on_line(line)` for each decompressed line (without the trailing '\n').
-// If on_line returns false, stops early.
-//
-
-// Read exactly one gzip member from (offset, gz_size) and return decompressed text.
-// static std::string read_gzip_member(const std::string& gz_path, std::uint64_t offset, std::uint64_t gz_size) {
-//     std::ifstream in(gz_path, std::ios::binary);
-//     if (!in) throw std::runtime_error("Failed to open " + gz_path);
-//
-//     in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-//     if (!in) throw std::runtime_error("seekg failed");
-//
-//     z_stream strm;
-//     std::memset(&strm, 0, sizeof(strm));
-//
-//     // windowBits = 15 + 16 => gzip wrapper
-//     int ret = inflateInit2(&strm, 15 + 16);
-//     if (ret != Z_OK) throw_zlib("inflateInit2", ret);
-//
-//     unsigned char inbuf[1u << 16];
-//     unsigned char outbuf[1u << 16];
-//
-//     std::string out;
-//     out.reserve(std::min<std::uint64_t>(gz_size * 3, 1ull << 20)); // rough guess
-//
-//     std::uint64_t remaining = gz_size;
-//
-//     while (true) {
-//         if (remaining == 0) {
-//             inflateEnd(&strm);
-//             throw std::runtime_error("Ran out of compressed bytes before reaching Z_STREAM_END (bad index?)");
-//         }
-//
-//         std::size_t to_read = std::min<std::uint64_t>(remaining, sizeof(inbuf));
-//         in.read(reinterpret_cast<char*>(inbuf), static_cast<std::streamsize>(to_read));
-//         const auto got = static_cast<std::size_t>(in.gcount());
-//         if (got == 0) {
-//             inflateEnd(&strm);
-//             throw std::runtime_error("Unexpected EOF while reading gzip member");
-//         }
-//         remaining -= got;
-//
-//         strm.next_in = inbuf;
-//         strm.avail_in = static_cast<uInt>(got);
-//
-//         while (strm.avail_in > 0) {
-//             strm.next_out = outbuf;
-//             strm.avail_out = sizeof(outbuf);
-//
-//             ret = inflate(&strm, Z_NO_FLUSH);
-//             if (ret == Z_STREAM_END) {
-//                 std::size_t have = sizeof(outbuf) - strm.avail_out;
-//                 if (have) out.append(reinterpret_cast<const char*>(outbuf), have);
-//                 inflateEnd(&strm);
-//                 return out;
-//             }
-//             if (ret != Z_OK) {
-//                 inflateEnd(&strm);
-//                 throw_zlib("inflate", ret);
-//             }
-//
-//             std::size_t have = sizeof(outbuf) - strm.avail_out;
-//             if (have) out.append(reinterpret_cast<const char*>(outbuf), have);
-//         }
-//     }
-// }
-
-// NOTE: This inflates *only* bytes in [offset, offset+size). This matches the index design.
-void stream_community_lines_from_gz_range(
-    const std::string& gz_path,
-    std::uint64_t offset,
-    std::uint64_t gz_size,
-    const std::function<bool(const std::string&)>& on_line)
-{
-
-  if (gz_size == 0) return; // empty community
-
-  std::ifstream in(gz_path, std::ios::binary);
-  if (!in) throw std::runtime_error("Failed to open gz file: " + gz_path);
-
-  in.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-  if (!in) throw std::runtime_error("seekg failed (bad offset?)");
-
-  auto inflate_init = [](z_stream& s) {
-    std::memset(&s, 0, sizeof(s));
-    int ret = inflateInit2(&s, 15 + 16); // gzip wrapper
-    if (ret != Z_OK) throw std::runtime_error("inflateInit2 failed");
-  };
-
-  z_stream strm;
-  inflate_init(strm);
-
-  unsigned char inbuf[1u << 16];
-  unsigned char outbuf[1u << 16];
-
-  std::uint64_t remaining = gz_size;
-
-  // Holds partial line across output chunks.
-  std::string pending;
-  pending.reserve(4096);
-
-  bool stop = false;
-
-  while (!stop) {
-    // Refill input if needed.
-    if (strm.avail_in == 0) {
-      if (remaining == 0) break;
-
-      std::size_t to_read = static_cast<std::size_t>(
-          std::min<std::uint64_t>(remaining, sizeof(inbuf)));
-
-      in.read(reinterpret_cast<char*>(inbuf), static_cast<std::streamsize>(to_read));
-      auto got = static_cast<std::size_t>(in.gcount());
-      if (got == 0) throw std::runtime_error("Unexpected EOF while reading compressed range");
-
-      remaining -= got;
-      strm.next_in = inbuf;
-      strm.avail_in = static_cast<uInt>(got);
-    }
-
-    strm.next_out = outbuf;
-    strm.avail_out = sizeof(outbuf);
-
-    int ret = inflate(&strm, Z_NO_FLUSH);
-
-    std::size_t have = sizeof(outbuf) - strm.avail_out;
-    if (have) {
-      const char* data = reinterpret_cast<const char*>(outbuf);
-      std::size_t pos = 0;
-
-      while (pos < have && !stop) {
-        const void* nlptr = std::memchr(data + pos, '\n', have - pos);
-        if (!nlptr) {
-          // No newline in the rest of this chunk
-          pending.append(data + pos, have - pos);
-          break;
-        }
-
-        std::size_t nl = static_cast<const char*>(nlptr) - data;
-        // append up to newline
-        pending.append(data + pos, nl - pos);
-
-        // emit one full line (without '\n')
-        if (!on_line(pending)) {
-          stop = true;
-          break;
-        }
-        pending.clear();
-
-        pos = nl + 1;
-      }
-    }
-
-    if (ret == Z_STREAM_END) {
-      // Finished one gzip member. In your 2-pass design it should be exactly one member per community.
-      // But if there are leftover bytes in-range (multiple members), restart inflate and continue.
-      Bytef* leftover_ptr = strm.next_in;
-      uInt leftover_len = strm.avail_in;
-
-      inflateEnd(&strm);
-
-      if (stop) break;
-
-      if (remaining == 0 && leftover_len == 0) break; // done with this range
-
-      inflate_init(strm);
-      strm.next_in = leftover_ptr;
-      strm.avail_in = leftover_len;
-      continue;
-    }
-
-    if (ret != Z_OK) {
-      inflateEnd(&strm);
-      throw std::runtime_error("Make sure you gave the correct index, or the file wasn't modified, because inflate failed, ret=" + std::to_string(ret));
-    }
-  }
-
-  inflateEnd(&strm);
-
-  // If file didn't end with newline, you may want to emit the last partial line.
-  // if (!stop && !pending.empty()) {
-  //   on_line(pending);
-  // }
-}
-
-// Convenience wrapper: takes index path + gz path + community id.
-void stream_community_lines(
-    const std::string& index_path,
-    const std::string& gz_path,
-    std::uint32_t community_id,
-    const std::function<bool(const std::string&)>& on_line)
-{
-  CommunitySpan s = lookup_community_span_tsv(index_path, community_id);
-  stream_community_lines_from_gz_range(gz_path, s.gz_offset, s.gz_size, on_line);
-}
-
 
 // Stream-compress a whole text file into ONE gzip member appended to `out`.
 static void append_one_gzip_member_from_file(std::ofstream& out,
@@ -339,54 +101,43 @@ static std::string process_lines(const std::string_view line) {
 }
 
 
-void split_gzip_gfa(const std::string& in_gfa,
-                    const std::string& out_gz,
-                    const std::string& out_dir,
-                    const BGraph& g,
-                    std::size_t max_open_text,
-                    const std::unordered_map<std::string, unsigned int>& node_to_id,
-                    const Reader::Options& reader_options,
-                    int gzip_level,
-                    int gzip_mem_level) {
-
+static void build_id_maps(const std::unordered_map<std::string, unsigned int>& node_to_id,
+                          const BGraph& g,
+                          IdMaps& maps) {
     std::cout << get_time() << ": Generating id to node and community vectors" << std::endl;
-    // a vector with [node1, node2, node3...] and can be accessed with the int ID. So, int to string ID mapping
-    std::vector<std::string> id_to_node(node_to_id.size());
-    for (const auto& p : node_to_id) {
-        id_to_node[p.second] = p.first;
-    }
+    // I needed this before to map back from integer id to node string ID
+    // in the current implementation I don't need it, but might need it soon
+    // so keeping the IdMaps struct for now
+    // maps.id_to_node.resize(node_to_id.size());
+    // for (const auto& p : node_to_id) {
+    //     maps.id_to_node[p.second] = p.first;
+    // }
 
-    // the node_id_map maps string id to int
-    // now we need to map int ID to community ID
-    std::vector<uint32_t> id_to_comm(node_to_id.size());
-    for (int c = 0 ;c < g.nodes.size() ;c++) {
+    maps.id_to_comm.resize(node_to_id.size());
+    for (int c = 0; c < g.nodes.size(); ++c) {
         for (const auto n : g.nodes[c]) {
-            id_to_comm[n] = c;
+            maps.id_to_comm[n] = c;
         }
     }
+}
 
-    size_t n_communities = g.nodes.size();
-
-    // now when we loop through the file, if it's an S line, easy, get the node ID and map to community
-    // then write in that community file
-    // L lines a bit tricky
-    // Temp directory next to output.
-    const fs::path tmp_dir = out_dir;
-
-    // Per-community raw temp files.
+static std::vector<fs::path> build_part_paths(const std::string& out_dir, std::uint32_t n_communities) {
     std::vector<fs::path> part_txt;
     part_txt.reserve(n_communities);
     for (std::uint32_t c = 0; c < n_communities; ++c) {
         part_txt.emplace_back(out_dir + "/comm_" + std::to_string(c) + ".gfa");
-        // part_txt.push_back(tmp_dir / ("comm_" + std::to_string(c) + ".gfa"));
-        // remove if exists from previous runs
         if (fs::exists(part_txt.back())) fs::remove(part_txt.back());
     }
+    return part_txt;
+}
 
-    // working on the input file
-    std::ifstream in(in_gfa);
-    if (!in) throw std::runtime_error("Failed to open " + in_gfa);
-
+static void split_gfa_to_parts(const std::string& in_gfa,
+                               const std::unordered_map<std::string, unsigned int>& node_to_id,
+                               const std::vector<std::uint32_t>& id_to_comm,
+                               const std::vector<fs::path>& part_txt,
+                               std::size_t max_open_text,
+                               const Reader::Options& reader_options,
+                               SplitStats& stats) {
     TextHandleCache cache(part_txt, max_open_text);
 
     std::string_view line;
@@ -396,15 +147,14 @@ void split_gzip_gfa(const std::string& in_gfa,
         exit(1);
     }
 
-    std::uint32_t ncom = g.nodes.size();
-    std::vector<std::uint64_t> uncomp(ncom, 0);
-    std::vector<std::uint32_t> lines(ncom, 0);
+    stats.uncompressed_sizes.assign(id_to_comm.size(), 0);
+    stats.line_counts.assign(id_to_comm.size(), 0);
 
     std::cout << get_time() << ": Starting splitting the GFA into communities" << std::endl;
     while (file_reader.read_line(line)) {
-        std::string node_id;
-        node_id = process_lines(line);
+        std::string node_id = process_lines(line);
         if (node_id.empty()) continue;
+
         unsigned int node_int_id;
         try {
             node_int_id = node_to_id.at(node_id);
@@ -414,15 +164,21 @@ void split_gzip_gfa(const std::string& in_gfa,
             exit(1);
         }
 
-        uint32_t c = id_to_comm[node_int_id];
+        std::uint32_t c = id_to_comm[node_int_id];
         cache.write_line(c, line);
-        uncomp[c] += (line.size() + 1);
-        lines[c] += 1;
+        stats.uncompressed_sizes[c] += (line.size() + 1);
+        stats.line_counts[c] += 1;
     }
     cache.close_all();
 
+}
 
-    // PASS 2: compress each comm_X.gfa into exactly ONE gzip member, append to final .gz
+static void compress_parts_to_gzip(const std::string& out_gz,
+                                   const std::vector<fs::path>& part_txt,
+                                   const std::vector<std::uint64_t>& uncomp,
+                                   const std::vector<std::uint32_t>& lines,
+                                   int gzip_level,
+                                   int gzip_mem_level) {
     std::ofstream out(out_gz, std::ios::binary);
     if (!out) throw std::runtime_error("Failed to open " + out_gz);
     std::string out_idx = out_gz + ".idx";
@@ -431,12 +187,8 @@ void split_gzip_gfa(const std::string& in_gfa,
     if (!idx) throw std::runtime_error("Failed to open " + out_idx);
     idx << "#community_id\tgz_offset\tgz_size\tuncompressed_size\tline_count\n";
 
-    std::vector<IndexEntry> entries;
-    entries.reserve(ncom);
-
-
     std::cout << get_time() << ": Starting to compress and add to final file" << std::endl;
-    for (std::uint32_t c = 0; c < ncom; ++c) {
+    for (std::uint32_t c = 0; c < part_txt.size(); ++c) {
         IndexEntry e;
         e.community_id = c;
         e.gz_offset = static_cast<std::uint64_t>(out.tellp());
@@ -456,7 +208,42 @@ void split_gzip_gfa(const std::string& in_gfa,
 
         idx << e.community_id << '\t' << e.gz_offset << '\t' << e.gz_size << '\t'
             << e.uncompressed_size << '\t' << e.line_count << "\n";
-        entries.push_back(e);
     }
+}
 
+
+void split_gzip_gfa(const std::string& in_gfa,
+                    const std::string& out_gz,
+                    const std::string& out_dir,
+                    const BGraph& g,
+                    std::size_t max_open_text,
+                    const std::unordered_map<std::string, unsigned int>& node_to_id,
+                    const Reader::Options& reader_options,
+                    int gzip_level,
+                    int gzip_mem_level) {
+
+    // we build two vectors to map id->community_id and id->ndoe_id(str)
+    IdMaps maps;
+    build_id_maps(node_to_id, g, maps);
+
+    const auto ncom = static_cast<std::uint32_t>(g.nodes.size());
+
+    // generate a list of paths for the separate chunks
+    const auto part_txt = build_part_paths(out_dir, ncom);
+
+    SplitStats stats;
+    split_gfa_to_parts(in_gfa,
+                       node_to_id,
+                       maps.id_to_comm,
+                       part_txt,
+                       max_open_text,
+                       reader_options,
+                       stats);
+
+    compress_parts_to_gzip(out_gz,
+                           part_txt,
+                           stats.uncompressed_sizes,
+                           stats.line_counts,
+                           gzip_level,
+                           gzip_mem_level);
 }

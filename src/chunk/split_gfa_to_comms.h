@@ -5,26 +5,14 @@
 #ifndef GFAIDX_SPLIT_GFA_TO_COMMS_H
 #define GFAIDX_SPLIT_GFA_TO_COMMS_H
 
+#include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <unordered_map>
-#include <fstream>
-#include <filesystem>
-#include <vector>
 
 #include <graph_binary.h>
 
 #include "fs/Reader.h"
-
-
-namespace fs = std::filesystem;
-
-
-struct CommunitySpan {
-    std::uint64_t gz_offset = 0;
-    std::uint64_t gz_size   = 0;
-};
 
 struct IndexEntry {
     std::uint32_t community_id{};
@@ -34,20 +22,15 @@ struct IndexEntry {
     std::uint32_t line_count{};
 };
 
-CommunitySpan lookup_community_span_tsv(const std::string& index_path,
-                                        const std::uint32_t community_id);
+struct SplitStats {
+    std::vector<std::uint64_t> uncompressed_sizes;
+    std::vector<std::uint32_t> line_counts;
+};
 
-void stream_community_lines_from_gz_range(
-    const std::string& gz_path,
-    std::uint64_t offset,
-    std::uint64_t gz_size,
-    const std::function<bool(const std::string&)>& on_line);
-
-void stream_community_lines(
-    const std::string& index_path,
-    const std::string& gz_path,
-    std::uint32_t community_id,
-    const std::function<bool(const std::string&)>& on_line);
+struct IdMaps {
+    std::vector<std::string> id_to_node;
+    std::vector<std::uint32_t> id_to_comm;
+};
 
 
 void split_gzip_gfa(const std::string& in_gfa,
