@@ -4,20 +4,32 @@
 #include <fstream>
 #include <stdexcept>
 
-#if defined(__unix__) || defined(__APPLE__)
+static_assert(sizeof(gfaidx::indexer::NodeHashEntry) == 16, "NodeHashEntry size must be 16 bytes");
+
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#endif
 
 namespace gfaidx::indexer {
 
-std::uint64_t fnv1a_hash(std::string_view s) {
+std::uint64_t fnv1a_hash64(std::string_view s) {
     // 64 bit string hashing using FNV-1a
     constexpr std::uint64_t FNV_OFFSET = 1469598103934665603ULL;
     constexpr std::uint64_t FNV_PRIME  = 1099511628211ULL;
     std::uint64_t h = FNV_OFFSET;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= FNV_PRIME;
+    }
+    return h;
+}
+
+std::uint32_t fnv1a_hash32(std::string_view s) {
+    // 32 bit string hashing using FNV-1a
+    constexpr std::uint32_t FNV_OFFSET = 2166136261U;
+    constexpr std::uint32_t FNV_PRIME  = 16777619U;
+    std::uint32_t h = FNV_OFFSET;
     for (unsigned char c : s) {
         h ^= c;
         h *= FNV_PRIME;
@@ -40,7 +52,9 @@ void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& 
         }
         // todo I have to think about hash collisions at some point
         NodeHashEntry e{};
-        e.hash = fnv1a_hash(p.first);
+        e.hash = fnv1a_hash64(p.first);
+        // basically got the second hash for free due to padding, and used to avoid collisions
+        e.hash32 = fnv1a_hash32(p.first);
         e.community_id = id_to_comm[int_id];
         entries.push_back(e);
     }
@@ -48,7 +62,8 @@ void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& 
     // Sort by hash for binary-search lookup on disk.
     std::sort(entries.begin(), entries.end(),
               [](const NodeHashEntry& a, const NodeHashEntry& b) {
-                  return a.hash < b.hash;
+                  if (a.hash != b.hash) return a.hash < b.hash;
+                  return a.hash32 < b.hash32;
               });
 
     // Writing the output node hash index file
@@ -138,7 +153,8 @@ NodeHashIndex::~NodeHashIndex() {
 
 bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) const {
     // binary search lookup through the on-disk hash table
-    const std::uint64_t query_hash = fnv1a_hash(node_id);
+    const std::uint64_t query_hash = fnv1a_hash64(node_id);
+    const std::uint32_t query_hash32 = fnv1a_hash32(node_id);
 
 #if defined(__unix__) || defined(__APPLE__)
     std::size_t low_val = 0;
@@ -151,8 +167,18 @@ bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) con
         if (mid_val_hash < query_hash) low_val = mid_val + 1;
         else if (mid_val_hash > query_hash) high_val = mid_val;
         else {
-            out_com = data_[mid_val].community_id;
-            return true;
+            // Walk left to the first matching hash, then scan right to resolve collisions.
+            std::size_t left = mid_val;
+            while (left > 0 && data_[left - 1].hash == query_hash) {
+                left--;
+            }
+            for (std::size_t i = left; i < n_entries_ && data_[i].hash == query_hash; ++i) {
+                if (data_[i].hash32 == query_hash32) {
+                    out_com = data_[i].community_id;
+                    return true;
+                }
+            }
+            return false;
         }
     }
     return false;
@@ -175,8 +201,27 @@ bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) con
         if (mid_val_hash < query_hash) low_val = mid_val + 1;
         else if (mid_val_hash > query_hash) high_val = mid_val;
         else {
-            out_com = entry.community_id;
-            return true;
+            // Walk left to the first matching hash, then scan right to resolve collisions.
+            std::size_t left = mid_val;
+            while (left > 0) {
+                const std::size_t prev = left - 1;
+                file_.seekg(static_cast<std::streamoff>(prev * entry_size_), std::ios::beg);
+                NodeHashEntry prev_entry{};
+                file_.read(reinterpret_cast<char*>(&prev_entry), static_cast<std::streamsize>(entry_size_));
+                if (!file_ || prev_entry.hash != query_hash) break;
+                left = prev;
+            }
+            for (std::size_t i = left; i < n_entries_; ++i) {
+                file_.seekg(static_cast<std::streamoff>(i * entry_size_), std::ios::beg);
+                NodeHashEntry scan_entry{};
+                file_.read(reinterpret_cast<char*>(&scan_entry), static_cast<std::streamsize>(entry_size_));
+                if (!file_ || scan_entry.hash != query_hash) break;
+                if (scan_entry.hash32 == query_hash32) {
+                    out_com = scan_entry.community_id;
+                    return true;
+                }
+            }
+            return false;
         }
     }
 

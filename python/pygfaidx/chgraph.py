@@ -220,7 +220,7 @@ class ChGraph:
             output_file += ".gfa"
 
         self.write_gfa(set_of_nodes=set_of_nodes, output_file=output_file,
-                       append=append, optional_info=optional_info)
+                       append=append)
 
 
     def bfs(self, start, size):

@@ -13,11 +13,13 @@ namespace gfaidx::indexer {
 // On-disk entry format for the node hash index (.ndx).
 struct NodeHashEntry {
     std::uint64_t hash;
+    std::uint32_t hash32;
     std::uint32_t community_id;
 };
 
 // FNV-1a hash used for stable node-id hashing.
-std::uint64_t fnv1a_hash(std::string_view s);
+std::uint64_t fnv1a_hash64(std::string_view s);
+std::uint32_t fnv1a_hash32(std::string_view s);
 
 // Build and write the binary node hash index from node->id and id->community maps.
 void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& node_to_id,

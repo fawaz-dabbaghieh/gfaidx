@@ -7,17 +7,17 @@ from .chgraph import ChGraph
 
 def main():
     parser = argparse.ArgumentParser(description="Output BFS neighborhood as GFA to stdout.")
-    parser.add_argument("graph", help="input .gfa.gz (indexed)")
-    parser.add_argument("node_id", help="start node id")
+    parser.add_argument("graph", type=str, help="input .gfa.gz (indexed)")
+    parser.add_argument("node_id", type=str, help="start node id")
     parser.add_argument("size", nargs="?", type=int, default=100, help="neighborhood size")
-    parser.add_argument("outgfa", nargs="?", default="", help="output gfa file")
+    parser.add_argument("outgfa", nargs="?", type=str, default="", help="output gfa file")
     args = parser.parse_args()
 
     if not os.path.exists(args.graph):
         print(f"The graph {args.graph} does not exist", file=sys.stderr)
         return 1
 
-
+    print(args.node_id)
     g = ChGraph(args.graph)
     neighborhood = g.bfs(args.node_id, args.size)
     if args.outgfa:
