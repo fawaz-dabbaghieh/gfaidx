@@ -341,17 +341,11 @@ class ChGraph:
 
             first_node = str(line[1])
             second_node = str(line[3])
-            # todo need to deal with edges that are part of another chunk
-            # if first_node not in self.nodes:
-            # 	logging.warning(f"an edge between {first_node} and {second_node} exists but a "
-            # 					f"node record for {first_node} does not exist in the file. Skipping")
-            # 	continue
-            # if second_node not in self.nodes:
-            # 	logging.warning(f"an edge between {first_node} and {second_node} exists but a "
-            # 					f"node record for {second_node} does not exist in the file. Skipping")
-            # 	continue
 
-            overlap = int(line[5][:-1])
+            overlap = 0
+            if len(line) > 5:
+                if not line[5] == "*":
+                    overlap = int(line[5][:-1])
 
             if line[2] == "-":
                 from_start = True

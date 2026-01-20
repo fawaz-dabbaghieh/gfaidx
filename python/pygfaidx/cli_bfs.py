@@ -9,8 +9,8 @@ def main():
     parser = argparse.ArgumentParser(description="Output BFS neighborhood as GFA to stdout.")
     parser.add_argument("graph", help="input .gfa.gz (indexed)")
     parser.add_argument("node_id", help="start node id")
-    parser.add_argument("size", type=int, help="neighborhood size")
-    parser.add_argument("outgfa", help="output gfa file")
+    parser.add_argument("size", nargs="?", type=int, default=100, help="neighborhood size")
+    parser.add_argument("outgfa", nargs="?", default="", help="output gfa file")
     args = parser.parse_args()
 
     if not os.path.exists(args.graph):
