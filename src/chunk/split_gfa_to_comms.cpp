@@ -121,6 +121,7 @@ static void build_id_maps(const std::unordered_map<std::string, unsigned int>& n
     }
 }
 
+
 static std::vector<fs::path> build_part_paths(const std::string& out_dir, std::uint32_t n_communities) {
     std::vector<fs::path> part_txt;
     part_txt.reserve(n_communities);

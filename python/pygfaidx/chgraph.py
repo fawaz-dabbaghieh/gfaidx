@@ -153,7 +153,7 @@ class ChGraph:
         except KeyError:
             new_chunk = self.node_index.lookup(node_id)
             if new_chunk is None:
-                logger.error(f"Something went wrong as node {node_id} does not exist in the index")
+                logger.error(f"Something went wrong, node {node_id} was not found in the index")
                 logger.error(f"Please make sure you are using the correct graph and nothing has been edited")
                 sys.exit()
             logger.info(f"node {node_id} is not in the graph, loading chunk {new_chunk}")
@@ -531,7 +531,7 @@ class ChGraph:
                 case = cases[(n1[0], n2[0])]
             except KeyError:
                 logging.error(
-                    "Something went wrong when checking the path, make sure the path follows this example"
+                    "Something went wrong when checking the path, make sure the path follows this format"
                     ">node<node>node<nod"
                 )
                 return False
