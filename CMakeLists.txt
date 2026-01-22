@@ -48,6 +48,7 @@ add_executable(gfaidx
         src/indexer/index_gfa_main.cpp
         src/indexer/index_gfa_helpers.cpp
         src/indexer/node_hash_index.cpp
+        src/utils/Memory.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
         src/fs/gfa_line_parsers.cpp

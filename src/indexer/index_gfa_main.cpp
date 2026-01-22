@@ -11,13 +11,13 @@
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/node_hash_index.h"
 #include "chunk/split_gfa_to_comms.h"
+#include "utils/Memory.h"
 #include "utils/Timer.h"
 
 #define WEIGHTED     0
 #define UNWEIGHTED   1
 
 namespace gfaidx::indexer {
-
 int run_index_gfa(const argparse::ArgumentParser& program) {
     /*
      * parse arguments and check inputs/outputs
@@ -117,6 +117,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                    "latest",
                                    true);
     std::cout << get_time() << ": Using temp directory " << tmp_dir << std::endl;
+    log_memory("After temp directory setup");
 
     std::string sep = "/";
     std::unordered_map<std::string, unsigned int> node_id_map;
@@ -127,6 +128,11 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     generate_edgelist(input_gfa, tmp_edgelist, node_id_map, reader_options);
     std::cout << get_time() << ": Finished generating the edges list in " << timer.elapsed() << " seconds" << std::endl;
     std::cout << get_time() << ": The GFA has " << N_NODES << " S lines, and " << N_EDGES << " L lines" << std::endl;
+    log_map_stats("Node id map stats",
+                  node_id_map.size(),
+                  node_id_map.bucket_count(),
+                  node_id_map.load_factor());
+    log_memory("After edge list generation");
 
     /*
      * sorting the edge list with linux sort
@@ -136,6 +142,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::cout << get_time() << ": Sorting the edges" << std::endl;
     run_sort(tmp_edgelist, sorted_tmp_edgelist, tmp_dir);
     std::cout << get_time() << ": Finished sorting the edges in " << timer.elapsed() << " seconds" << std::endl;
+    log_memory("After edge list sort");
 
     /*
      * loading the graph from the edge list with the louvain graph class
@@ -144,6 +151,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     timer.reset();
     Graph graph(sorted_tmp_edgelist.c_str(), UNWEIGHTED);
     std::cout << get_time() << ": Finished loading the edge list from disk in " << timer.elapsed() << " seconds" << std::endl;
+    log_memory("After graph load");
 
     /*
      * converting the graph to binary format for faster processing
@@ -153,6 +161,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     timer.reset();
     graph.display_binary(tmp_binary.c_str(), nullptr, UNWEIGHTED);
     std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
+    log_memory("After binary graph write");
 
     /*
      * performing community detection on the binary graph
@@ -162,11 +171,13 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     BGraph final_graph;
     generate_communities(tmp_binary, final_graph, display_level);
     std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
+    log_memory("After community detection");
 
     timer.reset();
     std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
     add_singleton_community(input_gfa, node_id_map, final_graph, reader_options);
     std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
+    log_memory("After singleton scan");
 
 
     timer.reset();
@@ -175,6 +186,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                    reader_options, gzip_level, gzip_mem_level);
 
     std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
+    log_memory("After split and gzip");
 
     timer.reset();
     std::cout << get_time() << ": Writing node hash index to " << node_index_path << std::endl;
@@ -192,6 +204,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         std::cerr << err.what() << std::endl;
         return 1;
     }
+    log_memory("After node hash index");
 
     if (!keep_tmp) {
         std::cout << get_time() << ": Removing the temporary files" << std::endl;
