@@ -5,9 +5,9 @@
 #include <iostream>
 
 #include <argparse/argparse.hpp>
-#include <graph.h>
 
 #include "fs/fs_helpers.h"
+#include "indexer/direct_binary_writer.h"
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/node_hash_index.h"
 #include "chunk/split_gfa_to_comms.h"
@@ -146,30 +146,22 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     log_memory("After edge list sort");
 
     /*
-     * loading the graph from the edge list with the louvain graph class
+     * converting the edge list to binary format for faster processing
      */
-    std::string tmp_binary;
-    // scoping so the graph doesn't stay in memory as we don't need it after we display the binary to disk
-    {
-        std::cout << get_time() << ": Loading the edge list from disk" << std::endl;
-        timer.reset();
-        Graph graph(sorted_tmp_edgelist.c_str(), UNWEIGHTED);
-        std::cout << get_time() << ": Finished loading the edge list from disk in " << timer.elapsed() << " seconds" << std::endl;
-        log_memory("After graph load");
-
-        /*
-         * converting the graph to binary format for faster processing
-         */
-        tmp_binary = tmp_dir + sep + "tmp_binary.bin";
-        std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
-        timer.reset();
-        graph.display_binary(tmp_binary.c_str(), nullptr, UNWEIGHTED);
-        std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
-
-        log_memory("After binary graph write, inside the scope");
+    std::string tmp_binary = tmp_dir + sep + "tmp_binary.bin";
+    std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
+    timer.reset();
+    try {
+        // I made this functions instead of using the Louvain graph object from the earlier versions of gfaidx
+        // I think that object was too big, and one can build the binary version from the edge list directly
+        // but having to spend a bit more time due to passing through the list twice
+        write_binary_graph_from_edgelist(sorted_tmp_edgelist, tmp_binary, N_NODES);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
     }
-
-    log_memory("After binary graph write, outside the scope");
+    std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
+    log_memory("After binary graph write");
 
     /*
      * performing community detection on the binary graph

@@ -45,6 +45,7 @@ add_executable(gfaidx
         src/chunk/chunk_reader.cpp
         src/chunk/text_handle_cache.cpp
         src/chunk/split_gfa_to_comms.cpp
+        src/indexer/direct_binary_writer.cpp
         src/indexer/index_gfa_main.cpp
         src/indexer/index_gfa_helpers.cpp
         src/indexer/node_hash_index.cpp

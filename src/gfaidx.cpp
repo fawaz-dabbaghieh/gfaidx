@@ -13,7 +13,7 @@
 //          IDs are ordered
 //       5- build the node_id->community_id binary index and add that to get_chunk (done)
 int main(int argc, char** argv) {
-    argparse::ArgumentParser program("gfaidx", "0.2.4");
+    argparse::ArgumentParser program("gfaidx", "0.3.0");
 
     argparse::ArgumentParser index_gfa("index_gfa");
     index_gfa.add_description("Index and split a GFA file into communities");
