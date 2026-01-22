@@ -48,6 +48,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     bool keep_tmp = program.get<bool>("keep_tmp");
 
+    // check progress_every user input
     std::uint64_t progress_every;
     const auto progress_str = program.get<std::string>("progress_every");
     try {
@@ -63,7 +64,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         progress_every = 1000000;
     }
 
-    int gzip_level = 6;
+    // check gzip_level user input
+    int gzip_level;
     const auto gzip_level_str = program.get<std::string>("gzip_level");
     try {
         long long parsed = std::stoll(gzip_level_str);
@@ -77,7 +79,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         gzip_level = 6;
     }
 
-    int gzip_mem_level = 8;
+    // check gzip_mem_level user input
+    int gzip_mem_level;
     const auto gzip_mem_level_str = program.get<std::string>("gzip_mem_level");
     try {
         long long parsed = std::stoll(gzip_mem_level_str);
@@ -101,17 +104,18 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
 
     Timer timer;
+
     /*
      * creating the edge list from the GFA file
      */
-
-    std::string tmp_base = program.get<std::string>("tmp_dir");
+    auto tmp_base = program.get<std::string>("tmp_dir");
     if (tmp_base.empty()) {
         std::filesystem::path input_path(input_gfa);
         auto parent = input_path.parent_path();
         tmp_base = parent.empty() ? std::string("") : parent.string();
     }
 
+    // symlink (latest) to the latest tmp, in case there is more than one, we know which one is the latest
     auto tmp_dir = create_temp_dir(tmp_base,
                                    "gfaidx_tmp_",
                                    "latest",
@@ -128,10 +132,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     generate_edgelist(input_gfa, tmp_edgelist, node_id_map, reader_options);
     std::cout << get_time() << ": Finished generating the edges list in " << timer.elapsed() << " seconds" << std::endl;
     std::cout << get_time() << ": The GFA has " << N_NODES << " S lines, and " << N_EDGES << " L lines" << std::endl;
-    log_map_stats("Node id map stats",
-                  node_id_map.size(),
-                  node_id_map.bucket_count(),
-                  node_id_map.load_factor());
+    log_map_stats("Node id map stats", node_id_map);
     log_memory("After edge list generation");
 
     /*
@@ -147,21 +148,28 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     /*
      * loading the graph from the edge list with the louvain graph class
      */
-    std::cout << get_time() << ": Loading the edge list from disk" << std::endl;
-    timer.reset();
-    Graph graph(sorted_tmp_edgelist.c_str(), UNWEIGHTED);
-    std::cout << get_time() << ": Finished loading the edge list from disk in " << timer.elapsed() << " seconds" << std::endl;
-    log_memory("After graph load");
+    std::string tmp_binary;
+    // scoping so the graph doesn't stay in memory as we don't need it after we display the binary to disk
+    {
+        std::cout << get_time() << ": Loading the edge list from disk" << std::endl;
+        timer.reset();
+        Graph graph(sorted_tmp_edgelist.c_str(), UNWEIGHTED);
+        std::cout << get_time() << ": Finished loading the edge list from disk in " << timer.elapsed() << " seconds" << std::endl;
+        log_memory("After graph load");
 
-    /*
-     * converting the graph to binary format for faster processing
-     */
-    std::string tmp_binary = tmp_dir + sep + "tmp_binary.bin";
-    std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
-    timer.reset();
-    graph.display_binary(tmp_binary.c_str(), nullptr, UNWEIGHTED);
-    std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
-    log_memory("After binary graph write");
+        /*
+         * converting the graph to binary format for faster processing
+         */
+        tmp_binary = tmp_dir + sep + "tmp_binary.bin";
+        std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
+        timer.reset();
+        graph.display_binary(tmp_binary.c_str(), nullptr, UNWEIGHTED);
+        std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
+
+        log_memory("After binary graph write, inside the scope");
+    }
+
+    log_memory("After binary graph write, outside the scope");
 
     /*
      * performing community detection on the binary graph
@@ -179,17 +187,6 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
     log_memory("After singleton scan");
 
-
-    timer.reset();
-    std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
-    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map,
-                   reader_options, gzip_level, gzip_mem_level);
-
-    std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
-    log_memory("After split and gzip");
-
-    timer.reset();
-    std::cout << get_time() << ": Writing node hash index to " << node_index_path << std::endl;
     std::vector<std::uint32_t> id_to_comm(node_id_map.size());
     // Build int-id -> community-id mapping for all nodes.
     for (std::uint32_t c = 0; c < final_graph.nodes.size(); ++c) {
@@ -197,13 +194,20 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
             id_to_comm[n] = c;
         }
     }
-    try {
-        write_node_hash_index(node_id_map, id_to_comm, node_index_path);
-        std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
-    } catch (const std::exception& err) {
-        std::cerr << err.what() << std::endl;
-        return 1;
-    }
+
+
+    timer.reset();
+    std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map,
+                   id_to_comm, reader_options, gzip_level, gzip_mem_level);
+
+    std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
+    log_memory("After split and gzip");
+
+    timer.reset();
+    std::cout << get_time() << ": Writing node hash index to " << node_index_path << std::endl;
+    write_node_hash_index(node_id_map, id_to_comm, node_index_path);
+    std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
     log_memory("After node hash index");
 
     if (!keep_tmp) {

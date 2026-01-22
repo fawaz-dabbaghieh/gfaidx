@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <graph_binary.h>
 
@@ -27,10 +28,10 @@ struct SplitStats {
     std::vector<std::uint32_t> line_counts;
 };
 
-struct IdMaps {
-    std::vector<std::string> id_to_node;
-    std::vector<std::uint32_t> id_to_comm;
-};
+// struct IdMaps {
+//     std::vector<std::string> id_to_node;
+//     std::vector<std::uint32_t> id_to_comm;
+// };
 
 
 void split_gzip_gfa(const std::string& in_gfa,
@@ -39,6 +40,7 @@ void split_gzip_gfa(const std::string& in_gfa,
                     const BGraph& g,
                     std::size_t max_open_text,
                     const std::unordered_map<std::string, unsigned int>& node_id_map,
+                    const std::vector<std::uint32_t>& id_to_comm,
                     const Reader::Options& reader_options = Reader::Options{},
                     int gzip_level = 6,
                     int gzip_mem_level = 8);

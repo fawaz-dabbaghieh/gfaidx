@@ -101,26 +101,6 @@ static std::string process_lines(const std::string_view line) {
 }
 
 
-static void build_id_maps(const std::unordered_map<std::string, unsigned int>& node_to_id,
-                          const BGraph& g,
-                          IdMaps& maps) {
-    std::cout << get_time() << ": Generating id to node and community vectors" << std::endl;
-    // I needed this before to map back from integer id to node string ID
-    // in the current implementation I don't need it, but might need it soon
-    // so keeping the IdMaps struct for now
-    // maps.id_to_node.resize(node_to_id.size());
-    // for (const auto& p : node_to_id) {
-    //     maps.id_to_node[p.second] = p.first;
-    // }
-
-    maps.id_to_comm.resize(node_to_id.size());
-    for (int c = 0; c < g.nodes.size(); ++c) {
-        for (const auto n : g.nodes[c]) {
-            maps.id_to_comm[n] = c;
-        }
-    }
-}
-
 
 static std::vector<fs::path> build_part_paths(const std::string& out_dir, std::uint32_t n_communities) {
     std::vector<fs::path> part_txt;
@@ -219,28 +199,27 @@ void split_gzip_gfa(const std::string& in_gfa,
                     const BGraph& g,
                     std::size_t max_open_text,
                     const std::unordered_map<std::string, unsigned int>& node_to_id,
+                    const std::vector<std::uint32_t>& id_to_comm,
                     const Reader::Options& reader_options,
                     int gzip_level,
                     int gzip_mem_level) {
-
-    // we build two vectors to map id->community_id and id->ndoe_id(str)
-    IdMaps maps;
-    build_id_maps(node_to_id, g, maps);
 
     const auto ncom = static_cast<std::uint32_t>(g.nodes.size());
 
     // generate a list of paths for the separate chunks
     const auto part_txt = build_part_paths(out_dir, ncom);
 
+    // splits the GFA file to separate communities on disk
     SplitStats stats;
     split_gfa_to_parts(in_gfa,
                        node_to_id,
-                       maps.id_to_comm,
+                       id_to_comm,
                        part_txt,
                        max_open_text,
                        reader_options,
                        stats);
 
+    // compresses each community to the final graph and builds the offsets index
     compress_parts_to_gzip(out_gz,
                            part_txt,
                            stats.uncompressed_sizes,
