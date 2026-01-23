@@ -321,8 +321,10 @@ bool Reader::ensure_Eol_or_EoF() {
 bool Reader::read_line(std::string_view& out) {
     // We have several cases here:
     // 1: Buffer is exhausted (empty) so we'll go into refill, e.g., first line
-    // 2: buffer already have data, we need to look for next \n and adjust current and end
-    // 3: We have a long line that doesn't fit in the buffer, so we need use the long_line_ string
+    // 2: buffer already has data, we need to look for next \n and adjust current and end
+    // 3: We have a long line that doesn't fit in the buffer (i.e., we can't find \n),
+    //    so we need use the long_line_ string
+
     // Note: I think I need to look into the long_line_ string, maybe there's a better way to do this
     out = {};
 

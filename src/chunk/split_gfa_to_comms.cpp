@@ -86,20 +86,13 @@ static void append_one_gzip_member_from_file(std::ofstream& out,
     deflateEnd(&strm);
 }
 
-static std::string process_lines(const std::string_view line) {
-    if (line[0] == 'L') {
-        auto [src, dest] = extract_L_nodes(line);
-        return src;
 
-    } if (line[0] == 'S') {
-        std::string node_id;
-        std::string node_seq;
-        extract_S_node(line, node_id, node_seq);
-        return node_id;
+void debug_print_node_to_comm(const std::unordered_map<std::string, unsigned int>& node_to_id,
+                             const std::vector<std::uint32_t>& id_to_comm) {
+    for (const auto& [node_id, node_int_id] : node_to_id) {
+        std::cout << node_id << " -> " << id_to_comm[node_int_id] << std::endl;
     }
-    return "";
 }
-
 
 
 static std::vector<fs::path> build_part_paths(const std::string& out_dir, std::uint32_t n_communities) {
@@ -112,13 +105,38 @@ static std::vector<fs::path> build_part_paths(const std::string& out_dir, std::u
     return part_txt;
 }
 
+
+inline unsigned int get_node_comm(const std::string& node_id, const std::unordered_map<std::string,
+    unsigned int>& node_to_id,
+    const std::vector<std::uint32_t>& id_to_comm) {
+
+    if (node_id.empty()) {
+        std::cerr << "Empty node ID encountered" << std::endl;
+        exit(1);
+    }
+
+    unsigned int node_int_id;
+    try {
+        node_int_id = node_to_id.at(node_id);
+    } catch (const std::out_of_range& e) {
+        std::cerr << "Node " << node_id << " not found in the map" << std::endl;
+        std::cerr << e.what() << std::endl;
+        exit(1);
+    }
+    return id_to_comm[node_int_id];
+
+}
+// for line processing, should split it to separate functions maybe
+// a bit messy, but it's fine for now
 static void split_gfa_to_parts(const std::string& in_gfa,
                                const std::unordered_map<std::string, unsigned int>& node_to_id,
                                const std::vector<std::uint32_t>& id_to_comm,
                                const std::vector<fs::path>& part_txt,
                                std::size_t max_open_text,
-                               const Reader::Options& reader_options,
-                               SplitStats& stats) {
+                               const Reader::Options& reader_options) {
+
+    // because I'll be opening a lot of files and the system limits the numer of open file
+    // I am using LRU cache to loop through the open files
     TextHandleCache cache(part_txt, max_open_text);
 
     std::string_view line;
@@ -128,36 +146,50 @@ static void split_gfa_to_parts(const std::string& in_gfa,
         exit(1);
     }
 
-    stats.uncompressed_sizes.assign(id_to_comm.size(), 0);
-    stats.line_counts.assign(id_to_comm.size(), 0);
-
     std::cout << get_time() << ": Starting splitting the GFA into communities" << std::endl;
+    std::uint32_t last_comm = part_txt.size() - 1;
+
+    // debug_print_node_to_comm(node_to_id, id_to_comm);
+
     while (file_reader.read_line(line)) {
-        std::string node_id = process_lines(line);
-        if (node_id.empty()) continue;
 
-        unsigned int node_int_id;
-        try {
-            node_int_id = node_to_id.at(node_id);
-        } catch (const std::out_of_range& e) {
-            std::cerr << "Node " << node_id << " not found in the map" << std::endl;
-            std::cerr << e.what() << std::endl;
-            exit(1);
+        if (line[0] == 'H') {
+            cache.write_line(0, line);
+            continue;
         }
+        // here I need to check if the edge belongs to two chunks
+        // separate into its own chunk with the other in-between edges
+        if (line[0] == 'L') {
+            auto [source, destination] = extract_L_nodes(line);
+            auto src_comm_id = get_node_comm(source, node_to_id, id_to_comm);
+            auto dest_comm_id = get_node_comm(destination, node_to_id, id_to_comm);
+            if (src_comm_id == dest_comm_id) {
+                cache.write_line(src_comm_id, line);
+            } else {  // in-between edges
+                cache.write_line(last_comm, line);
+            }
+        // using extract_S_node I think was wasteful, I only need the node ID
+        // so I'll only copy the parts that find the node ID
+        } else if (line[0] == 'S') {
+            std::string node_id;
+            // as for the GFA format, the node ID comes after S\tnode_id\t
+            // so between the first and second tabs
+            const size_t t1 = line.find('\t');
+            if (t1 == npos) offending_line(line);
+            const size_t t2 = line.find('\t', t1 + 1);
+            if (t2 == npos) offending_line(line);
+            node_id = std::string(line.substr(t1 + 1, t2 - (t1 + 1)));
+            auto node_comm_id = get_node_comm(node_id, node_to_id, id_to_comm);
+            // std::uint32_t c = id_to_comm[node_int_id];
+            cache.write_line(node_comm_id, line);
 
-        std::uint32_t c = id_to_comm[node_int_id];
-        cache.write_line(c, line);
-        stats.uncompressed_sizes[c] += (line.size() + 1);
-        stats.line_counts[c] += 1;
+        }
     }
     cache.close_all();
-
 }
 
 static void compress_parts_to_gzip(const std::string& out_gz,
                                    const std::vector<fs::path>& part_txt,
-                                   const std::vector<std::uint64_t>& uncomp,
-                                   const std::vector<std::uint32_t>& lines,
                                    int gzip_level,
                                    int gzip_mem_level) {
     std::ofstream out(out_gz, std::ios::binary);
@@ -166,32 +198,28 @@ static void compress_parts_to_gzip(const std::string& out_gz,
 
     std::ofstream idx(out_idx);
     if (!idx) throw std::runtime_error("Failed to open " + out_idx);
-    idx << "#community_id\tgz_offset\tgz_size\tuncompressed_size\tline_count\n";
+    idx << "#community_id\tgz_offset\tgz_size\n";
 
     std::cout << get_time() << ": Starting to compress and add to final file" << std::endl;
     for (std::uint32_t c = 0; c < part_txt.size(); ++c) {
-        IndexEntry e;
-        e.community_id = c;
-        e.gz_offset = static_cast<std::uint64_t>(out.tellp());
-        e.uncompressed_size = uncomp[c];
-        e.line_count = lines[c];
+        IndexEntry offsets_idx;
+        offsets_idx.community_id = c;
+        offsets_idx.gz_offset = static_cast<std::uint64_t>(out.tellp());
 
         if (fs::exists(part_txt[c]) && fs::file_size(part_txt[c]) > 0) {
             Timer member_timer;
             std::cout << get_time() << ": Compressing community " << c << std::endl;
             append_one_gzip_member_from_file(out, part_txt[c], gzip_level, gzip_mem_level);
-            e.gz_size = static_cast<std::uint64_t>(out.tellp()) - e.gz_offset;
+            offsets_idx.gz_size = static_cast<std::uint64_t>(out.tellp()) - offsets_idx.gz_offset;
             std::cout << get_time() << ": Finished community " << c
                       << " in " << member_timer.elapsed() << " seconds" << std::endl;
         } else {
-            e.gz_size = 0;
+            offsets_idx.gz_size = 0;
         }
 
-        idx << e.community_id << '\t' << e.gz_offset << '\t' << e.gz_size << '\t'
-            << e.uncompressed_size << '\t' << e.line_count << "\n";
+        idx << offsets_idx.community_id << '\t' << offsets_idx.gz_offset << '\t' << offsets_idx.gz_size << "\n";
     }
 }
-
 
 void split_gzip_gfa(const std::string& in_gfa,
                     const std::string& out_gz,
@@ -207,23 +235,19 @@ void split_gzip_gfa(const std::string& in_gfa,
     const auto ncom = static_cast<std::uint32_t>(g.nodes.size());
 
     // generate a list of paths for the separate chunks
-    const auto part_txt = build_part_paths(out_dir, ncom);
+    const auto part_txt = build_part_paths(out_dir, ncom + 1);
 
     // splits the GFA file to separate communities on disk
-    SplitStats stats;
     split_gfa_to_parts(in_gfa,
                        node_to_id,
                        id_to_comm,
                        part_txt,
                        max_open_text,
-                       reader_options,
-                       stats);
+                       reader_options);
 
     // compresses each community to the final graph and builds the offsets index
     compress_parts_to_gzip(out_gz,
                            part_txt,
-                           stats.uncompressed_sizes,
-                           stats.line_counts,
                            gzip_level,
                            gzip_mem_level);
 }

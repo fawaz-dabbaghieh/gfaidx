@@ -4,13 +4,6 @@
 
 #include "gfa_line_parsers.h"
 
-static constexpr size_t npos = -1; // size_type(-1);
-
-
-inline void offending_line(const std::string_view line) {
-    std::cerr << "Offending line: " << line << std::endl;
-    exit(1);
-}
 
 void extract_S_node(std::string_view line, std::string& seq_name, std::string& seq) {
 

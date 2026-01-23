@@ -76,6 +76,9 @@ class ChGraph:
 
         self.nodes = dict()
         self.graph_name = graph_file
+        self.shared_edges_by_node = {}
+        self.shared_chunk_id = max(self.offsets.keys())
+        self._load_shared_edges()
 
         self.loaded_c = deque() # newly loaded chunk IDs
         self.loaded_c_limit = 50
@@ -286,9 +289,9 @@ class ChGraph:
                 logger.info(f"Unloading chunk {c_id} and current loaded c are {self.loaded_c}")
                 self.unload_chunk(c_id)
         logger.info(f"Loading chunk {chunk_id}")
-        # pdb.set_trace()
-        offset, gz_size, _, _ = self.offsets[chunk_id]
-        self.read_gfa(self.graph_name, offset, gz_size)
+        offset, gz_size = self.offsets[chunk_id]
+        loaded_nodes = self.read_gfa(self.graph_name, offset, gz_size)
+        self._apply_shared_edges(loaded_nodes)
         if chunk_id not in self.loaded_c:
             self.loaded_c.append(chunk_id)
         logger.info(f"Loaded chunks so far {self.loaded_c}")
@@ -315,6 +318,7 @@ class ChGraph:
         """
 
         edges = []
+        loaded_nodes = set()
         for line in self._iter_gzip_member_lines(gfa_file_path, offset, gz_size):
             if line.startswith("S"):
                 line = line.strip().split("\t")
@@ -323,6 +327,7 @@ class ChGraph:
                 self.nodes[n_id] = Node(n_id)
                 self.nodes[n_id].seq = line[2]
                 self.nodes[n_id].seq_len = n_len
+                loaded_nodes.add(n_id)
 
                 tags = line[3:]
                 # adding the extra tags if any to the node object
@@ -379,22 +384,82 @@ class ChGraph:
                     self.nodes[second_node].end.add((first_node, 1, overlap))
 
         # gzip stream is handled by the iterator
+        return loaded_nodes
 
     def _load_idx(self, idx_path):
         """
-        Load the .idx offsets file into a dict: community_id -> (gz_offset, gz_size, uncompressed_size, line_count)
+        Load the .idx offsets file into a dict: community_id -> (gz_offset, gz_size)
         """
         offsets = {}
         with open(idx_path, "r") as idx_file:
             for line in idx_file:
-                if not line or line.startswith("#"):
+                if line.startswith("#"):
                     continue
                 parts = line.strip().split("\t")
-                if len(parts) < 5:
-                    continue
                 cid = int(parts[0])
-                offsets[cid] = (int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4]))
+                offsets[cid] = (int(parts[1]), int(parts[2]))
         return offsets
+
+    def _load_shared_edges(self):
+        """
+        Load the shared-edge chunk (last chunk) into an in-memory index.
+        """
+        if self.shared_chunk_id is None:
+            return
+        offset, gz_size = self.offsets[self.shared_chunk_id]
+        for line in self._iter_gzip_member_lines(self.graph_name, offset, gz_size):
+            if not line.startswith("L"):
+                continue
+            edge = self._parse_edge_line(line)
+            if edge is None:
+                continue
+            n1, _, n2, _, _ = edge
+            self.shared_edges_by_node.setdefault(n1, []).append(edge)
+            self.shared_edges_by_node.setdefault(n2, []).append(edge)
+
+    def _apply_shared_edges(self, loaded_nodes):
+        """
+        Add shared edges involving currently loaded nodes.
+        """
+        for node_id in loaded_nodes:
+            for edge in self.shared_edges_by_node.get(node_id, []):
+                self._add_edge_tuple(edge)
+
+    def _parse_edge_line(self, line):
+        parts = line.split()
+        if len(parts) < 5:
+            return None
+        first_node = str(parts[1])
+        second_node = str(parts[3])
+        overlap = 0
+        if len(parts) > 5 and parts[5] != "*":
+            overlap = int(parts[5][:-1])
+        from_start = parts[2] == "-"
+        to_end = parts[4] == "-"
+        return (first_node, from_start, second_node, to_end, overlap)
+
+    def _add_edge_tuple(self, edge):
+        first_node, from_start, second_node, to_end, overlap = edge
+        if from_start and to_end:
+            if first_node in self.nodes:
+                self.nodes[first_node].start.add((second_node, 1, overlap))
+            if second_node in self.nodes:
+                self.nodes[second_node].end.add((first_node, 0, overlap))
+        elif from_start and not to_end:
+            if first_node in self.nodes:
+                self.nodes[first_node].start.add((second_node, 0, overlap))
+            if second_node in self.nodes:
+                self.nodes[second_node].start.add((first_node, 0, overlap))
+        elif not from_start and not to_end:
+            if first_node in self.nodes:
+                self.nodes[first_node].end.add((second_node, 0, overlap))
+            if second_node in self.nodes:
+                self.nodes[second_node].start.add((first_node, 1, overlap))
+        elif not from_start and to_end:
+            if first_node in self.nodes:
+                self.nodes[first_node].end.add((second_node, 1, overlap))
+            if second_node in self.nodes:
+                self.nodes[second_node].end.add((first_node, 1, overlap))
 
     def _iter_gzip_member_lines(self, gz_path, offset, gz_size, chunk_size=1 << 20):
         """
@@ -573,4 +638,3 @@ class ChGraph:
                 logging.error(f"Some error happened where a node {n} doesn't start with > or <")
                 return ""
         return "".join(seq)
-

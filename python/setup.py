@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 setup(
     name="pygfaidx",
-    version="0.1.0",
+    version="0.3.0",
     description="Python interface and command line tools for indexed GFA with gfaidx",
     author='Fawaz Dabbaghie',
     author_email='fawaz.dabbaghieh@gmail.com',

@@ -10,7 +10,12 @@
 #include <iostream>
 #include <vector>
 
-inline void offending_line(const std::string_view line);
+static constexpr size_t npos = -1; // size_type(-1);
+
+inline void offending_line(const std::string_view line) {
+    std::cerr << "Offending line: " << line << std::endl;
+    exit(1);
+}
 
 std::pair<std::string, std::string> extract_L_nodes(std::string_view line);
 

@@ -19,14 +19,12 @@ struct IndexEntry {
     std::uint32_t community_id{};
     std::uint64_t gz_offset{};
     std::uint64_t gz_size{};
-    std::uint64_t uncompressed_size{};
-    std::uint32_t line_count{};
 };
 
-struct SplitStats {
-    std::vector<std::uint64_t> uncompressed_sizes;
-    std::vector<std::uint32_t> line_counts;
-};
+// struct SplitStats {
+//     std::vector<std::uint64_t> uncompressed_sizes;
+//     std::vector<std::uint32_t> line_counts;
+// };
 
 // struct IdMaps {
 //     std::vector<std::string> id_to_node;
