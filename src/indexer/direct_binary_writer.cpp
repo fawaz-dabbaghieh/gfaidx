@@ -142,7 +142,6 @@ void write_binary_graph_from_edgelist(const std::string& edge_list_path,
         prev = degrees[i];
     }
 
-
     in.clear();
     in.seekg(0, std::ios::beg);
     // passing through the edge list again

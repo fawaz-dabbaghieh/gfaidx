@@ -168,7 +168,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
      */
     timer.reset();
     std::cout << get_time() << ": Starting community detection" << std::endl;
-    BGraph final_graph;
+    BGraph final_graph; // binary graph
     generate_communities(tmp_binary, final_graph, display_level);
     std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
     log_memory("After community detection");
