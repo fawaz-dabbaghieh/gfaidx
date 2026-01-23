@@ -52,7 +52,7 @@ class ChGraph:
     Graph object containing the important information about the graph
     """
 
-    def __init__(self, graph_file):
+    def __init__(self, graph_file, use_shared_edges_cache=True):
         # check for index and ndx
         if not graph_file.endswith(".gfa.gz"):
             logging.error("the graph needs to end with .gfa.gz")
@@ -77,8 +77,10 @@ class ChGraph:
         self.nodes = dict()
         self.graph_name = graph_file
         self.shared_edges_by_node = {}
-        self.shared_chunk_id = max(self.offsets.keys())
-        self._load_shared_edges()
+        self.shared_chunk_id = max(self.offsets.keys()) if self.offsets else None
+        self.use_shared_edges_cache = use_shared_edges_cache
+        if self.use_shared_edges_cache:
+            self._load_shared_edges()
 
         self.loaded_c = deque() # newly loaded chunk IDs
         self.loaded_c_limit = 50
@@ -421,9 +423,23 @@ class ChGraph:
         """
         Add shared edges involving currently loaded nodes.
         """
-        for node_id in loaded_nodes:
-            for edge in self.shared_edges_by_node.get(node_id, []):
-                self._add_edge_tuple(edge)
+        if self.shared_chunk_id is None:
+            return
+        if self.use_shared_edges_cache:
+            for node_id in loaded_nodes:
+                for edge in self.shared_edges_by_node.get(node_id, []):
+                    self._add_edge_tuple(edge)
+        else:
+            offset, gz_size = self.offsets[self.shared_chunk_id]
+            for line in self._iter_gzip_member_lines(self.graph_name, offset, gz_size):
+                if not line.startswith("L"):
+                    continue
+                edge = self._parse_edge_line(line)
+                if edge is None:
+                    continue
+                n1, _, n2, _, _ = edge
+                if n1 in loaded_nodes or n2 in loaded_nodes:
+                    self._add_edge_tuple(edge)
 
     def _parse_edge_line(self, line):
         parts = line.split()
