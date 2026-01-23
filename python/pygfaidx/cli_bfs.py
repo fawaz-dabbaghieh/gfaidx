@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-from .chgraph import ChGraph
+from pygfaidx.chgraph import ChGraph
 
 
 def main():
