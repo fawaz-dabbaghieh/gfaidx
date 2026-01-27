@@ -35,7 +35,7 @@ struct IndexEntry {
 void split_gzip_gfa(const std::string& in_gfa,
                     const std::string& out_gz,
                     const std::string& out_dir,
-                    const BGraph& g,
+                    const std::uint32_t ncom,
                     std::size_t max_open_text,
                     const std::unordered_map<std::string, unsigned int>& node_id_map,
                     const std::vector<std::uint32_t>& id_to_comm,

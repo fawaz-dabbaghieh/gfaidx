@@ -224,7 +224,7 @@ static void compress_parts_to_gzip(const std::string& out_gz,
 void split_gzip_gfa(const std::string& in_gfa,
                     const std::string& out_gz,
                     const std::string& out_dir,
-                    const BGraph& g,
+                    const std::uint32_t ncom,
                     std::size_t max_open_text,
                     const std::unordered_map<std::string, unsigned int>& node_to_id,
                     const std::vector<std::uint32_t>& id_to_comm,
@@ -232,7 +232,7 @@ void split_gzip_gfa(const std::string& in_gfa,
                     int gzip_level,
                     int gzip_mem_level) {
 
-    const auto ncom = static_cast<std::uint32_t>(g.nodes.size());
+    // const auto ncom = static_cast<std::uint32_t>(g.nodes.size());
 
     // generate a list of paths for the separate chunks
     const auto part_txt = build_part_paths(out_dir, ncom + 1);

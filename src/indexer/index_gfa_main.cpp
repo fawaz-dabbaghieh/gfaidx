@@ -179,18 +179,18 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
     log_memory("After singleton scan");
 
-    std::vector<std::uint32_t> id_to_comm(node_id_map.size());
     // Build int-id -> community-id mapping for all nodes.
+    std::vector<std::uint32_t> id_to_comm(node_id_map.size());
     for (std::uint32_t c = 0; c < final_graph.nodes.size(); ++c) {
         for (const auto n : final_graph.nodes[c]) {
             id_to_comm[n] = c;
         }
     }
 
-
     timer.reset();
+    const auto ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
-    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, final_graph, 150, node_id_map,
+    split_gzip_gfa(input_gfa, out_gzip, tmp_dir, ncom, 150, node_id_map,
                    id_to_comm, reader_options, gzip_level, gzip_mem_level);
 
     std::cout << get_time() << ": Finished splitting and gzipping" << std::endl;
