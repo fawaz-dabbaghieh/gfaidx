@@ -10,6 +10,7 @@
 #include "indexer/direct_binary_writer.h"
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/node_hash_index.h"
+#include "chunk/recursive_chunking.h"
 #include "chunk/split_gfa_to_comms.h"
 #include "utils/Memory.h"
 #include "utils/Timer.h"
@@ -93,6 +94,32 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                   << "', using default 8 (" << err.what() << ")" << std::endl;
         gzip_mem_level = 8;
     }
+
+    auto parse_uint64_option = [&](const std::string& key, std::uint64_t default_value) {
+        const auto value_str = program.get<std::string>(key);
+        try {
+            long long parsed = std::stoll(value_str);
+            if (parsed <= 0) {
+                throw std::invalid_argument("value must be positive");
+            }
+            return static_cast<std::uint64_t>(parsed);
+        } catch (const std::exception& err) {
+            std::cerr << "Warning: invalid --" << key << " value '" << value_str
+                      << "', using default " << default_value
+                      << " (" << err.what() << ")" << std::endl;
+            return default_value;
+        }
+    };
+
+    chunk::RecursiveChunkingConfig recursive_config;
+    recursive_config.enabled = program.get<bool>("recursive_chunking");
+    recursive_config.max_nodes = parse_uint64_option("recursive_max_nodes", recursive_config.max_nodes);
+    recursive_config.max_seq_bp = parse_uint64_option("recursive_max_seq_bp", recursive_config.max_seq_bp);
+    recursive_config.max_edges = parse_uint64_option("recursive_max_edges", recursive_config.max_edges);
+    recursive_config.hard_max_nodes = parse_uint64_option("recursive_hard_max_nodes",
+                                                          recursive_config.hard_max_nodes);
+    recursive_config.hard_max_seq_bp = parse_uint64_option("recursive_hard_max_seq_bp",
+                                                           recursive_config.hard_max_seq_bp);
 
     Reader::Options reader_options;
     reader_options.progress_every = progress_every;
@@ -188,7 +215,18 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
 
     timer.reset();
-    const auto ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
+    auto ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
+    if (recursive_config.enabled) {
+        chunk::refine_id_to_comm_recursive(input_gfa,
+                                    sorted_tmp_edgelist,
+                                    tmp_dir,
+                                    node_id_map,
+                                    reader_options,
+                                    recursive_config,
+                                    id_to_comm,
+                                    ncom);
+    }
+
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
     split_gzip_gfa(input_gfa, out_gzip, tmp_dir, ncom, 150, node_id_map,
                    id_to_comm, reader_options, gzip_level, gzip_mem_level);

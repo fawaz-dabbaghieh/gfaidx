@@ -87,6 +87,25 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--gzip_mem_level").default_value(std::string("8"))
       .nargs(1)
       .help("gzip mem level 1-9 (default: 8)");
+
+    parser.add_argument("--recursive_chunking").default_value(false)
+      .implicit_value(true)
+      .help("recursively split oversized communities (one extra pass)");
+
+    parser.add_argument("--recursive_max_nodes").default_value(std::string("1000000"))
+      .help("soft cap for nodes in a community before recursive splitting");
+
+    parser.add_argument("--recursive_max_seq_bp").default_value(std::string("500000000"))
+      .help("soft cap for total sequence bp before recursive splitting");
+
+    parser.add_argument("--recursive_max_edges").default_value(std::string("5000000"))
+      .help("soft cap for intra-community edges before recursive splitting");
+
+    parser.add_argument("--recursive_hard_max_nodes").default_value(std::string("5000000"))
+      .help("hard cap for nodes in a community (always split)");
+
+    parser.add_argument("--recursive_hard_max_seq_bp").default_value(std::string("3000000000"))
+      .help("hard cap for total sequence bp (always split)");
 }
 
 bool run_sort(const std::string& input_edges,
