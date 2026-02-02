@@ -3,7 +3,7 @@ project(gfaidx LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ggdb -Wall")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -ggdb -Wall")
 
 find_package(ZLIB REQUIRED)
 
