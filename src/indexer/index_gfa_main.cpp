@@ -120,6 +120,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                                           recursive_config.hard_max_nodes);
     recursive_config.hard_max_seq_bp = parse_uint64_option("recursive_hard_max_seq_bp",
                                                            recursive_config.hard_max_seq_bp);
+    const auto stats_tsv_path = program.get<std::string>("community_stats_tsv");
 
     Reader::Options reader_options;
     reader_options.progress_every = progress_every;
@@ -181,7 +182,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     try {
         // I made this functions instead of using the Louvain graph object from the earlier versions of gfaidx
         // I think that object was too big, and one can build the binary version from the edge list directly
-        // but having to spend a bit more time due to passing through the list twice
+        // and write to disk with mmap directly
         write_binary_graph_from_edgelist(sorted_tmp_edgelist, tmp_binary, N_NODES);
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
@@ -196,7 +197,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     timer.reset();
     std::cout << get_time() << ": Starting community detection" << std::endl;
     BGraph final_graph; // binary graph
-    generate_communities(tmp_binary, final_graph, display_level);
+    generate_communities(tmp_binary, final_graph);
     std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
     log_memory("After community detection");
 
@@ -216,6 +217,9 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     timer.reset();
     auto ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
+    // todo from this point forward, is not used anymore, should remove it
+    //      to not take extra space in RAM while we are doing recursive chunking
+
     if (recursive_config.enabled) {
         chunk::refine_id_to_comm_recursive(input_gfa,
                                     sorted_tmp_edgelist,
@@ -225,6 +229,17 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                     recursive_config,
                                     id_to_comm,
                                     ncom);
+    }
+
+    if (!stats_tsv_path.empty()) {
+        std::cout << get_time() << ": Writing community stats to " << stats_tsv_path << std::endl;
+        const auto stats = chunk::compute_community_stats(input_gfa,
+                                                          node_id_map,
+                                                          id_to_comm,
+                                                          reader_options,
+                                                          ncom);
+
+        chunk::write_community_stats_tsv(stats, stats_tsv_path);
     }
 
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;

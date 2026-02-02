@@ -7,9 +7,7 @@
 #include <iostream>
 #include <map>
 
-#ifdef __linux__
-#include <sys/wait.h>
-#endif
+// #include <sys/wait.h>
 
 #include <community.h>
 #include <graph.h>
@@ -31,7 +29,6 @@ int k1 = 16;
 unsigned int N_NODES = 0;
 unsigned int N_EDGES = 0;
 
-namespace {
 
 bool command_exists(const std::string& command = "sort") {
     const std::string shell_command = "command -v " + command + " >/dev/null 2>&1";
@@ -59,7 +56,6 @@ void print_c_stats(const Community& c, int level) {
               << c.g.nb_links << " edges" << std::endl;
 }
 
-}  // namespace
 
 void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("in_gfa")
@@ -92,20 +88,29 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
       .implicit_value(true)
       .help("recursively split oversized communities (one extra pass)");
 
-    parser.add_argument("--recursive_max_nodes").default_value(std::string("1000000"))
+    parser.add_argument("--recursive_max_nodes").default_value(std::string("30000"))
+      .nargs(1)
       .help("soft cap for nodes in a community before recursive splitting");
 
-    parser.add_argument("--recursive_max_seq_bp").default_value(std::string("500000000"))
+    parser.add_argument("--recursive_max_seq_bp").default_value(std::string("50000000"))
+      .nargs(1)
       .help("soft cap for total sequence bp before recursive splitting");
 
-    parser.add_argument("--recursive_max_edges").default_value(std::string("5000000"))
+    parser.add_argument("--recursive_max_edges").default_value(std::string("70000"))
+      .nargs(1)
       .help("soft cap for intra-community edges before recursive splitting");
 
-    parser.add_argument("--recursive_hard_max_nodes").default_value(std::string("5000000"))
+    parser.add_argument("--recursive_hard_max_nodes").default_value(std::string("100000"))
+      .nargs(1)
       .help("hard cap for nodes in a community (always split)");
 
-    parser.add_argument("--recursive_hard_max_seq_bp").default_value(std::string("3000000000"))
+    parser.add_argument("--recursive_hard_max_seq_bp").default_value(std::string("300000000"))
+      .nargs(1)
       .help("hard cap for total sequence bp (always split)");
+
+    parser.add_argument("--community_stats_tsv").default_value(std::string(""))
+      .nargs(1)
+      .help("write per-community stats to a TSV file (optional)");
 }
 
 bool run_sort(const std::string& input_edges,
@@ -124,6 +129,7 @@ bool run_sort(const std::string& input_edges,
         std::cerr << "Temporary directory does not exist: " << tmpdir << std::endl;
         return false;
     }
+
     std::string command = "sort -k1,1 -k2,2 -n --parallel " + std::to_string(threads) + " -S " + mem;
     if (unique) command += " -u";
     command += " -T " + tmpdir;
@@ -196,10 +202,8 @@ void output_communities(const BGraph& g,
     out.close();
 }
 
-void generate_communities(const std::string& binary_graph,
-                          BGraph& g,
-                          int display_level,
-                          bool verbose) {
+void generate_communities(const std::string &binary_graph,
+                          BGraph &g) {
     Community c(binary_graph.c_str(), nullptr, UNWEIGHTED, -1, precision);
     bool improvement = true;
     double mod = c.modularity();

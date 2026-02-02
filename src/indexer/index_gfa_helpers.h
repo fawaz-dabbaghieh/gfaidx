@@ -32,10 +32,8 @@ void generate_edgelist(const std::string& input_gfa,
                        std::unordered_map<std::string, unsigned int>& node_id_map,
                        const Reader::Options& reader_options);
 
-void generate_communities(const std::string& binary_graph,
-                          BGraph& g,
-                          int display_level = -1,
-                          bool verbose = false);
+void generate_communities(const std::string &binary_graph,
+                          BGraph &g);
 
 void add_singleton_community(const std::string& input_gfa,
                              std::unordered_map<std::string, unsigned int>& node_id_map,

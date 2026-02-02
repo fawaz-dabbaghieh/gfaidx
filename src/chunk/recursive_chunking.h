@@ -19,12 +19,24 @@ struct CommunityStats {
 
 struct RecursiveChunkingConfig {
     bool enabled{false};
-    std::uint64_t max_nodes{1000000};
-    std::uint64_t max_seq_bp{500000000};
-    std::uint64_t max_edges{5000000};
-    std::uint64_t hard_max_nodes{5000000};
-    std::uint64_t hard_max_seq_bp{3000000000};
+    std::uint64_t max_nodes{30000};
+    std::uint64_t max_seq_bp{50000000};
+    std::uint64_t max_edges{70000};
+    std::uint64_t hard_max_nodes{100000};
+    std::uint64_t hard_max_seq_bp{300000000};
 };
+
+// Compute per-community stats using the provided id_to_comm mapping.
+std::vector<CommunityStats> compute_community_stats(
+    const std::string& input_gfa,
+    const std::unordered_map<std::string, unsigned int>& node_id_map,
+    const std::vector<std::uint32_t>& id_to_comm,
+    const Reader::Options& reader_options,
+    std::uint32_t ncom);
+
+// Write per-community stats to a TSV file for inspection.
+void write_community_stats_tsv(const std::vector<CommunityStats>& stats,
+                               const std::string& out_path);
 
 // Refines id_to_comm with one recursive community-detection pass.
 // Updates ncom to the new number of communities after refinement.

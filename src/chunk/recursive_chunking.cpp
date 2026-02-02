@@ -11,8 +11,8 @@
 #include "indexer/index_gfa_helpers.h"
 #include "utils/Timer.h"
 
-namespace gfaidx::chunk {
 
+namespace gfaidx::chunk {
 
 std::uint32_t compute_ncom(const std::vector<std::uint32_t>& id_to_comm) {
     std::uint32_t max_id = 0;
@@ -87,8 +87,22 @@ std::vector<CommunityStats> compute_community_stats(
             }
         }
     }
-
     return stats;
+}
+
+void write_community_stats_tsv(const std::vector<CommunityStats>& stats,
+                               const std::string& out_path) {
+    std::ofstream out(out_path);
+    if (!out) {
+        throw std::runtime_error("Failed to write community stats TSV: " + out_path);
+    }
+
+    out << "community_id\tnode_count\tseq_bp_total\tedge_count\n";
+    for (std::size_t cid = 0; cid < stats.size(); ++cid) {
+        const auto& s = stats[cid];
+        out << cid << '\t' << s.node_count << '\t' << s.seq_bp_total
+            << '\t' << s.edge_count << '\n';
+    }
 }
 
 std::uint64_t write_local_edgelist(
@@ -153,6 +167,7 @@ bool refine_id_to_comm_recursive(const std::string& input_gfa,
     std::cout << get_time() << ": Computing per-community stats for recursive chunking" << std::endl;
     auto stats = compute_community_stats(input_gfa, node_id_map, id_to_comm, reader_options, base_ncom);
 
+    // check which communities we want to do further chunking on
     std::vector<std::uint32_t> recursed_ids;
     recursed_ids.reserve(base_ncom);
     std::vector<bool> is_recursed(base_ncom, false);
@@ -171,6 +186,7 @@ bool refine_id_to_comm_recursive(const std::string& input_gfa,
     std::sort(recursed_ids.begin(), recursed_ids.end());
 
     // Build node lists for just the communities we are going to split.
+    // todo this can get really big, maybe not the best way to do this
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> comm_nodes;
     comm_nodes.reserve(recursed_ids.size());
     {
@@ -191,9 +207,8 @@ bool refine_id_to_comm_recursive(const std::string& input_gfa,
     std::filesystem::path recursive_dir = std::filesystem::path(tmp_dir) / "recursive";
     std::error_code ec;
     std::filesystem::create_directories(recursive_dir, ec);
-
-    std::vector<std::uint32_t> new_id_to_comm(id_to_comm.size(),
-                                              std::numeric_limits<std::uint32_t>::max());
+    // todo this assigning too big of a value
+    std::vector new_id_to_comm(id_to_comm.size(), std::numeric_limits<std::uint32_t>::max());
 
     std::uint32_t next_comm_id = 0;
     std::unordered_map<std::uint32_t, std::uint32_t> non_recursed_remap;
@@ -248,8 +263,11 @@ bool refine_id_to_comm_recursive(const std::string& input_gfa,
 
             std::cout << get_time() << ": Running community detection for community " << cid << std::endl;
             BGraph local_graph;
-
-            indexer::generate_communities(local_binary, local_graph, indexer::display_level);
+            // todo: I need to stop communities run in the small local_binary graph
+            //       once the number of new chunks is less than the cutoff already
+            //       I can make use of the iteration variable in the while loop
+            //       make this variable passable to the function and set it to 1 here
+            indexer::generate_communities(local_binary, local_graph);
 
             // Map local community ids to new global ids deterministically.
             const auto local_ncom = static_cast<std::uint32_t>(local_graph.nodes.size());
