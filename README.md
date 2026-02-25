@@ -72,7 +72,7 @@ while traversing the graph happens in the background, i.e., transparent from the
 can traverse the graph as usual, and the chunks will be loaded on demand when needed in the background.
 
 
-# TODO cpp
+# TODO
 - [x] Add fast buffer-based GFA reader, inspired by `strangepg`
 - [x] Generate edge lists from a GFA
     - [x] Integrate `strangepg` file reading for faster GFA loading
@@ -82,17 +82,18 @@ can traverse the graph as usual, and the chunks will be loaded on demand when ne
     - [x] Change the map to a string: <int, int> and the second Int is the community ID, or keep a vector of node length
           and add to it <string, int> with node id and community ID. Need to test memory for both.
 - [x] Generate the community ID to file offset index (int: <int, int>, community ID: <start, end>)
-    - [x] Need to look if I can then gzip the chunks separately and how will this change the offsets.
-- [x] Separate the edges that belong to different communities to their own chunk. I don't think it's actually needed
-- [x] Parallelize the GFA chunking/gzipping. Not necessary, it's faster now with compression level 6 instead of 9.
+    - [x] Need to look if I can then gzip the chunks separately and how I will change the offsets.
+- [x] Separate the edges that belong to different communities to their own chunk.
+- [x] Parallelize the GFA chunking/gzipping. Not necessary for now, it's faster now with compression level 6 instead of 9.
 - [x] Make my own binary graph generator based on the sorted edge list to give to Bgraph.
-- [x] Add the header to first chunk.
+- [x] Add the header to the first chunk.
+- [ ] Allow users to provide their own partitioning to index the GFA
+- [ ] Add a way for the user to rezip the GFA in a multimember way after unzipping (I think adding the raw line numbers can solve this)
 - [ ] Maybe make the community index a binary file that gets loaded into memory completely for faster access.
 - [ ] Index the Paths and other lines, these will be line by line indexed, should be easy
 - [ ] Recursive chunking, I think I should further chunk the communities that are too large. Do it on the separated file.
 - [x] Add command line interface
 - [ ] Add unit tests
-- [ ] Benchmark against other graph clustering tools
 - [ ] Add Rust interface
 - [ ] Add conda package
 
