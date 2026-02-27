@@ -243,25 +243,35 @@ bool Reader::refill_gzip() {
 
         if (ret == Z_STREAM_END) {
             // End of a gzip member. If there are leftover input bytes, start a new member.
-            const uInt remaining = strm_.avail_in;
+            uInt remaining = strm_.avail_in;
             Bytef* next_in = strm_.next_in;
             inflateEnd(&strm_);
             z_init_ = false;
-            if (remaining > 0) {
-                strm_ = {};
-                if (inflateInit2(&strm_, 15 + 16) != Z_OK) {
-                    last_errno_ = EINVAL;
+            if (remaining == 0) {
+                const ssize_t n = ::read(fd_, gz_inbuf_.data(), gz_inbuf_.size());
+                if (n < 0) {
+                    last_errno_ = errno;
                     return false;
                 }
-                z_init_ = true;
-                strm_.next_in = next_in;
-                strm_.avail_in = remaining;
-                // If we already produced output, let the caller consume it first.
-                if (produced > 0) return true;
-                continue;
+                if (n == 0) {
+                    gzip_eof_ = true;
+                    // Return if we produced output before hitting end-of-stream.
+                    if (produced > 0) return true;
+                    continue;
+                }
+                next_in = gz_inbuf_.data();
+                remaining = static_cast<uInt>(n);
             }
-            gzip_eof_ = true;
-            // Return if we produced output before hitting end-of-stream.
+
+            strm_ = {};
+            if (inflateInit2(&strm_, 15 + 16) != Z_OK) {
+                last_errno_ = EINVAL;
+                return false;
+            }
+            z_init_ = true;
+            strm_.next_in = next_in;
+            strm_.avail_in = remaining;
+            // If we already produced output, let the caller consume it first.
             if (produced > 0) return true;
             continue;
         }
