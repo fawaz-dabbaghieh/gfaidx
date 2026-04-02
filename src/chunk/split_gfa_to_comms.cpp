@@ -150,7 +150,7 @@ static void split_gfa_to_parts(const std::string& in_gfa,
     std::uint32_t last_comm = part_txt.size() - 1;
 
     // debug_print_node_to_comm(node_to_id, id_to_comm);
-
+    // todo i need some log prints here to see how far along I processed
     while (file_reader.read_line(line)) {
 
         if (line[0] == 'H') {

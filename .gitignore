@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 
+benchmarks/
 __pycache__
 *egg-info
 build/

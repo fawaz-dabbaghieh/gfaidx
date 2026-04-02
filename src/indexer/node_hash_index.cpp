@@ -41,6 +41,8 @@ void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& 
                            const std::vector<std::uint32_t>& id_to_comm,
                            const std::string& out_path) {
 
+    // maybe this is taking too much memory here, as I am generating the hash for each node in this list before
+    // writing to disk
     std::vector<NodeHashEntry> entries;
     entries.reserve(node_to_id.size());
 
