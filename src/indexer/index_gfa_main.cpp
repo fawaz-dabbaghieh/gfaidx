@@ -166,30 +166,36 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     /*
      * performing community detection on the binary graph
      */
-    timer.reset();
-    std::cout << get_time() << ": Starting community detection" << std::endl;
+    std::vector<std::uint32_t> id_to_comm;
+    std::uint32_t ncom = 0;
+    // scoping so objects that are not needed anymore get destructed, mainly final_graph
+    {
+        timer.reset();
+        std::cout << get_time() << ": Starting community detection" << std::endl;
 
-    BGraph final_graph; // binary graph
-    generate_communities(tmp_binary, final_graph, display_level);
-    std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
-    log_memory("After community detection");
+        BGraph final_graph; // binary graph
+        generate_communities(tmp_binary, final_graph, display_level);
+        std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
+        log_memory("After community detection");
 
-    timer.reset();
-    std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
-    add_singleton_community(input_gfa, node_id_map, final_graph, reader_options);
-    std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
-    log_memory("After singleton scan");
+        timer.reset();
+        std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
+        add_singleton_community(input_gfa, node_id_map, final_graph, reader_options);
+        std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
+        log_memory("After singleton scan");
 
-    // Build int-id -> community-id mapping for all nodes.
-    std::vector<std::uint32_t> id_to_comm(node_id_map.size());
-    for (std::uint32_t c = 0; c < final_graph.nodes.size(); ++c) {
-        for (const auto n : final_graph.nodes[c]) {
-            id_to_comm[n] = c;
+        // Build node-id -> community-id mapping, then let the full graph die here.
+        id_to_comm.resize(node_id_map.size());
+        for (std::uint32_t c = 0; c < final_graph.nodes.size(); ++c) {
+            for (const auto n : final_graph.nodes[c]) {
+                id_to_comm[n] = c;
+            }
         }
+        ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
     }
 
     timer.reset();
-    const auto ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
+    log_memory("After releasing final graph");
     std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
     split_gzip_gfa(input_gfa, out_gzip, tmp_dir, ncom, 150, node_id_map,
                    id_to_comm, reader_options, gzip_level, gzip_mem_level);
