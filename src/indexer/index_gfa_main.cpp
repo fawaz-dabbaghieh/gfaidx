@@ -19,32 +19,34 @@
 
 namespace gfaidx::indexer {
 int run_index_gfa(const argparse::ArgumentParser& program) {
-    /*
-     * parse arguments and check inputs/outputs
-     */
+
     Timer total_time;
 
-    auto input_gfa = program.get<std::string>("in_gfa");
+    // validating inputs
+    auto input_gfa = program.get<std::string>(in_gfa);
     if (!file_exists(input_gfa.c_str())) {
         std::cerr << "Input file does not exist: " << input_gfa << std::endl;
         return 1;
     }
 
-    auto out_gzip = program.get<std::string>("out_gz");
+    auto out_gzip = program.get<std::string>(out_graph);
     if (file_exists(out_gzip.c_str())) {
         std::cerr << "Output file already exists: " << out_gzip << std::endl;
         return 1;
     }
+
     if (!file_writable(out_gzip.c_str())) {
         std::cerr << "Output file is not writable: " << out_gzip << std::endl;
         return 1;
     }
+
     // Write node hash index alongside the gzip output.
     std::string node_index_path = out_gzip + ".ndx";
     if (file_exists(node_index_path.c_str())) {
         std::cerr << "Node index file already exists: " << node_index_path << std::endl;
         return 1;
     }
+
 
     bool keep_tmp = program.get<bool>("keep_tmp");
 
@@ -54,15 +56,17 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     try {
         long long parsed = std::stoll(progress_str);
         if (parsed <= 0) {
-            throw std::invalid_argument("progress must be positive");
+            throw std::invalid_argument("progress must be a positive integer");
         }
-
         progress_every = static_cast<std::uint64_t>(parsed);
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --progress_every value '" << progress_str
                   << "', using default 1000000 (" << err.what() << ")" << std::endl;
         progress_every = 1000000;
     }
+
+    Reader::Options reader_options;
+    reader_options.progress_every = progress_every;
 
     // check gzip_level user input
     int gzip_level;
@@ -93,9 +97,6 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                   << "', using default 8 (" << err.what() << ")" << std::endl;
         gzip_mem_level = 8;
     }
-
-    Reader::Options reader_options;
-    reader_options.progress_every = progress_every;
 
     std::ifstream in(input_gfa);
     if (!in.good()) {

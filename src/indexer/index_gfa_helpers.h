@@ -17,6 +17,8 @@ extern int display_level;
 extern int k1;
 extern unsigned int N_NODES;
 extern unsigned int N_EDGES;
+extern std::string in_gfa;
+extern std::string out_graph;
 
 void configure_index_gfa_parser(argparse::ArgumentParser& parser);
 

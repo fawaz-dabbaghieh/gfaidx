@@ -12,9 +12,10 @@ chunk loading using the same `.idx`/`.ndx` artifacts.
 
 ### C++ CLI
 ```bash
-mkdir -p build
-cmake -S . -B build
-cmake --build build
+mkdir build
+cd build
+cmake ../
+make -j 4
 ```
 
 ### Python helpers
@@ -91,7 +92,9 @@ can traverse the graph as usual, and the chunks will be loaded on demand when ne
 - [ ] Add a way for the user to rezip the GFA in a multimember way after unzipping (I think adding the raw line numbers can solve this)
 - [ ] Maybe make the community index a binary file that gets loaded into memory completely for faster access.
 - [ ] Index the Paths and other lines, these will be line by line indexed, should be easy
-- [ ] Recursive chunking, I think I should further chunk the communities that are too large. Do it on the separated file.
+- [ ] Recursive chunking. Using the parameters I have in the other branch, but further chunk when needed
+    - [ ] for that I do need to refactor the code to easily chunk further from a new file directly
+    - [ ] after rechunking a file, need to reconcile the community IDs.
 - [x] Add command line interface
 - [ ] Add unit tests
 - [ ] Add Rust interface

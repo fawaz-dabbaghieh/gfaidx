@@ -30,6 +30,8 @@ int display_level = -1;
 int k1 = 16;
 unsigned int N_NODES = 0;
 unsigned int N_EDGES = 0;
+std::string in_gfa="in_gfa";
+std::string out_graph="out_indexed_graph";
 
 namespace {
 
@@ -62,10 +64,10 @@ void print_c_stats(const Community& c, int level) {
 }  // namespace
 
 void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
-    parser.add_argument("in_gfa")
+    parser.add_argument(in_gfa)
       .help("input GFA graph");
 
-    parser.add_argument("out_gz")
+    parser.add_argument(out_graph)
       .help("output node communities");
 
     parser.add_argument("--keep_tmp").default_value(false)

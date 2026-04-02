@@ -247,6 +247,9 @@ bool Reader::refill_gzip() {
             Bytef* next_in = strm_.next_in;
             inflateEnd(&strm_);
             z_init_ = false;
+            // If we ended a member exactly on a compressed buffer boundary,
+            // there may still be another gzip member in the file. Read more
+            // input before declaring EOF.
             if (remaining == 0) {
                 const ssize_t n = ::read(fd_, gz_inbuf_.data(), gz_inbuf_.size());
                 if (n < 0) {
