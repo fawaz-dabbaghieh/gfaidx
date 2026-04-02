@@ -41,7 +41,8 @@ BGraph::BGraph(const char *filename, char *filename_w, int type) {
   // Read links: 4 bytes for each link (each link is counted twice)
   nb_links=degrees[nb_nodes-1];
   links.resize(nb_links);
-  finput.read((char *)(&links[0]), (long)nb_links*8);  
+  // finput.read((char *)(&links[0]), (long)nb_links*8);
+  finput.read((char *)(&links[0]), (long)nb_links*4);
 
   // IF WEIGHTED : read weights: 4 bytes for each link (each link is counted twice)
   weights.resize(0);
