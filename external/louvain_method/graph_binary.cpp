@@ -16,6 +16,7 @@
 
 #include <sys/mman.h>
 #include <fstream>
+#include <utility>
 #include "graph_binary.h"
 #include "math.h"
 
@@ -85,6 +86,14 @@ BGraph::BGraph(vector<vector<int> >& c_nodes) {
   for (size_t i=0; i<c_nodes.size(); i++) {
     nodes.push_back(c_nodes[i]);
   }
+}
+
+BGraph::BGraph(vector<vector<int> >&& c_nodes) {
+  nb_nodes     = 0;
+  nb_links     = 0;
+  total_weight = 0;
+
+  nodes = std::move(c_nodes);
 }
 
 void 

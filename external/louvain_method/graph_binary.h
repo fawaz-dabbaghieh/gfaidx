@@ -60,6 +60,7 @@ public:
   // IF WEIGHTED 4*(sum_degrees) bytes for the weights in a separate file
   BGraph(const char *filename, char *filename_w, int type);
   explicit BGraph(vector<vector<int> >& c_nodes);
+  explicit BGraph(vector<vector<int> >&& c_nodes);
   BGraph(int nb_nodes, int nb_links, double total_weight, int *degrees, int *links, float *weights);
   
   void add_node(vector<int>& n);
