@@ -16,6 +16,8 @@
 
 #include "community.h"
 
+#include <utility>
+
 using namespace std;
 
 Community::Community(const char * filename, char * filename_w, int type, int nbp, double minm) {
@@ -245,7 +247,7 @@ Community::partition2graph_binary() {
   }
   printf("%s %d \n", __FILE__, __LINE__);
   */
-  BGraph g2(communities);
+  BGraph g2(std::move(communities));
   
   g2.nb_nodes = comm_nodes.size();
   g2.degrees.resize(comm_nodes.size());
