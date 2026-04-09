@@ -115,7 +115,9 @@ private:
     mutable std::ifstream in_;
     std::uint64_t step_table_offset_{};
     std::uint64_t posting_table_offset_{};
+    std::uint64_t posting_table_bytes_{};
     std::uint64_t step_record_bytes_{};
+    bool postings_are_compressed_{false};
     std::vector<PathMeta> paths_;
     std::vector<NodeMeta> nodes_;
     std::string strings_;

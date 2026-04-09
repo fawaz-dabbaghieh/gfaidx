@@ -5,7 +5,9 @@ Usage:
     python3 scripts/pdx_size_breakdown.py graph.pdx
 
 The script reads the .pdx header, infers record sizes from the on-disk format
-version, and reports how much space each top-level section occupies.
+version, and reports how much space each top-level section occupies. Newer
+versions can compress the posting section, so section sizes are derived from
+stored offsets instead of only from record counts.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ PATH_RECORD_SIZE_V1 = 64
 PATH_RECORD_SIZE_V2_V3 = 128
 NODE_RECORD_SIZE = 32
 STEP_RECORD_SIZE_V1_V2 = 8
-STEP_RECORD_SIZE_V3 = 4
+STEP_RECORD_SIZE_V3_V4 = 4
 POSTING_RECORD_SIZE = 8
 
 
@@ -73,14 +75,14 @@ def read_header(path: str) -> Header:
     header = Header(*HEADER_STRUCT.unpack(raw))
     if header.magic != MAGIC:
         raise RuntimeError("Invalid .pdx magic")
-    if header.version not in (1, 2, 3):
+    if header.version not in (1, 2, 3, 4):
         raise RuntimeError(f"Unsupported .pdx version: {header.version}")
     return header
 
 
 def infer_record_sizes(version: int) -> tuple[int, int]:
     path_record_size = PATH_RECORD_SIZE_V1 if version == 1 else PATH_RECORD_SIZE_V2_V3
-    step_record_size = STEP_RECORD_SIZE_V3 if version == 3 else STEP_RECORD_SIZE_V1_V2
+    step_record_size = STEP_RECORD_SIZE_V3_V4 if version >= 3 else STEP_RECORD_SIZE_V1_V2
     return path_record_size, step_record_size
 
 
@@ -93,11 +95,11 @@ def main() -> int:
     header = read_header(args.pdx)
     path_record_size, step_record_size = infer_record_sizes(header.version)
 
-    path_table_size = header.path_count * path_record_size
-    node_table_size = header.node_count * NODE_RECORD_SIZE
-    step_table_size = header.step_count * step_record_size
-    posting_table_size = header.posting_count * POSTING_RECORD_SIZE
-    header_size = HEADER_SIZE
+    header_size = header.path_table_offset
+    path_table_size = header.node_table_offset - header.path_table_offset
+    node_table_size = header.step_table_offset - header.node_table_offset
+    step_table_size = header.posting_table_offset - header.step_table_offset
+    posting_table_size = header.strings_offset - header.posting_table_offset
     strings_size = header.strings_size
 
     accounted = (
@@ -124,7 +126,10 @@ def main() -> int:
     print(f"  path record:    {path_record_size} B")
     print(f"  node record:    {NODE_RECORD_SIZE} B")
     print(f"  step record:    {step_record_size} B")
-    print(f"  posting record: {POSTING_RECORD_SIZE} B")
+    if header.version >= 4:
+        print("  posting record: compressed per-node blocks")
+    else:
+        print(f"  posting record: {POSTING_RECORD_SIZE} B")
     print()
     print("Section offsets")
     print(f"  header:         0")

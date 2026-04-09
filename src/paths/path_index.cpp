@@ -20,12 +20,13 @@ namespace {
 // - a path table
 // - a node table
 // - a flat step array
-// - a flat per-node posting array
+// - a per-node posting blob (raw in older versions, compressed in v4)
 // - one shared string blob for names / overlap fields / tags
 constexpr char kPathIndexMagic[8] = {'G', 'F', 'P', 'A', 'T', 'H', '1', '\0'};
 constexpr std::uint32_t kPathIndexVersionV1 = 1;
 constexpr std::uint32_t kPathIndexVersionV2 = 2;
-constexpr std::uint32_t kPathIndexVersion = 3;
+constexpr std::uint32_t kPathIndexVersionV3 = 3;
+constexpr std::uint32_t kPathIndexVersion = 4;
 
 // Version-3 stores each step in one packed uint32:
 // - low 31 bits: node_id
@@ -84,6 +85,9 @@ struct PathRecordDisk {
 };
 
 // Node metadata points at the node's slice in the posting table.
+// Version-4 switches posting_begin from "posting index" to "byte offset into
+// the compressed posting blob". posting_count remains the decoded posting
+// count so callers can still reason about how many occurrences the node has.
 struct NodeRecordDisk {
     std::uint64_t name_offset{};
     std::uint64_t name_len{};
@@ -104,7 +108,7 @@ struct StepRecordDisk {
     std::uint32_t packed{};
 };
 
-// One inverted-index posting: node -> (path, step_rank).
+// Legacy raw posting layout used by version-1/2/3 files.
 struct PostingRecordDisk {
     std::uint32_t path_id{};
     std::uint32_t step_rank{};
@@ -157,6 +161,34 @@ static_assert(sizeof(StepRecordDiskV1V2) == 8, "Unexpected legacy step record si
 static_assert(sizeof(StepRecordDisk) == 4, "Unexpected packed step record size");
 static_assert(sizeof(PostingRecordDisk) == 8, "Unexpected posting record size");
 
+void append_varint(std::string& out, std::uint64_t value) {
+    while (value >= 0x80) {
+        out.push_back(static_cast<char>((value & 0x7f) | 0x80));
+        value >>= 7;
+    }
+    out.push_back(static_cast<char>(value));
+}
+
+std::uint64_t read_varint(const std::vector<unsigned char>& data, std::size_t& cursor) {
+    std::uint64_t value = 0;
+    unsigned shift = 0;
+
+    while (cursor < data.size()) {
+        const auto byte = static_cast<std::uint64_t>(data[cursor++]);
+        value |= (byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0) {
+            return value;
+        }
+
+        shift += 7;
+        if (shift >= 64) {
+            throw std::runtime_error("Malformed varint in compressed posting block");
+        }
+    }
+
+    throw std::runtime_error("Unexpected end of compressed posting block");
+}
+
 std::uint64_t append_string(std::string& blob, std::string_view s) {
     const auto offset = static_cast<std::uint64_t>(blob.size());
     blob.append(s.data(), s.size());
@@ -192,6 +224,47 @@ StepRecord unpack_step_record(const StepRecordDiskV1V2& rec) {
         rec.node_id,
         rec.flags != 0
     };
+}
+
+// Encode one node's postings as path-grouped varints:
+// - delta(path_id) from the previous path group
+// - count of occurrences for this path
+// - first step rank in that path
+// - delta(step_rank) for each later occurrence in the same path
+//
+// This keeps random access at node granularity: the node table still points to
+// one contiguous byte block per node, but that block is typically much smaller
+// than the old fixed-width array of (path_id, step_rank) pairs.
+void append_compressed_posting_block(std::string& out,
+                                     const std::vector<TempPosting>& postings,
+                                     std::size_t begin,
+                                     std::size_t end) {
+    std::uint32_t prev_path_id = 0;
+    bool first_group = true;
+
+    for (std::size_t cursor = begin; cursor < end;) {
+        const std::uint32_t path_id = postings[cursor].path_id;
+        std::size_t group_end = cursor + 1;
+        while (group_end < end && postings[group_end].path_id == path_id) {
+            ++group_end;
+        }
+
+        const std::uint64_t path_delta = first_group ? path_id
+                                                     : static_cast<std::uint64_t>(path_id - prev_path_id);
+        append_varint(out, path_delta);
+        append_varint(out, group_end - cursor);
+        append_varint(out, postings[cursor].step_rank);
+
+        std::uint32_t prev_step_rank = postings[cursor].step_rank;
+        for (std::size_t i = cursor + 1; i < group_end; ++i) {
+            append_varint(out, static_cast<std::uint64_t>(postings[i].step_rank - prev_step_rank));
+            prev_step_rank = postings[i].step_rank;
+        }
+
+        prev_path_id = path_id;
+        first_group = false;
+        cursor = group_end;
+    }
 }
 
 ParsedPathFields parse_path_fields(std::string_view line) {
@@ -519,24 +592,25 @@ bool build_path_index(const std::string& input_gfa,
         dst.seq_end = src.seq_end;
     }
 
-    // Build the node table and assign each node its posting-table slice.
+    // Build the node table and assign each node one compressed posting block.
+    // Each node record stores:
+    // - posting_begin: byte offset of its block inside the posting section
+    // - posting_count: number of decoded postings in that block
     std::vector<NodeRecordDisk> node_records(id_to_node.size());
     std::size_t posting_cursor = 0;
+    std::string posting_blob;
+    posting_blob.reserve(postings.size() * 5 / 2);
     for (std::size_t i = 0; i < id_to_node.size(); ++i) {
         auto& dst = node_records[i];
         dst.name_offset = append_string(strings_blob, id_to_node[i]);
         dst.name_len = id_to_node[i].size();
-        dst.posting_begin = posting_cursor;
+        dst.posting_begin = static_cast<std::uint64_t>(posting_blob.size());
+        const auto node_begin = posting_cursor;
         while (posting_cursor < postings.size() && postings[posting_cursor].node_id == i) {
             ++posting_cursor;
         }
-        dst.posting_count = posting_cursor - dst.posting_begin;
-    }
-
-    std::vector<PostingRecordDisk> posting_records;
-    posting_records.reserve(postings.size());
-    for (const auto& posting : postings) {
-        posting_records.push_back(PostingRecordDisk{posting.path_id, posting.step_rank});
+        dst.posting_count = posting_cursor - node_begin;
+        append_compressed_posting_block(posting_blob, postings, node_begin, posting_cursor);
     }
 
     // Compute all section offsets up front so the file can be written in one
@@ -547,13 +621,13 @@ bool build_path_index(const std::string& input_gfa,
     header.path_count = path_records.size();
     header.node_count = node_records.size();
     header.step_count = steps.size();
-    header.posting_count = posting_records.size();
+    header.posting_count = postings.size();
 
     header.path_table_offset = sizeof(PathIndexHeaderDisk);
     header.node_table_offset = header.path_table_offset + path_records.size() * sizeof(PathRecordDisk);
     header.step_table_offset = header.node_table_offset + node_records.size() * sizeof(NodeRecordDisk);
     header.posting_table_offset = header.step_table_offset + steps.size() * sizeof(StepRecordDisk);
-    header.strings_offset = header.posting_table_offset + posting_records.size() * sizeof(PostingRecordDisk);
+    header.strings_offset = header.posting_table_offset + posting_blob.size();
     header.strings_size = strings_blob.size();
 
     std::ofstream out(output_index, std::ios::binary | std::ios::trunc);
@@ -565,7 +639,9 @@ bool build_path_index(const std::string& input_gfa,
     write_vector(out, path_records);
     write_vector(out, node_records);
     write_vector(out, steps);
-    write_vector(out, posting_records);
+    if (!posting_blob.empty()) {
+        out.write(posting_blob.data(), static_cast<std::streamsize>(posting_blob.size()));
+    }
     if (!strings_blob.empty()) {
         out.write(strings_blob.data(), static_cast<std::streamsize>(strings_blob.size()));
     }
@@ -597,19 +673,22 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     }
     if (header.version != kPathIndexVersionV1 &&
         header.version != kPathIndexVersionV2 &&
+        header.version != kPathIndexVersionV3 &&
         header.version != kPathIndexVersion) {
         throw std::runtime_error("Unsupported path index version: " + std::to_string(header.version));
     }
 
     step_table_offset_ = header.step_table_offset;
     posting_table_offset_ = header.posting_table_offset;
-    // Legacy v1/v2 files use the old 8-byte step layout. New v3 files use the
-    // packed 4-byte representation.
-    step_record_bytes_ = (header.version == kPathIndexVersion) ? sizeof(StepRecordDisk)
-                                                               : sizeof(StepRecordDiskV1V2);
+    posting_table_bytes_ = header.strings_offset - header.posting_table_offset;
+    // Legacy v1/v2 files use the old 8-byte step layout. Version-3+ files use
+    // the packed 4-byte representation.
+    step_record_bytes_ = (header.version >= kPathIndexVersionV3) ? sizeof(StepRecordDisk)
+                                                                 : sizeof(StepRecordDiskV1V2);
+    postings_are_compressed_ = (header.version >= kPathIndexVersion);
 
-    // Load the small metadata tables and the shared strings eagerly. Step and
-    // posting payloads remain on disk and are fetched on demand.
+    // Load the small metadata tables and the shared strings eagerly. Step data
+    // and posting blocks remain on disk and are fetched on demand.
     std::vector<NodeRecordDisk> node_records(static_cast<std::size_t>(header.node_count));
     read_exact(header.node_table_offset,
                node_records.data(),
@@ -805,13 +884,71 @@ void PathIndexReader::for_each_node_posting(
     const auto& node = nodes_[node_id];
     if (node.posting_count == 0) return;
 
-    // Each node owns one contiguous posting range in the inverted index.
-    std::vector<PostingRecordDisk> postings(static_cast<std::size_t>(node.posting_count));
-    const std::uint64_t byte_offset = posting_table_offset_ + node.posting_begin * sizeof(PostingRecordDisk);
-    read_exact(byte_offset, postings.data(), postings.size() * sizeof(PostingRecordDisk));
+    if (!postings_are_compressed_) {
+        // Legacy v1/v2/v3 files store fixed-width posting structs.
+        std::vector<PostingRecordDisk> postings(static_cast<std::size_t>(node.posting_count));
+        const std::uint64_t byte_offset = posting_table_offset_ + node.posting_begin * sizeof(PostingRecordDisk);
+        read_exact(byte_offset, postings.data(), postings.size() * sizeof(PostingRecordDisk));
 
-    for (const auto& posting : postings) {
-        callback(posting.path_id, posting.step_rank);
+        for (const auto& posting : postings) {
+            callback(posting.path_id, posting.step_rank);
+        }
+        return;
+    }
+
+    const std::uint64_t block_begin = node.posting_begin;
+    const std::uint64_t block_end = (node_id + 1 < nodes_.size())
+        ? nodes_[node_id + 1].posting_begin
+        : posting_table_bytes_;
+    if (block_end < block_begin) {
+        throw std::runtime_error("Compressed posting block offsets are out of order");
+    }
+
+    std::vector<unsigned char> block(static_cast<std::size_t>(block_end - block_begin));
+    read_exact(posting_table_offset_ + block_begin, block.data(), block.size());
+
+    std::size_t cursor = 0;
+    std::uint32_t current_path_id = 0;
+    std::uint64_t emitted = 0;
+
+    while (emitted < node.posting_count) {
+        const auto path_delta = read_varint(block, cursor);
+        if (path_delta > std::numeric_limits<std::uint32_t>::max() - current_path_id) {
+            throw std::runtime_error("Compressed posting block path id overflow");
+        }
+        current_path_id = static_cast<std::uint32_t>(current_path_id + path_delta);
+
+        const auto group_count = read_varint(block, cursor);
+        if (group_count == 0) {
+            throw std::runtime_error("Compressed posting block has an empty path group");
+        }
+        if (group_count > node.posting_count - emitted) {
+            throw std::runtime_error("Compressed posting block overruns node posting count");
+        }
+
+        std::uint64_t current_step_rank = read_varint(block, cursor);
+        if (current_step_rank > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("Compressed posting block step rank overflow");
+        }
+        callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
+        ++emitted;
+
+        for (std::uint64_t i = 1; i < group_count; ++i) {
+            const auto step_delta = read_varint(block, cursor);
+            if (step_delta == 0) {
+                throw std::runtime_error("Compressed posting block step delta must be positive");
+            }
+            if (step_delta > std::numeric_limits<std::uint32_t>::max() - current_step_rank) {
+                throw std::runtime_error("Compressed posting block step rank overflow");
+            }
+            current_step_rank += step_delta;
+            callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
+            ++emitted;
+        }
+    }
+
+    if (cursor != block.size()) {
+        throw std::runtime_error("Compressed posting block has trailing bytes");
     }
 }
 
