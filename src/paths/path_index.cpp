@@ -24,8 +24,14 @@ namespace {
 // - one shared string blob for names / overlap fields / tags
 constexpr char kPathIndexMagic[8] = {'G', 'F', 'P', 'A', 'T', 'H', '1', '\0'};
 constexpr std::uint32_t kPathIndexVersionV1 = 1;
-constexpr std::uint32_t kPathIndexVersion = 2;
-constexpr std::uint8_t kStepReverseFlag = 1u;
+constexpr std::uint32_t kPathIndexVersionV2 = 2;
+constexpr std::uint32_t kPathIndexVersion = 3;
+
+// Version-3 stores each step in one packed uint32:
+// - low 31 bits: node_id
+// - top bit: reverse-orientation flag
+constexpr std::uint32_t kStepPackedNodeMask = 0x7fffffffu;
+constexpr std::uint32_t kStepPackedReverseBit = 0x80000000u;
 
 // File header with counts plus offsets to each top-level section.
 struct PathIndexHeaderDisk {
@@ -85,12 +91,17 @@ struct NodeRecordDisk {
     std::uint64_t posting_count{};
 };
 
-// One step occurrence in a path. Repeated visits to the same node become
-// separate records with different implicit step ranks.
-struct StepRecordDisk {
+// Legacy version-1/2 step layout.
+struct StepRecordDiskV1V2 {
     std::uint32_t node_id{};
     std::uint8_t flags{};
     std::uint8_t reserved[3]{};
+};
+
+// Version-3 step layout. This cuts the step table from 8 bytes/step to 4
+// bytes/step while preserving direct random access by step index.
+struct StepRecordDisk {
+    std::uint32_t packed{};
 };
 
 // One inverted-index posting: node -> (path, step_rank).
@@ -142,7 +153,8 @@ static_assert(sizeof(PathIndexHeaderDisk) == 96, "Unexpected path index header s
 static_assert(sizeof(PathRecordDiskV1) == 64, "Unexpected v1 path record size");
 static_assert(sizeof(PathRecordDisk) == 128, "Unexpected path record size");
 static_assert(sizeof(NodeRecordDisk) == 32, "Unexpected node record size");
-static_assert(sizeof(StepRecordDisk) == 8, "Unexpected step record size");
+static_assert(sizeof(StepRecordDiskV1V2) == 8, "Unexpected legacy step record size");
+static_assert(sizeof(StepRecordDisk) == 4, "Unexpected packed step record size");
 static_assert(sizeof(PostingRecordDisk) == 8, "Unexpected posting record size");
 
 std::uint64_t append_string(std::string& blob, std::string_view s) {
@@ -156,6 +168,30 @@ void write_vector(std::ofstream& out, const std::vector<T>& values) {
     if (values.empty()) return;
     out.write(reinterpret_cast<const char*>(values.data()),
               static_cast<std::streamsize>(values.size() * sizeof(T)));
+}
+
+StepRecordDisk pack_step_record(std::uint32_t node_id, bool is_reverse) {
+    if (node_id > kStepPackedNodeMask) {
+        throw std::runtime_error("Node id too large for packed step encoding");
+    }
+
+    StepRecordDisk out{};
+    out.packed = node_id | (is_reverse ? kStepPackedReverseBit : 0u);
+    return out;
+}
+
+StepRecord unpack_step_record(const StepRecordDisk& rec) {
+    return StepRecord{
+        rec.packed & kStepPackedNodeMask,
+        (rec.packed & kStepPackedReverseBit) != 0
+    };
+}
+
+StepRecord unpack_step_record(const StepRecordDiskV1V2& rec) {
+    return StepRecord{
+        rec.node_id,
+        rec.flags != 0
+    };
 }
 
 ParsedPathFields parse_path_fields(std::string_view line) {
@@ -264,10 +300,7 @@ std::uint64_t parse_path_steps(
             throw std::runtime_error("Path references unknown node id: " + node_name);
         }
 
-        StepRecordDisk step{};
-        step.node_id = it->second;
-        step.flags = (orient == '-') ? kStepReverseFlag : 0u;
-        steps.push_back(step);
+        steps.push_back(pack_step_record(it->second, orient == '-'));
         postings.push_back(TempPosting{it->second, path_id, step_rank});
         ++step_rank;
 
@@ -306,10 +339,7 @@ std::uint64_t parse_walk_steps(
             throw std::runtime_error("Walk references unknown node id: " + node_name);
         }
 
-        StepRecordDisk step{};
-        step.node_id = it->second;
-        step.flags = (orient == '<') ? kStepReverseFlag : 0u;
-        steps.push_back(step);
+        steps.push_back(pack_step_record(it->second, orient == '<'));
         postings.push_back(TempPosting{it->second, path_id, step_rank});
         ++step_rank;
         pos = end;
@@ -565,12 +595,18 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     if (std::memcmp(header.magic, kPathIndexMagic, sizeof(kPathIndexMagic)) != 0) {
         throw std::runtime_error("Invalid path index magic: " + index_path);
     }
-    if (header.version != kPathIndexVersionV1 && header.version != kPathIndexVersion) {
+    if (header.version != kPathIndexVersionV1 &&
+        header.version != kPathIndexVersionV2 &&
+        header.version != kPathIndexVersion) {
         throw std::runtime_error("Unsupported path index version: " + std::to_string(header.version));
     }
 
     step_table_offset_ = header.step_table_offset;
     posting_table_offset_ = header.posting_table_offset;
+    // Legacy v1/v2 files use the old 8-byte step layout. New v3 files use the
+    // packed 4-byte representation.
+    step_record_bytes_ = (header.version == kPathIndexVersion) ? sizeof(StepRecordDisk)
+                                                               : sizeof(StepRecordDiskV1V2);
 
     // Load the small metadata tables and the shared strings eagerly. Step and
     // posting payloads remain on disk and are fetched on demand.
@@ -740,13 +776,21 @@ std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
 
     // Steps are stored in one flat array, so reading a path slice is one seek
     // and one contiguous read.
-    std::vector<StepRecordDisk> raw(static_cast<std::size_t>(take));
     const std::uint64_t byte_offset = step_table_offset_ +
-        (info.step_begin + start_step) * sizeof(StepRecordDisk);
-    read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
+        (info.step_begin + start_step) * step_record_bytes_;
 
-    for (const auto& rec : raw) {
-        out.push_back(StepRecord{rec.node_id, (rec.flags & kStepReverseFlag) != 0});
+    if (step_record_bytes_ == sizeof(StepRecordDisk)) {
+        std::vector<StepRecordDisk> raw(static_cast<std::size_t>(take));
+        read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
+        for (const auto& rec : raw) {
+            out.push_back(unpack_step_record(rec));
+        }
+    } else {
+        std::vector<StepRecordDiskV1V2> raw(static_cast<std::size_t>(take));
+        read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDiskV1V2));
+        for (const auto& rec : raw) {
+            out.push_back(unpack_step_record(rec));
+        }
     }
     return out;
 }
