@@ -10,6 +10,7 @@
 
 #include "fs/Reader.h"
 #include "fs/fs_helpers.h"
+#include "indexer/node_hash_index.h"
 #include "paths/path_index.h"
 #include "utils/Timer.h"
 
@@ -31,6 +32,18 @@ struct PathCoordCacheEntry {
 
 void warn_get_path(std::string_view message) {
     std::cerr << get_time() << ": Warning: " << message << std::endl;
+}
+
+bool test_seen_bit(const std::vector<std::uint64_t>& bits, std::uint32_t value) {
+    const std::size_t word = value / 64;
+    const unsigned bit = value % 64;
+    return (bits[word] & (1ULL << bit)) != 0;
+}
+
+void set_seen_bit(std::vector<std::uint64_t>& bits, std::uint32_t value) {
+    const std::size_t word = value / 64;
+    const unsigned bit = value % 64;
+    bits[word] |= (1ULL << bit);
 }
 
 std::int64_t parse_optional_int_arg(const std::string& value, const char* flag_name) {
@@ -149,10 +162,32 @@ bool parse_s_line_name_and_length(std::string_view line,
     return false;
 }
 
+std::vector<std::uint32_t> resolve_node_names_with_index(
+    const indexer::NodeHashIndex& node_index,
+    const std::vector<std::string>& node_names) {
+    std::vector<std::uint32_t> node_ids;
+    node_ids.reserve(node_names.size());
+
+    for (const auto& node_name : node_names) {
+        std::uint32_t node_id = 0;
+        if (!node_index.lookup_rank(node_name, node_id)) {
+            throw std::runtime_error("Node id not found in .ndx: " + node_name);
+        }
+        node_ids.push_back(node_id);
+    }
+
+    std::sort(node_ids.begin(), node_ids.end());
+    node_ids.erase(std::unique(node_ids.begin(), node_ids.end()), node_ids.end());
+    return node_ids;
+}
+
 WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
+                                          const indexer::NodeHashIndex& node_index,
                                           const std::string& source_gfa) {
     WalkCoordState state;
     state.node_lengths.resize(index.node_count());
+    std::vector<std::uint64_t> seen_nodes((static_cast<std::size_t>(index.node_count()) + 63) / 64, 0);
+    std::uint64_t seen_node_count = 0;
 
     Reader reader;
     if (!reader.open(source_gfa)) {
@@ -165,32 +200,40 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
     std::string_view line;
     std::string node_name;
     std::uint64_t node_length = 0;
-    std::uint32_t expected_node_id = 0;
 
     while (reader.read_line(line)) {
         if (line.empty() || line[0] != 'S') continue;
 
-        if (expected_node_id >= index.node_count()) {
-            warn_get_path("source GFA has more S lines than the .pdx index, falling back to W subpaths without coordinates");
-            return state;
-        }
         if (!parse_s_line_name_and_length(line, node_name, node_length)) {
-            warn_get_path("could not derive segment length for node '" + std::string(index.get_node_name(expected_node_id)) +
-                          "', falling back to W subpaths without coordinates");
-            return state;
-        }
-        if (node_name != index.get_node_name(expected_node_id)) {
-            warn_get_path("source GFA S-line order does not match the .pdx node order at node '" + node_name +
+            warn_get_path("could not derive segment length for node '" + node_name +
                           "', falling back to W subpaths without coordinates");
             return state;
         }
 
-        state.node_lengths[expected_node_id] = node_length;
-        ++expected_node_id;
+        std::uint32_t node_id = 0;
+        if (!node_index.lookup_rank(node_name, node_id)) {
+            warn_get_path("node '" + node_name +
+                          "' from --source_gfa was not found in .ndx, falling back to W subpaths without coordinates");
+            return state;
+        }
+        if (node_id >= index.node_count()) {
+            warn_get_path("node '" + node_name +
+                          "' resolved to an id outside the .pdx node range, falling back to W subpaths without coordinates");
+            return state;
+        }
+        if (test_seen_bit(seen_nodes, node_id)) {
+            warn_get_path("duplicate source node or .ndx collision for node '" + node_name +
+                          "', falling back to W subpaths without coordinates");
+            return state;
+        }
+
+        set_seen_bit(seen_nodes, node_id);
+        ++seen_node_count;
+        state.node_lengths[node_id] = node_length;
     }
 
-    if (expected_node_id != index.node_count()) {
-        warn_get_path("source GFA has fewer S lines than the .pdx index, falling back to W subpaths without coordinates");
+    if (seen_node_count != index.node_count()) {
+        warn_get_path("the node set in --source_gfa does not match the node set in .pdx/.ndx, falling back to W subpaths without coordinates");
         return state;
     }
 
@@ -312,6 +355,11 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("in_index")
       .help("input path index (.pdx)");
 
+    parser.add_argument("--ndx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("path to the node hash index (.ndx); required for node-set queries and exact W subwalk coordinates");
+
     parser.add_argument("--path_id")
       .default_value(std::string(""))
       .nargs(1)
@@ -369,6 +417,7 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
 
 int run_get_path(const argparse::ArgumentParser& program) {
     const auto input_index = program.get<std::string>("in_index");
+    const auto node_index_path = program.get<std::string>("ndx");
     if (!file_exists(input_index.c_str())) {
         std::cerr << "Path index file does not exist: " << input_index << std::endl;
         return 1;
@@ -406,6 +455,14 @@ int run_get_path(const argparse::ArgumentParser& program) {
     }
     if (with_walk_coords && source_gfa.empty()) {
         std::cerr << "--with_walk_coords requires --source_gfa" << std::endl;
+        return 1;
+    }
+    if (has_node_query && node_index_path.empty()) {
+        std::cerr << "Node-set queries require --ndx so node ids can be resolved without loading a global node map" << std::endl;
+        return 1;
+    }
+    if (has_node_query && !file_exists(node_index_path.c_str())) {
+        std::cerr << "Node index file does not exist: " << node_index_path << std::endl;
         return 1;
     }
 
@@ -465,7 +522,9 @@ int run_get_path(const argparse::ArgumentParser& program) {
             return 1;
         }
 
-        const auto runs = find_subpaths_for_nodes(index, node_names);
+        indexer::NodeHashIndex node_index(node_index_path);
+        const auto node_ids = resolve_node_names_with_index(node_index, node_names);
+        const auto runs = find_subpaths_for_node_ids(index, node_ids);
         if (runs.empty()) {
             std::cerr << "No subpaths overlap the requested node set" << std::endl;
             return 1;
@@ -474,7 +533,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
         WalkCoordState walk_coord_state;
         std::unordered_map<std::uint32_t, PathCoordCacheEntry> path_coord_cache;
         if (with_walk_coords) {
-            walk_coord_state = load_node_lengths_by_index(index, source_gfa);
+            walk_coord_state = load_node_lengths_by_index(index, node_index, source_gfa);
         }
 
         for (const auto& run : runs) {

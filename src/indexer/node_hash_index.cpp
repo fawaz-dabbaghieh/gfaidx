@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 static_assert(sizeof(gfaidx::indexer::NodeHashEntry) == 16, "NodeHashEntry size must be 16 bytes");
@@ -35,6 +36,10 @@ std::uint32_t fnv1a_hash32(std::string_view s) {
         h *= FNV_PRIME;
     }
     return h;
+}
+
+std::uint64_t NodeHashIndex::size() const {
+    return static_cast<std::uint64_t>(n_entries_);
 }
 
 void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& node_to_id,
@@ -78,7 +83,6 @@ void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& 
     out.close();
 }
 
-#if defined(__unix__) || defined(__APPLE__)
 NodeHashIndex::NodeHashIndex(const std::string& path) {
     fd_ = ::open(path.c_str(), O_RDONLY);
     if (fd_ == -1) {
@@ -126,43 +130,18 @@ NodeHashIndex::~NodeHashIndex() {
         fd_ = -1;
     }
 }
-#else
-    // fall back to fstream on other systems, maybe not necessary, but already wrote it
-NodeHashIndex::NodeHashIndex(const std::string& path) {
-    file_.open(path, std::ios::binary);
-    if (!file_) {
-        throw std::runtime_error("Failed to open node index file: " + path);
-    }
 
-    // Getting the size of the table for the binary search
-    file_.seekg(0, std::ios::end);
-    file_size_ = static_cast<std::size_t>(file_.tellg());
-    file_.seekg(0, std::ios::beg);
-
-    if (file_size_ % entry_size_ != 0) {
-        throw std::runtime_error("Node index file size is invalid: " + path);
-    }
-
-    n_entries_ = file_size_ / entry_size_;
-}
-
-NodeHashIndex::~NodeHashIndex() {
-    if (file_.is_open()) {
-        file_.close();
-    }
-}
-#endif
-
-bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) const {
-    // binary search lookup through the on-disk hash table
+bool NodeHashIndex::lookup_rank(std::string_view node_id, std::uint32_t& out_rank) const {
+    // Binary search lookup through the on-disk hash table. The returned rank is
+    // the sorted entry position inside the .ndx file; path indexing can reuse
+    // that stable rank as a compact node id without building another on-disk
+    // name->id side index.
     const std::uint64_t query_hash = fnv1a_hash64(node_id);
     const std::uint32_t query_hash32 = fnv1a_hash32(node_id);
 
-#if defined(__unix__) || defined(__APPLE__)
     std::size_t low_val = 0;
     std::size_t high_val = n_entries_;
     while (low_val < high_val) {
-        // COLLISIONS? Need to think about dealing with them at some point
         const std::size_t mid_val = low_val + (high_val - low_val) / 2;
         const std::uint64_t mid_val_hash = data_[mid_val].hash;
 
@@ -176,7 +155,10 @@ bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) con
             }
             for (std::size_t i = left; i < n_entries_ && data_[i].hash == query_hash; ++i) {
                 if (data_[i].hash32 == query_hash32) {
-                    out_com = data_[i].community_id;
+                    if (i > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+                        throw std::runtime_error("Node hash index rank does not fit into uint32_t");
+                    }
+                    out_rank = static_cast<std::uint32_t>(i);
                     return true;
                 }
             }
@@ -184,51 +166,16 @@ bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) con
         }
     }
     return false;
-#else
-    std::size_t low_val = 0;
-    std::size_t high_val = n_entries_;
-    while (low_val < high_val) {
-        const std::size_t mid_val = low_val + (high_val - low_val) / 2;
-        const auto offset = static_cast<std::streamoff>(mid_val * entry_size_);
-        file_.seekg(offset, std::ios::beg);
-        NodeHashEntry entry{};
-        file_.read(reinterpret_cast<char*>(&entry), static_cast<std::streamsize>(entry_size_));
+}
 
-        if (!file_) {
-            throw std::runtime_error("Failed to read from node index file");
-        }
-
-        const std::uint64_t mid_val_hash = entry.hash;
-
-        if (mid_val_hash < query_hash) low_val = mid_val + 1;
-        else if (mid_val_hash > query_hash) high_val = mid_val;
-        else {
-            // Walk left to the first matching hash, then scan right to resolve collisions.
-            std::size_t left = mid_val;
-            while (left > 0) {
-                const std::size_t prev = left - 1;
-                file_.seekg(static_cast<std::streamoff>(prev * entry_size_), std::ios::beg);
-                NodeHashEntry prev_entry{};
-                file_.read(reinterpret_cast<char*>(&prev_entry), static_cast<std::streamsize>(entry_size_));
-                if (!file_ || prev_entry.hash != query_hash) break;
-                left = prev;
-            }
-            for (std::size_t i = left; i < n_entries_; ++i) {
-                file_.seekg(static_cast<std::streamoff>(i * entry_size_), std::ios::beg);
-                NodeHashEntry scan_entry{};
-                file_.read(reinterpret_cast<char*>(&scan_entry), static_cast<std::streamsize>(entry_size_));
-                if (!file_ || scan_entry.hash != query_hash) break;
-                if (scan_entry.hash32 == query_hash32) {
-                    out_com = scan_entry.community_id;
-                    return true;
-                }
-            }
-            return false;
-        }
+bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) const {
+    std::uint32_t rank = 0;
+    if (!lookup_rank(node_id, rank)) {
+        return false;
     }
 
-    return false;
-#endif
+    out_com = data_[rank].community_id;
+    return true;
 }
 
 }  // namespace gfaidx::indexer

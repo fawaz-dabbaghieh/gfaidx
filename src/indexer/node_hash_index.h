@@ -2,7 +2,6 @@
 #define GFAIDX_NODE_HASH_INDEX_H
 
 #include <cstdint>
-#include <fstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -35,21 +34,17 @@ public:
     NodeHashIndex(const NodeHashIndex&) = delete;
     NodeHashIndex& operator=(const NodeHashIndex&) = delete;
 
+    [[nodiscard]] std::uint64_t size() const;
     bool lookup(std::string_view node_id, std::uint32_t& out_com) const;
+    bool lookup_rank(std::string_view node_id, std::uint32_t& out_rank) const;
 
 private:
-// it mainly uses mmap but has a fallback to fstream
-#if defined(__unix__) || defined(__APPLE__)
+    // The node hash index is mmap-backed and only supported on Unix-like
+    // systems. gfaidx does not target Windows builds.
     int fd_ = -1;
     const NodeHashEntry* data_ = nullptr;
     std::size_t file_size_ = 0;
     std::size_t n_entries_ = 0;
-#else
-    mutable std::ifstream file_;
-    std::size_t entry_size_ = sizeof(NodeHashEntry);
-    std::size_t file_size_ = 0;
-    std::size_t n_entries_ = 0;
-#endif
 };
 
 }  // namespace gfaidx::indexer

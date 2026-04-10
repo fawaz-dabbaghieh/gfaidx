@@ -16,7 +16,7 @@
 namespace gfaidx::paths {
 
 // Lightweight path metadata returned by the reader. String views point into the
-// in-memory string blob owned by PathIndexReader.
+// path metadata strings owned by PathIndexReader.
 struct PathInfo {
     char record_type{};
     std::uint32_t path_id{};
@@ -47,6 +47,7 @@ struct SubpathRun {
 
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
+                      const std::string& node_index_path,
                       const Reader::Options& reader_options = Reader::Options{});
 
 class PathIndexReader {
@@ -58,11 +59,10 @@ public:
     }
 
     [[nodiscard]] std::uint32_t node_count() const {
-        return static_cast<std::uint32_t>(nodes_.size());
+        return node_count_;
     }
 
     [[nodiscard]] bool lookup_path_id(const std::string& name, std::uint32_t& out_path_id) const;
-    [[nodiscard]] bool lookup_node_id(const std::string& name, std::uint32_t& out_node_id) const;
 
     [[nodiscard]] PathInfo get_path_info(std::uint32_t path_id) const;
     [[nodiscard]] std::string_view get_path_name(std::uint32_t path_id) const;
@@ -80,23 +80,19 @@ public:
         const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const;
 
 private:
-    // On-disk metadata for one path. The actual strings live in the shared
-    // string blob, while steps and postings live in flat binary tables.
+    // Path metadata is loaded eagerly because the number of paths is small
+    // compared to the number of graph nodes. Node metadata stays on disk and is
+    // loaded lazily on demand to keep query-time memory bounded on large graphs.
     struct PathMeta {
         char record_type{};
-        std::uint64_t name_offset{};
-        std::uint64_t name_len{};
+        std::string name;
         std::uint64_t step_begin{};
         std::uint64_t step_count{};
-        std::uint64_t overlap_offset{};
-        std::uint64_t overlap_len{};
-        std::uint64_t tags_offset{};
-        std::uint64_t tags_len{};
-        std::uint64_t sample_offset{};
-        std::uint64_t sample_len{};
+        std::string overlap_field;
+        std::string tags;
+        std::string sample_id;
         std::uint64_t hap_index{};
-        std::uint64_t seq_id_offset{};
-        std::uint64_t seq_id_len{};
+        std::string seq_id;
         std::int64_t seq_start{-1};
         std::int64_t seq_end{-1};
     };
@@ -108,26 +104,29 @@ private:
         std::uint64_t posting_count{};
     };
 
-    [[nodiscard]] std::string_view view_string(std::uint64_t offset, std::uint64_t len) const;
+    [[nodiscard]] NodeMeta read_node_meta(std::uint32_t node_id) const;
+    [[nodiscard]] std::string read_string(std::uint64_t offset, std::uint64_t len) const;
     void read_exact(std::uint64_t offset, void* dst, std::size_t bytes) const;
 
     std::string index_path_;
     mutable std::ifstream in_;
+    std::uint64_t node_table_offset_{};
     std::uint64_t step_table_offset_{};
     std::uint64_t posting_table_offset_{};
+    std::uint64_t strings_offset_{};
     std::uint64_t posting_table_bytes_{};
     std::uint64_t step_record_bytes_{};
     bool postings_are_compressed_{false};
+    std::uint32_t node_count_{};
     std::vector<PathMeta> paths_;
-    std::vector<NodeMeta> nodes_;
-    std::string strings_;
     std::unordered_map<std::string, std::uint32_t> path_name_to_id_;
-    std::unordered_map<std::string, std::uint32_t> node_name_to_id_;
+    mutable std::unordered_map<std::uint32_t, NodeMeta> node_meta_cache_;
+    mutable std::unordered_map<std::uint32_t, std::string> node_name_cache_;
 };
 
 // Resolve a node set into all path runs that remain contiguous inside that set.
-std::vector<SubpathRun> find_subpaths_for_nodes(const PathIndexReader& index,
-                                                const std::vector<std::string>& node_names);
+std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
+                                                   const std::vector<std::uint32_t>& node_ids);
 
 void write_path_as_gfa_line(std::ostream& out,
                             const PathIndexReader& index,

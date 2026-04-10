@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "fs/gfa_line_parsers.h"
+#include "indexer/node_hash_index.h"
 #include "utils/Timer.h"
 
 namespace gfaidx::paths {
@@ -187,6 +188,18 @@ std::uint64_t read_varint(const std::vector<unsigned char>& data, std::size_t& c
     }
 
     throw std::runtime_error("Unexpected end of compressed posting block");
+}
+
+bool test_seen_bit(const std::vector<std::uint64_t>& bits, std::uint32_t value) {
+    const std::size_t word = value / 64;
+    const unsigned bit = value % 64;
+    return (bits[word] & (1ULL << bit)) != 0;
+}
+
+void set_seen_bit(std::vector<std::uint64_t>& bits, std::uint32_t value) {
+    const std::size_t word = value / 64;
+    const unsigned bit = value % 64;
+    bits[word] |= (1ULL << bit);
 }
 
 std::uint64_t append_string(std::string& blob, std::string_view s) {
@@ -480,15 +493,28 @@ void write_w_segments(std::ostream& out,
 
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
+                      const std::string& node_index_path,
                       const Reader::Options& reader_options) {
     Timer timer;
 
+    indexer::NodeHashIndex node_index(node_index_path);
+    if (node_index.size() > kStepPackedNodeMask) {
+        throw std::runtime_error("Node hash index is too large for packed step encoding");
+    }
+
     std::unordered_map<std::string, std::uint32_t> node_to_id;
-    std::vector<std::string> id_to_node;
+    node_to_id.reserve(static_cast<std::size_t>(node_index.size()));
+    std::vector<NodeRecordDisk> node_records(static_cast<std::size_t>(node_index.size()));
+    std::vector<std::uint64_t> seen_nodes((static_cast<std::size_t>(node_index.size()) + 63) / 64, 0);
+    std::uint64_t seen_node_count = 0;
+    std::string strings_blob;
+    strings_blob.reserve(1024);
 
     {
-        // Pass 1: build the node-id -> integer-id mapping from S lines so path
-        // steps can be stored compactly as integers.
+        // Pass 1: resolve each S-line node through the prebuilt .ndx file. The
+        // sorted entry rank in .ndx becomes the canonical node id inside .pdx,
+        // so later node queries can hash a node name, binary-search .ndx, and
+        // use that rank directly without building another global name->id map.
         std::string_view line;
         Reader reader(reader_options);
         if (!reader.open(input_gfa)) {
@@ -499,10 +525,26 @@ bool build_path_index(const std::string& input_gfa,
         while (reader.read_line(line)) {
             if (line.empty() || line[0] != 'S') continue;
             auto node_id = extract_s_node_id(line);
-            if (node_to_id.find(node_id) != node_to_id.end()) continue;
-            const auto int_id = static_cast<std::uint32_t>(id_to_node.size());
+
+            std::uint32_t int_id = 0;
+            if (!node_index.lookup_rank(node_id, int_id)) {
+                throw std::runtime_error("S line references a node missing from .ndx: " + node_id);
+            }
+            if (test_seen_bit(seen_nodes, int_id)) {
+                throw std::runtime_error("Duplicate S line or .ndx collision detected for node: " + node_id);
+            }
+
+            set_seen_bit(seen_nodes, int_id);
+            ++seen_node_count;
             node_to_id.emplace(node_id, int_id);
-            id_to_node.push_back(std::move(node_id));
+
+            auto& rec = node_records[int_id];
+            rec.name_offset = append_string(strings_blob, node_id);
+            rec.name_len = node_id.size();
+        }
+
+        if (seen_node_count != node_index.size()) {
+            throw std::runtime_error("The input GFA and .ndx do not contain the same node set");
         }
     }
 
@@ -565,9 +607,6 @@ bool build_path_index(const std::string& input_gfa,
                   return lhs.step_rank < rhs.step_rank;
               });
 
-    std::string strings_blob;
-    strings_blob.reserve(1024);
-
     // Materialize the final path table while packing names / overlaps / tags
     // into one shared string blob.
     std::vector<PathRecordDisk> path_records(paths.size());
@@ -596,14 +635,11 @@ bool build_path_index(const std::string& input_gfa,
     // Each node record stores:
     // - posting_begin: byte offset of its block inside the posting section
     // - posting_count: number of decoded postings in that block
-    std::vector<NodeRecordDisk> node_records(id_to_node.size());
     std::size_t posting_cursor = 0;
     std::string posting_blob;
     posting_blob.reserve(postings.size() * 5 / 2);
-    for (std::size_t i = 0; i < id_to_node.size(); ++i) {
+    for (std::size_t i = 0; i < node_records.size(); ++i) {
         auto& dst = node_records[i];
-        dst.name_offset = append_string(strings_blob, id_to_node[i]);
-        dst.name_len = id_to_node[i].size();
         dst.posting_begin = static_cast<std::uint64_t>(posting_blob.size());
         const auto node_begin = posting_cursor;
         while (posting_cursor < postings.size() && postings[posting_cursor].node_id == i) {
@@ -677,29 +713,26 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
         header.version != kPathIndexVersion) {
         throw std::runtime_error("Unsupported path index version: " + std::to_string(header.version));
     }
+    if (header.node_count > kStepPackedNodeMask) {
+        throw std::runtime_error("Path index node count exceeds packed node id range");
+    }
 
+    node_table_offset_ = header.node_table_offset;
     step_table_offset_ = header.step_table_offset;
     posting_table_offset_ = header.posting_table_offset;
+    strings_offset_ = header.strings_offset;
     posting_table_bytes_ = header.strings_offset - header.posting_table_offset;
+    node_count_ = static_cast<std::uint32_t>(header.node_count);
     // Legacy v1/v2 files use the old 8-byte step layout. Version-3+ files use
     // the packed 4-byte representation.
     step_record_bytes_ = (header.version >= kPathIndexVersionV3) ? sizeof(StepRecordDisk)
                                                                  : sizeof(StepRecordDiskV1V2);
     postings_are_compressed_ = (header.version >= kPathIndexVersion);
 
-    // Load the small metadata tables and the shared strings eagerly. Step data
-    // and posting blocks remain on disk and are fetched on demand.
-    std::vector<NodeRecordDisk> node_records(static_cast<std::size_t>(header.node_count));
-    read_exact(header.node_table_offset,
-               node_records.data(),
-               node_records.size() * sizeof(NodeRecordDisk));
-
-    strings_.resize(static_cast<std::size_t>(header.strings_size));
-    if (!strings_.empty()) {
-        read_exact(header.strings_offset, strings_.data(), strings_.size());
-    }
-
-    paths_.reserve(static_cast<std::size_t>(header.path_count));
+    // Load the small path metadata table eagerly. Node metadata and node names
+    // stay on disk and are fetched lazily, which avoids a large fixed memory
+    // cost when the graph has many millions of nodes.
+    paths_.reserve(header.path_count);
     if (header.version == kPathIndexVersionV1) {
         std::vector<PathRecordDiskV1> path_records(static_cast<std::size_t>(header.path_count));
         read_exact(header.path_table_offset,
@@ -708,19 +741,14 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
         for (const auto& rec : path_records) {
             paths_.push_back(PathMeta{
                 'P',
-                rec.name_offset,
-                rec.name_len,
+                read_string(rec.name_offset, rec.name_len),
                 rec.step_begin,
                 rec.step_count,
-                rec.overlap_offset,
-                rec.overlap_len,
-                rec.tags_offset,
-                rec.tags_len,
+                read_string(rec.overlap_offset, rec.overlap_len),
+                read_string(rec.tags_offset, rec.tags_len),
+                "",
                 0,
-                0,
-                0,
-                0,
-                0,
+                "",
                 -1,
                 -1
             });
@@ -733,41 +761,23 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
         for (const auto& rec : path_records) {
             paths_.push_back(PathMeta{
                 rec.record_type,
-                rec.name_offset,
-                rec.name_len,
+                read_string(rec.name_offset, rec.name_len),
                 rec.step_begin,
                 rec.step_count,
-                rec.overlap_offset,
-                rec.overlap_len,
-                rec.tags_offset,
-                rec.tags_len,
-                rec.sample_offset,
-                rec.sample_len,
+                read_string(rec.overlap_offset, rec.overlap_len),
+                read_string(rec.tags_offset, rec.tags_len),
+                read_string(rec.sample_offset, rec.sample_len),
                 rec.hap_index,
-                rec.seq_id_offset,
-                rec.seq_id_len,
+                read_string(rec.seq_id_offset, rec.seq_id_len),
                 rec.seq_start,
                 rec.seq_end
             });
         }
     }
 
-    nodes_.reserve(node_records.size());
-    for (const auto& rec : node_records) {
-        nodes_.push_back(NodeMeta{
-            rec.name_offset,
-            rec.name_len,
-            rec.posting_begin,
-            rec.posting_count
-        });
-    }
-
     // Build name -> id maps once so repeated lookups stay cheap.
-    for (std::uint32_t i = 0; i < paths_.size(); ++i) {
+    for (std::uint32_t i = 0; i < path_count(); ++i) {
         path_name_to_id_.emplace(std::string(get_path_name(i)), i);
-    }
-    for (std::uint32_t i = 0; i < nodes_.size(); ++i) {
-        node_name_to_id_.emplace(std::string(get_node_name(i)), i);
     }
 }
 
@@ -775,13 +785,6 @@ bool PathIndexReader::lookup_path_id(const std::string& name, std::uint32_t& out
     const auto it = path_name_to_id_.find(name);
     if (it == path_name_to_id_.end()) return false;
     out_path_id = it->second;
-    return true;
-}
-
-bool PathIndexReader::lookup_node_id(const std::string& name, std::uint32_t& out_node_id) const {
-    const auto it = node_name_to_id_.find(name);
-    if (it == node_name_to_id_.end()) return false;
-    out_node_id = it->second;
     return true;
 }
 
@@ -796,12 +799,12 @@ PathInfo PathIndexReader::get_path_info(std::uint32_t path_id) const {
         path_id,
         rec.step_begin,
         rec.step_count,
-        view_string(rec.name_offset, rec.name_len),
-        view_string(rec.overlap_offset, rec.overlap_len),
-        view_string(rec.tags_offset, rec.tags_len),
-        view_string(rec.sample_offset, rec.sample_len),
+        rec.name,
+        rec.overlap_field,
+        rec.tags,
+        rec.sample_id,
         rec.hap_index,
-        view_string(rec.seq_id_offset, rec.seq_id_len),
+        rec.seq_id,
         rec.seq_start,
         rec.seq_end
     };
@@ -812,15 +815,22 @@ std::string_view PathIndexReader::get_path_name(std::uint32_t path_id) const {
         throw std::runtime_error("Path id out of range");
     }
     const auto& rec = paths_[path_id];
-    return view_string(rec.name_offset, rec.name_len);
+    return rec.name;
 }
 
 std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
-    if (node_id >= nodes_.size()) {
+    if (node_id >= node_count_) {
         throw std::runtime_error("Node id out of range");
     }
-    const auto& rec = nodes_[node_id];
-    return view_string(rec.name_offset, rec.name_len);
+    const auto it = node_name_cache_.find(node_id);
+    if (it != node_name_cache_.end()) {
+        return it->second;
+    }
+
+    const auto rec = read_node_meta(node_id);
+    auto [inserted_it, inserted] = node_name_cache_.emplace(node_id, read_string(rec.name_offset, rec.name_len));
+    (void)inserted;
+    return inserted_it->second;
 }
 
 std::string_view PathIndexReader::get_overlap_field(std::uint32_t path_id) const {
@@ -828,7 +838,7 @@ std::string_view PathIndexReader::get_overlap_field(std::uint32_t path_id) const
         throw std::runtime_error("Path id out of range");
     }
     const auto& rec = paths_[path_id];
-    return view_string(rec.overlap_offset, rec.overlap_len);
+    return rec.overlap_field;
 }
 
 std::string_view PathIndexReader::get_tags(std::uint32_t path_id) const {
@@ -836,7 +846,7 @@ std::string_view PathIndexReader::get_tags(std::uint32_t path_id) const {
         throw std::runtime_error("Path id out of range");
     }
     const auto& rec = paths_[path_id];
-    return view_string(rec.tags_offset, rec.tags_len);
+    return rec.tags;
 }
 
 std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
@@ -877,11 +887,11 @@ std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
 void PathIndexReader::for_each_node_posting(
     std::uint32_t node_id,
     const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const {
-    if (node_id >= nodes_.size()) {
+    if (node_id >= node_count_) {
         throw std::runtime_error("Node id out of range");
     }
 
-    const auto& node = nodes_[node_id];
+    const auto node = read_node_meta(node_id);
     if (node.posting_count == 0) return;
 
     if (!postings_are_compressed_) {
@@ -897,8 +907,8 @@ void PathIndexReader::for_each_node_posting(
     }
 
     const std::uint64_t block_begin = node.posting_begin;
-    const std::uint64_t block_end = (node_id + 1 < nodes_.size())
-        ? nodes_[node_id + 1].posting_begin
+    const std::uint64_t block_end = (node_id + 1 < node_count_)
+        ? read_node_meta(node_id + 1).posting_begin
         : posting_table_bytes_;
     if (block_end < block_begin) {
         throw std::runtime_error("Compressed posting block offsets are out of order");
@@ -952,11 +962,35 @@ void PathIndexReader::for_each_node_posting(
     }
 }
 
-std::string_view PathIndexReader::view_string(std::uint64_t offset, std::uint64_t len) const {
-    if (offset + len > strings_.size()) {
-        throw std::runtime_error("Path index string offset out of range");
+PathIndexReader::NodeMeta PathIndexReader::read_node_meta(std::uint32_t node_id) const {
+    if (node_id >= node_count_) {
+        throw std::runtime_error("Node id out of range");
     }
-    return {strings_.data() + offset, static_cast<std::size_t>(len)};
+
+    const auto it = node_meta_cache_.find(node_id);
+    if (it != node_meta_cache_.end()) {
+        return it->second;
+    }
+
+    NodeRecordDisk rec{};
+    const auto offset = node_table_offset_ + static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
+    read_exact(offset, &rec, sizeof(rec));
+
+    NodeMeta meta{
+        rec.name_offset,
+        rec.name_len,
+        rec.posting_begin,
+        rec.posting_count
+    };
+    node_meta_cache_.emplace(node_id, meta);
+    return meta;
+}
+
+std::string PathIndexReader::read_string(std::uint64_t offset, std::uint64_t len) const {
+    std::string out(static_cast<std::size_t>(len), '\0');
+    if (len == 0) return out;
+    read_exact(strings_offset_ + offset, out.data(), out.size());
+    return out;
 }
 
 void PathIndexReader::read_exact(std::uint64_t offset, void* dst, std::size_t bytes) const {
@@ -972,16 +1006,12 @@ void PathIndexReader::read_exact(std::uint64_t offset, void* dst, std::size_t by
     }
 }
 
-std::vector<SubpathRun> find_subpaths_for_nodes(const PathIndexReader& index,
-                                                const std::vector<std::string>& node_names) {
+std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
+                                                   const std::vector<std::uint32_t>& node_ids) {
     std::unordered_set<std::uint32_t> unique_nodes;
-    unique_nodes.reserve(node_names.size());
+    unique_nodes.reserve(node_ids.size());
 
-    for (const auto& node_name : node_names) {
-        std::uint32_t node_id = 0;
-        if (!index.lookup_node_id(node_name, node_id)) {
-            throw std::runtime_error("Node id not found in path index: " + node_name);
-        }
+    for (const auto node_id : node_ids) {
         unique_nodes.insert(node_id);
     }
 
