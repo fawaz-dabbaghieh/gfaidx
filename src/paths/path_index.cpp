@@ -21,15 +21,12 @@ namespace {
 // - a path table
 // - a node table
 // - a flat step array
-// - a per-node posting blob (raw in older versions, compressed in v4)
+// - a per-node compressed posting blob
 // - one shared string blob for names / overlap fields / tags
 constexpr char kPathIndexMagic[8] = {'G', 'F', 'P', 'A', 'T', 'H', '1', '\0'};
-constexpr std::uint32_t kPathIndexVersionV1 = 1;
-constexpr std::uint32_t kPathIndexVersionV2 = 2;
-constexpr std::uint32_t kPathIndexVersionV3 = 3;
 constexpr std::uint32_t kPathIndexVersion = 4;
 
-// Version-3 stores each step in one packed uint32:
+// Each step is stored in one packed uint32:
 // - low 31 bits: node_id
 // - top bit: reverse-orientation flag
 constexpr std::uint32_t kStepPackedNodeMask = 0x7fffffffu;
@@ -52,19 +49,7 @@ struct PathIndexHeaderDisk {
     std::uint64_t strings_size{};
 };
 
-// Version-1 path metadata for P-lines only.
-struct PathRecordDiskV1 {
-    std::uint64_t name_offset{};
-    std::uint64_t name_len{};
-    std::uint64_t step_begin{};
-    std::uint64_t step_count{};
-    std::uint64_t overlap_offset{};
-    std::uint64_t overlap_len{};
-    std::uint64_t tags_offset{};
-    std::uint64_t tags_len{};
-};
-
-// Version-2 path metadata that supports both P-lines and W-lines.
+// Path metadata supporting both P-lines and W-lines.
 struct PathRecordDisk {
     char record_type{};
     char reserved[7]{};
@@ -86,7 +71,7 @@ struct PathRecordDisk {
 };
 
 // Node metadata points at the node's slice in the posting table.
-// Version-4 switches posting_begin from "posting index" to "byte offset into
+// posting_begin is a byte offset into
 // the compressed posting blob". posting_count remains the decoded posting
 // count so callers can still reason about how many occurrences the node has.
 struct NodeRecordDisk {
@@ -96,23 +81,10 @@ struct NodeRecordDisk {
     std::uint64_t posting_count{};
 };
 
-// Legacy version-1/2 step layout.
-struct StepRecordDiskV1V2 {
-    std::uint32_t node_id{};
-    std::uint8_t flags{};
-    std::uint8_t reserved[3]{};
-};
-
-// Version-3 step layout. This cuts the step table from 8 bytes/step to 4
+// Packed step layout. This cuts the step table from 8 bytes/step to 4
 // bytes/step while preserving direct random access by step index.
 struct StepRecordDisk {
     std::uint32_t packed{};
-};
-
-// Legacy raw posting layout used by version-1/2/3 files.
-struct PostingRecordDisk {
-    std::uint32_t path_id{};
-    std::uint32_t step_rank{};
 };
 
 struct TempPosting {
@@ -155,12 +127,9 @@ struct PathBuildEntry {
 };
 
 static_assert(sizeof(PathIndexHeaderDisk) == 96, "Unexpected path index header size");
-static_assert(sizeof(PathRecordDiskV1) == 64, "Unexpected v1 path record size");
 static_assert(sizeof(PathRecordDisk) == 128, "Unexpected path record size");
 static_assert(sizeof(NodeRecordDisk) == 32, "Unexpected node record size");
-static_assert(sizeof(StepRecordDiskV1V2) == 8, "Unexpected legacy step record size");
 static_assert(sizeof(StepRecordDisk) == 4, "Unexpected packed step record size");
-static_assert(sizeof(PostingRecordDisk) == 8, "Unexpected posting record size");
 
 void append_varint(std::string& out, std::uint64_t value) {
     while (value >= 0x80) {
@@ -229,13 +198,6 @@ StepRecord unpack_step_record(const StepRecordDisk& rec) {
     return StepRecord{
         rec.packed & kStepPackedNodeMask,
         (rec.packed & kStepPackedReverseBit) != 0
-    };
-}
-
-StepRecord unpack_step_record(const StepRecordDiskV1V2& rec) {
-    return StepRecord{
-        rec.node_id,
-        rec.flags != 0
     };
 }
 
@@ -707,10 +669,7 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     if (std::memcmp(header.magic, kPathIndexMagic, sizeof(kPathIndexMagic)) != 0) {
         throw std::runtime_error("Invalid path index magic: " + index_path);
     }
-    if (header.version != kPathIndexVersionV1 &&
-        header.version != kPathIndexVersionV2 &&
-        header.version != kPathIndexVersionV3 &&
-        header.version != kPathIndexVersion) {
+    if (header.version != kPathIndexVersion) {
         throw std::runtime_error("Unsupported path index version: " + std::to_string(header.version));
     }
     if (header.node_count > kStepPackedNodeMask) {
@@ -723,56 +682,29 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     strings_offset_ = header.strings_offset;
     posting_table_bytes_ = header.strings_offset - header.posting_table_offset;
     node_count_ = static_cast<std::uint32_t>(header.node_count);
-    // Legacy v1/v2 files use the old 8-byte step layout. Version-3+ files use
-    // the packed 4-byte representation.
-    step_record_bytes_ = (header.version >= kPathIndexVersionV3) ? sizeof(StepRecordDisk)
-                                                                 : sizeof(StepRecordDiskV1V2);
-    postings_are_compressed_ = (header.version >= kPathIndexVersion);
 
     // Load the small path metadata table eagerly. Node metadata and node names
     // stay on disk and are fetched lazily, which avoids a large fixed memory
     // cost when the graph has many millions of nodes.
     paths_.reserve(header.path_count);
-    if (header.version == kPathIndexVersionV1) {
-        std::vector<PathRecordDiskV1> path_records(static_cast<std::size_t>(header.path_count));
-        read_exact(header.path_table_offset,
-                   path_records.data(),
-                   path_records.size() * sizeof(PathRecordDiskV1));
-        for (const auto& rec : path_records) {
-            paths_.push_back(PathMeta{
-                'P',
-                read_string(rec.name_offset, rec.name_len),
-                rec.step_begin,
-                rec.step_count,
-                read_string(rec.overlap_offset, rec.overlap_len),
-                read_string(rec.tags_offset, rec.tags_len),
-                "",
-                0,
-                "",
-                -1,
-                -1
-            });
-        }
-    } else {
-        std::vector<PathRecordDisk> path_records(static_cast<std::size_t>(header.path_count));
-        read_exact(header.path_table_offset,
-                   path_records.data(),
-                   path_records.size() * sizeof(PathRecordDisk));
-        for (const auto& rec : path_records) {
-            paths_.push_back(PathMeta{
-                rec.record_type,
-                read_string(rec.name_offset, rec.name_len),
-                rec.step_begin,
-                rec.step_count,
-                read_string(rec.overlap_offset, rec.overlap_len),
-                read_string(rec.tags_offset, rec.tags_len),
-                read_string(rec.sample_offset, rec.sample_len),
-                rec.hap_index,
-                read_string(rec.seq_id_offset, rec.seq_id_len),
-                rec.seq_start,
-                rec.seq_end
-            });
-        }
+    std::vector<PathRecordDisk> path_records(static_cast<std::size_t>(header.path_count));
+    read_exact(header.path_table_offset,
+               path_records.data(),
+               path_records.size() * sizeof(PathRecordDisk));
+    for (const auto& rec : path_records) {
+        paths_.push_back(PathMeta{
+            rec.record_type,
+            read_string(rec.name_offset, rec.name_len),
+            rec.step_begin,
+            rec.step_count,
+            read_string(rec.overlap_offset, rec.overlap_len),
+            read_string(rec.tags_offset, rec.tags_len),
+            read_string(rec.sample_offset, rec.sample_len),
+            rec.hap_index,
+            read_string(rec.seq_id_offset, rec.seq_id_len),
+            rec.seq_start,
+            rec.seq_end
+        });
     }
 
     // Build name -> id maps once so repeated lookups stay cheap.
@@ -866,20 +798,12 @@ std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
     // Steps are stored in one flat array, so reading a path slice is one seek
     // and one contiguous read.
     const std::uint64_t byte_offset = step_table_offset_ +
-        (info.step_begin + start_step) * step_record_bytes_;
+        (info.step_begin + start_step) * sizeof(StepRecordDisk);
 
-    if (step_record_bytes_ == sizeof(StepRecordDisk)) {
-        std::vector<StepRecordDisk> raw(static_cast<std::size_t>(take));
-        read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
-        for (const auto& rec : raw) {
-            out.push_back(unpack_step_record(rec));
-        }
-    } else {
-        std::vector<StepRecordDiskV1V2> raw(static_cast<std::size_t>(take));
-        read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDiskV1V2));
-        for (const auto& rec : raw) {
-            out.push_back(unpack_step_record(rec));
-        }
+    std::vector<StepRecordDisk> raw(static_cast<std::size_t>(take));
+    read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
+    for (const auto& rec : raw) {
+        out.push_back(unpack_step_record(rec));
     }
     return out;
 }
@@ -893,18 +817,6 @@ void PathIndexReader::for_each_node_posting(
 
     const auto node = read_node_meta(node_id);
     if (node.posting_count == 0) return;
-
-    if (!postings_are_compressed_) {
-        // Legacy v1/v2/v3 files store fixed-width posting structs.
-        std::vector<PostingRecordDisk> postings(static_cast<std::size_t>(node.posting_count));
-        const std::uint64_t byte_offset = posting_table_offset_ + node.posting_begin * sizeof(PostingRecordDisk);
-        read_exact(byte_offset, postings.data(), postings.size() * sizeof(PostingRecordDisk));
-
-        for (const auto& posting : postings) {
-            callback(posting.path_id, posting.step_rank);
-        }
-        return;
-    }
 
     const std::uint64_t block_begin = node.posting_begin;
     const std::uint64_t block_end = (node_id + 1 < node_count_)

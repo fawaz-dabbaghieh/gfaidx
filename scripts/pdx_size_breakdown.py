@@ -4,10 +4,8 @@
 Usage:
     python3 scripts/pdx_size_breakdown.py graph.pdx
 
-The script reads the .pdx header, infers record sizes from the on-disk format
-version, and reports how much space each top-level section occupies. Newer
-versions can compress the posting section, so section sizes are derived from
-stored offsets instead of only from record counts.
+The script reads the .pdx header for the current path-index format and reports
+how much space each top-level section occupies.
 """
 
 from __future__ import annotations
@@ -15,7 +13,6 @@ from __future__ import annotations
 import argparse
 import os
 import struct
-import sys
 from dataclasses import dataclass
 
 
@@ -23,12 +20,9 @@ HEADER_STRUCT = struct.Struct("<8sIIQQQQQQQQQQ")
 HEADER_SIZE = HEADER_STRUCT.size
 MAGIC = b"GFPATH1\x00"
 
-PATH_RECORD_SIZE_V1 = 64
-PATH_RECORD_SIZE_V2_V3 = 128
+PATH_RECORD_SIZE = 128
 NODE_RECORD_SIZE = 32
-STEP_RECORD_SIZE_V1_V2 = 8
-STEP_RECORD_SIZE_V3_V4 = 4
-POSTING_RECORD_SIZE = 8
+STEP_RECORD_SIZE = 4
 
 
 @dataclass
@@ -75,15 +69,9 @@ def read_header(path: str) -> Header:
     header = Header(*HEADER_STRUCT.unpack(raw))
     if header.magic != MAGIC:
         raise RuntimeError("Invalid .pdx magic")
-    if header.version not in (1, 2, 3, 4):
+    if header.version != 4:
         raise RuntimeError(f"Unsupported .pdx version: {header.version}")
     return header
-
-
-def infer_record_sizes(version: int) -> tuple[int, int]:
-    path_record_size = PATH_RECORD_SIZE_V1 if version == 1 else PATH_RECORD_SIZE_V2_V3
-    step_record_size = STEP_RECORD_SIZE_V3_V4 if version >= 3 else STEP_RECORD_SIZE_V1_V2
-    return path_record_size, step_record_size
 
 
 def main() -> int:
@@ -93,7 +81,6 @@ def main() -> int:
 
     file_size = os.path.getsize(args.pdx)
     header = read_header(args.pdx)
-    path_record_size, step_record_size = infer_record_sizes(header.version)
 
     header_size = header.path_table_offset
     path_table_size = header.node_table_offset - header.path_table_offset
@@ -123,13 +110,10 @@ def main() -> int:
     print(f"  postings: {header.posting_count}")
     print()
     print("Record sizes")
-    print(f"  path record:    {path_record_size} B")
+    print(f"  path record:    {PATH_RECORD_SIZE} B")
     print(f"  node record:    {NODE_RECORD_SIZE} B")
-    print(f"  step record:    {step_record_size} B")
-    if header.version >= 4:
-        print("  posting record: compressed per-node blocks")
-    else:
-        print(f"  posting record: {POSTING_RECORD_SIZE} B")
+    print(f"  step record:    {STEP_RECORD_SIZE} B")
+    print("  posting record: compressed per-node blocks")
     print()
     print("Section offsets")
     print(f"  header:         0")

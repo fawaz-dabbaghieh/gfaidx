@@ -115,8 +115,6 @@ private:
     std::uint64_t posting_table_offset_{};
     std::uint64_t strings_offset_{};
     std::uint64_t posting_table_bytes_{};
-    std::uint64_t step_record_bytes_{};
-    bool postings_are_compressed_{false};
     std::uint32_t node_count_{};
     std::vector<PathMeta> paths_;
     std::unordered_map<std::string, std::uint32_t> path_name_to_id_;
