@@ -16,7 +16,7 @@ The main CLI subcommands are:
 
 ### Chunk index
 
-`index_gfa` writes three artifacts:
+`index_gfa` writes four artifacts by default:
 
 - `<graph>.gz`
   the multi-member gzip file containing one member per community plus a final shared-edge member
@@ -24,6 +24,8 @@ The main CLI subcommands are:
   a community-to-gzip-offset index
 - `<graph>.gz.ndx`
   a sorted binary hash table mapping node string IDs to community IDs
+- `<graph>.gz.pdx`
+  a binary path index for `P` and `W` lines
 
 `get_chunk` uses `.idx` and `.ndx` to stream one community back out.
 
@@ -75,7 +77,7 @@ pip install -e .
 
 ### `gfaidx index_gfa`
 
-Build the chunked gzip graph plus `.idx` and `.ndx`.
+Build the chunked gzip graph plus `.idx`, `.ndx`, and by default `.pdx`.
 
 ```bash
 gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
@@ -100,12 +102,15 @@ Options:
   gzip compression level for the final chunked output
 - `--gzip_mem_level <1..9>`
   zlib memory level for gzip compression
+- `--no_paths`
+  skip building `<out_gfa.gz>.pdx`; only write the graph chunk index artifacts
 
 Outputs:
 
 - `<out_gfa.gz>`
 - `<out_gfa.gz>.idx`
 - `<out_gfa.gz>.ndx`
+- `<out_gfa.gz>.pdx` unless `--no_paths` is used
 
 Example:
 
@@ -150,7 +155,7 @@ gfaidx get_chunk graph.gfa.gz --node_id s12345
 
 ### `gfaidx index_paths`
 
-Build a `.pdx` index for `P` and `W` lines.
+Build or rebuild a standalone `.pdx` index for `P` and `W` lines.
 
 ```bash
 gfaidx index_paths <in_gfa> <out_index.pdx> --ndx <graph.ndx> [options]
@@ -169,6 +174,11 @@ Options:
   node hash index produced by `index_gfa`; required so `.pdx` node IDs match `.ndx` ranks
 - `--progress_every <N>`
   progress logging interval while reading
+
+Notes:
+
+- `index_gfa` already builds `<out_gfa.gz>.pdx` by default
+- `index_paths` is mainly useful when you want to rebuild only the path index after path-index code changes
 
 What gets indexed:
 

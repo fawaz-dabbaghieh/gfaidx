@@ -89,6 +89,10 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--gzip_mem_level").default_value(std::string("8"))
       .nargs(1)
       .help("gzip mem level 1-9 (default: 8)");
+
+    parser.add_argument("--no_paths").default_value(false)
+      .implicit_value(true)
+      .help("skip building the .pdx path index; only write .gz, .idx, and .ndx");
 }
 
 bool run_sort(const std::string& input_edges,

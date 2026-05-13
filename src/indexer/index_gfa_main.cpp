@@ -11,6 +11,7 @@
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/node_hash_index.h"
 #include "chunk/split_gfa_to_comms.h"
+#include "paths/path_index.h"
 #include "utils/Memory.h"
 #include "utils/Timer.h"
 
@@ -43,6 +44,15 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::string node_index_path = out_gzip + ".ndx";
     if (file_exists(node_index_path.c_str())) {
         std::cerr << "Node index file already exists: " << node_index_path << std::endl;
+        return 1;
+    }
+
+    // Path indexing depends on .ndx rank order, so index_gfa can now produce
+    // a matching .pdx as part of the default indexing workflow.
+    const bool no_paths = program.get<bool>("no_paths");
+    const std::string path_index_path = out_gzip + ".pdx";
+    if (!no_paths && file_exists(path_index_path.c_str())) {
+        std::cerr << "Path index file already exists: " << path_index_path << std::endl;
         return 1;
     }
 
@@ -208,6 +218,25 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     write_node_hash_index(node_id_map, id_to_comm, node_index_path);
     std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
     log_memory("After node hash index");
+
+    if (no_paths) {
+        std::cout << get_time() << ": Skipping path indexing because --no_paths was provided" << std::endl;
+    } else {
+        timer.reset();
+        // Build the path index last so it can reuse the finished .ndx. That
+        // keeps .pdx node ids aligned to .ndx entry ranks and means a single
+        // index_gfa run now produces the full graph + path query stack.
+        std::cout << get_time() << ": Building path index " << path_index_path << std::endl;
+        try {
+            gfaidx::paths::build_path_index(input_gfa, path_index_path, node_index_path, reader_options);
+        } catch (const std::exception& err) {
+            std::cerr << "Path indexing failed after .gz/.idx/.ndx were written: "
+                      << err.what() << std::endl;
+            return 1;
+        }
+        std::cout << get_time() << ": Finished path index in " << timer.elapsed() << " seconds" << std::endl;
+        log_memory("After path index");
+    }
 
     if (!keep_tmp) {
         std::cout << get_time() << ": Removing the temporary files" << std::endl;

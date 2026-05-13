@@ -11,13 +11,13 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "0.6.0";
+    constexpr const char* version = "1.0.0";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
     
     argparse::ArgumentParser index_gfa("index_gfa", version);
-    index_gfa.add_description("Index and split a GFA file into communities");
+    index_gfa.add_description("Index and split a GFA file into communities and, by default, build a path index");
     gfaidx::indexer::configure_index_gfa_parser(index_gfa);
     program.add_subparser(index_gfa);
 
