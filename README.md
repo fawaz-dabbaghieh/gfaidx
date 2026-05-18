@@ -172,6 +172,8 @@ Options:
 
 - `--ndx <path>`
   node hash index produced by `index_gfa`; required so `.pdx` node IDs match `.ndx` ranks
+- `--tmp_dir <dir>`
+  base directory for temporary files used by the external posting sort; defaults to the output directory
 - `--progress_every <N>`
   progress logging interval while reading
 
@@ -191,6 +193,7 @@ Current behavior:
 - `P` and `W` are both stored as ordered walks
 - steps are stored in a packed 4-byte format
 - per-node postings are compressed with delta + varint encoding
+- large posting tables are built through disk-backed sorted runs to reduce peak RAM
 
 Example:
 

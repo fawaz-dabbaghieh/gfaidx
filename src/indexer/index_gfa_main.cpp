@@ -228,7 +228,12 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         // index_gfa run now produces the full graph + path query stack.
         std::cout << get_time() << ": Building path index " << path_index_path << std::endl;
         try {
-            gfaidx::paths::build_path_index(input_gfa, path_index_path, node_index_path, reader_options);
+            gfaidx::paths::build_path_index(input_gfa,
+                                            path_index_path,
+                                            node_index_path,
+                                            reader_options,
+                                            tmp_dir,
+                                            keep_tmp);
         } catch (const std::exception& err) {
             std::cerr << "Path indexing failed after .gz/.idx/.ndx were written: "
                       << err.what() << std::endl;

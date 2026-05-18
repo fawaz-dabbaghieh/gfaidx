@@ -48,7 +48,9 @@ struct SubpathRun {
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
                       const std::string& node_index_path,
-                      const Reader::Options& reader_options = Reader::Options{});
+                      const Reader::Options& reader_options = Reader::Options{},
+                      const std::string& tmp_base_dir = std::string(""),
+                      bool keep_tmp = false);
 
 class PathIndexReader {
 public:
