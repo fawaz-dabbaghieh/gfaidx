@@ -218,7 +218,9 @@ Arguments:
 General options:
 
 - `--ndx <path>`
-  required for node-set queries and exact `W` subwalk coordinates
+  optional override for the node hash index; for node-set queries, `get_path`
+  first tries the companion file obtained by replacing the input `.pdx` suffix
+  with `.ndx`
 
 #### Mode 1: exact path ID lookup
 
@@ -274,9 +276,9 @@ gfaidx get_path graph.pdx --sample HG002 --hap_index 1 --seq_id chr22
 Return all `P`/`W` runs that remain contiguous inside the requested node set.
 
 ```bash
-gfaidx get_path graph.pdx --ndx graph.gfa.gz.ndx --nodes 1,2,3
-gfaidx get_path graph.pdx --ndx graph.gfa.gz.ndx --nodes_file nodes.txt
-gfaidx get_path graph.pdx --ndx graph.gfa.gz.ndx --subgraph_gfa subgraph.gfa
+gfaidx get_path graph.gfa.gz.pdx --nodes 1,2,3
+gfaidx get_path graph.gfa.gz.pdx --nodes_file nodes.txt
+gfaidx get_path graph.gfa.gz.pdx --subgraph_gfa subgraph.gfa
 ```
 
 Node query options:
@@ -306,11 +308,12 @@ Example:
 
 ```bash
 gfaidx get_path graph.pdx \
-  --ndx graph.gfa.gz.ndx \
   --subgraph_gfa extracted_subgraph.gfa \
   --with_walk_coords \
   --source_gfa graph.gfa
 ```
+
+If the companion `.ndx` file was renamed or moved, provide it explicitly with `--ndx`.
 
 ## How The Path Index Works
 

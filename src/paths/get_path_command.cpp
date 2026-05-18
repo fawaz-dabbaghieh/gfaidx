@@ -67,6 +67,23 @@ void append_csv_tokens(std::vector<std::string>& out, const std::string& csv) {
     }
 }
 
+std::string infer_companion_ndx_path(const std::string& input_index) {
+    // index_gfa now writes companion files with the same base name:
+    //   <graph>.pdx
+    //   <graph>.ndx
+    // For node-based get_path queries, prefer that convention first so users
+    // do not have to repeat --ndx on the common path.
+    constexpr std::string_view pdx_suffix = ".pdx";
+    if (input_index.size() >= pdx_suffix.size() &&
+        input_index.compare(input_index.size() - pdx_suffix.size(),
+                            pdx_suffix.size(),
+                            pdx_suffix) == 0) {
+        return input_index.substr(0, input_index.size() - pdx_suffix.size()) + ".ndx";
+    }
+
+    return input_index + ".ndx";
+}
+
 std::vector<std::string> load_node_names(const std::string& csv,
                                          const std::string& file_path) {
     std::vector<std::string> nodes;
@@ -358,7 +375,7 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--ndx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("path to the node hash index (.ndx); required for node-set queries and exact W subwalk coordinates");
+      .help("optional path to the node hash index (.ndx); node-set queries first try the companion file next to the input .pdx");
 
     parser.add_argument("--path_id")
       .default_value(std::string(""))
@@ -417,7 +434,7 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
 
 int run_get_path(const argparse::ArgumentParser& program) {
     const auto input_index = program.get<std::string>("in_index");
-    const auto node_index_path = program.get<std::string>("ndx");
+    std::string node_index_path = program.get<std::string>("ndx");
     if (!file_exists(input_index.c_str())) {
         std::cerr << "Path index file does not exist: " << input_index << std::endl;
         return 1;
@@ -457,12 +474,20 @@ int run_get_path(const argparse::ArgumentParser& program) {
         std::cerr << "--with_walk_coords requires --source_gfa" << std::endl;
         return 1;
     }
+
+    // Only node-based queries need .ndx. When the user does not provide one,
+    // try the companion file path that index_gfa now emits by default.
     if (has_node_query && node_index_path.empty()) {
-        std::cerr << "Node-set queries require --ndx so node ids can be resolved without loading a global node map" << std::endl;
-        return 1;
+        node_index_path = infer_companion_ndx_path(input_index);
     }
     if (has_node_query && !file_exists(node_index_path.c_str())) {
-        std::cerr << "Node index file does not exist: " << node_index_path << std::endl;
+        if (program.get<std::string>("ndx").empty()) {
+            std::cerr << "Node-set queries require a matching .ndx file." << std::endl;
+            std::cerr << "Tried inferred companion index: " << node_index_path << std::endl;
+            std::cerr << "Use --ndx <path> if the .ndx file was renamed or stored elsewhere." << std::endl;
+        } else {
+            std::cerr << "Node index file does not exist: " << node_index_path << std::endl;
+        }
         return 1;
     }
 
