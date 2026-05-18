@@ -510,6 +510,10 @@ bool build_path_index(const std::string& input_gfa,
         }
     }
 
+    // Pass 1 only needs the seen-node validation bitset. Release it before we
+    // start accumulating the larger path-heavy structures.
+    std::vector<std::uint64_t>().swap(seen_nodes);
+
     std::vector<PathBuildEntry> paths;
     std::vector<StepRecordDisk> steps;
     std::vector<TempPosting> postings;
@@ -559,6 +563,11 @@ bool build_path_index(const std::string& input_gfa,
         }
     }
 
+    // Node string -> id resolution is only needed while parsing P/W steps.
+    // Drop the large hash table before sorting postings and building the final
+    // on-disk tables.
+    std::unordered_map<std::string, std::uint32_t>().swap(node_to_id);
+
     std::cout << get_time() << ": Building per-node path postings" << std::endl;
     // Sort postings by node first so each node becomes one contiguous range in
     // the final posting table. Within a node, sort by path then step rank.
@@ -593,11 +602,16 @@ bool build_path_index(const std::string& input_gfa,
         dst.seq_end = src.seq_end;
     }
 
+    // The build-time path metadata strings have been copied into path_records
+    // and strings_blob. Release them before constructing the posting blob.
+    std::vector<PathBuildEntry>().swap(paths);
+
     // Build the node table and assign each node one compressed posting block.
     // Each node record stores:
     // - posting_begin: byte offset of its block inside the posting section
     // - posting_count: number of decoded postings in that block
     std::size_t posting_cursor = 0;
+    const std::uint64_t posting_count = postings.size();
     std::string posting_blob;
     posting_blob.reserve(postings.size() * 5 / 2);
     for (std::size_t i = 0; i < node_records.size(); ++i) {
@@ -611,6 +625,10 @@ bool build_path_index(const std::string& input_gfa,
         append_compressed_posting_block(posting_blob, postings, node_begin, posting_cursor);
     }
 
+    // The compressed blob is now complete, so the large raw posting vector is
+    // no longer needed for output.
+    std::vector<TempPosting>().swap(postings);
+
     // Compute all section offsets up front so the file can be written in one
     // sequential pass.
     PathIndexHeaderDisk header{};
@@ -619,7 +637,7 @@ bool build_path_index(const std::string& input_gfa,
     header.path_count = path_records.size();
     header.node_count = node_records.size();
     header.step_count = steps.size();
-    header.posting_count = postings.size();
+    header.posting_count = posting_count;
 
     header.path_table_offset = sizeof(PathIndexHeaderDisk);
     header.node_table_offset = header.path_table_offset + path_records.size() * sizeof(PathRecordDisk);
