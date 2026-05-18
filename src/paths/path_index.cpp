@@ -143,6 +143,14 @@ constexpr std::size_t kPostingChunkRecords =
         ? 1
         : kPostingChunkBytes / sizeof(TempPosting);
 
+constexpr std::uint64_t kPathRecordProgressInterval = 5000;
+constexpr std::uint64_t kPostingRunProgressInterval = 50;
+constexpr std::uint64_t kPostingMergeProgressInterval = 100000000;
+
+// Keep the k-way merge comfortably below typical open-file limits by
+// collapsing large run sets in multiple passes when needed.
+constexpr std::size_t kPostingMergeFanIn = 128;
+
 constexpr std::size_t kFileCopyBufferBytes = 1ULL << 20;
 
 void append_varint(std::string& out, std::uint64_t value) {
@@ -238,6 +246,10 @@ public:
         return total_postings_;
     }
 
+    [[nodiscard]] std::size_t run_count() const {
+        return run_paths_.size();
+    }
+
 private:
     void flush_run() {
         if (chunk_.empty()) return;
@@ -257,6 +269,12 @@ private:
 
         run_paths_.push_back(run_path);
         chunk_.clear();
+
+        if (run_paths_.size() % kPostingRunProgressInterval == 0) {
+            std::cout << get_time() << ": Spilled "
+                      << run_paths_.size() << " posting runs covering "
+                      << total_postings_ << " postings" << std::endl;
+        }
     }
 
     std::string temp_dir_;
@@ -384,6 +402,111 @@ void append_file_to_stream(std::ofstream& out, const std::string& path) {
     }
 }
 
+void remove_paths_if_present(const std::vector<std::string>& paths) {
+    for (const auto& path : paths) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+}
+
+std::vector<PostingRunCursor> open_posting_runs(const std::vector<std::string>& run_paths) {
+    std::vector<PostingRunCursor> runs;
+    runs.reserve(run_paths.size());
+    for (const auto& path : run_paths) {
+        runs.emplace_back(path);
+    }
+    return runs;
+}
+
+std::priority_queue<PostingHeapItem,
+                    std::vector<PostingHeapItem>,
+                    PostingHeapGreater> build_posting_heap(std::vector<PostingRunCursor>& runs) {
+    std::priority_queue<PostingHeapItem,
+                        std::vector<PostingHeapItem>,
+                        PostingHeapGreater> heap;
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        if (runs[i].valid) {
+            heap.push(PostingHeapItem{runs[i].current, i});
+        }
+    }
+    return heap;
+}
+
+void merge_sorted_runs_to_run_file(const std::vector<std::string>& run_paths,
+                                   const std::string& output_path) {
+    std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("Failed to open intermediate posting run file: " + output_path);
+    }
+
+    auto runs = open_posting_runs(run_paths);
+    auto heap = build_posting_heap(runs);
+
+    while (!heap.empty()) {
+        const auto item = heap.top();
+        heap.pop();
+
+        write_binary_record(out, item.posting);
+        if (!out.good()) {
+            throw std::runtime_error("Failed while writing intermediate posting run file: " + output_path);
+        }
+
+        auto& run = runs[item.run_index];
+        if (run.advance()) {
+            heap.push(PostingHeapItem{run.current, item.run_index});
+        }
+    }
+}
+
+std::vector<std::string> collapse_posting_runs(std::vector<std::string> run_paths,
+                                               const std::string& temp_dir) {
+    if (run_paths.size() <= kPostingMergeFanIn) {
+        return run_paths;
+    }
+
+    std::cout << get_time() << ": Collapsing " << run_paths.size()
+              << " posting runs with fan-in " << kPostingMergeFanIn << std::endl;
+
+    std::size_t pass = 0;
+    while (run_paths.size() > kPostingMergeFanIn) {
+        std::vector<std::string> merged_paths;
+        merged_paths.reserve((run_paths.size() + kPostingMergeFanIn - 1) / kPostingMergeFanIn);
+        const std::size_t input_run_count = run_paths.size();
+        const std::size_t total_groups = merged_paths.capacity();
+
+        std::cout << get_time() << ": Merge pass " << pass
+                  << ": " << input_run_count << " runs -> "
+                  << total_groups << " merged runs" << std::endl;
+
+        for (std::size_t begin = 0; begin < run_paths.size(); begin += kPostingMergeFanIn) {
+            const std::size_t end = std::min(run_paths.size(), begin + kPostingMergeFanIn);
+            std::vector<std::string> group(run_paths.begin() + static_cast<std::ptrdiff_t>(begin),
+                                           run_paths.begin() + static_cast<std::ptrdiff_t>(end));
+
+            const std::string merged_path =
+                temp_dir + "/posting_merge_pass_" + std::to_string(pass) + "_" +
+                std::to_string(merged_paths.size()) + ".bin";
+            merge_sorted_runs_to_run_file(group, merged_path);
+            merged_paths.push_back(merged_path);
+
+            // Once a bounded-fan-in merge group has been materialized, its input
+            // runs are no longer needed for later passes or final assembly.
+            remove_paths_if_present(group);
+
+            if (merged_paths.size() % 10 == 0 || merged_paths.size() == total_groups) {
+                std::cout << get_time() << ": Merge pass " << pass
+                          << " completed " << merged_paths.size()
+                          << "/" << total_groups << " groups" << std::endl;
+            }
+        }
+
+        run_paths.swap(merged_paths);
+        ++pass;
+    }
+
+    return run_paths;
+}
+
 std::uint64_t build_compressed_posting_blob_from_runs(
     const std::vector<std::string>& run_paths,
     std::vector<NodeRecordDisk>& node_records,
@@ -402,26 +525,18 @@ std::uint64_t build_compressed_posting_blob_from_runs(
         return 0;
     }
 
-    std::vector<PostingRunCursor> runs;
-    runs.reserve(run_paths.size());
-    for (const auto& path : run_paths) {
-        runs.emplace_back(path);
-    }
+    auto runs = open_posting_runs(run_paths);
+    auto heap = build_posting_heap(runs);
 
-    std::priority_queue<PostingHeapItem,
-                        std::vector<PostingHeapItem>,
-                        PostingHeapGreater> heap;
-    for (std::size_t i = 0; i < runs.size(); ++i) {
-        if (runs[i].valid) {
-            heap.push(PostingHeapItem{runs[i].current, i});
-        }
-    }
+    std::cout << get_time() << ": Final posting merge across "
+              << run_paths.size() << " run files" << std::endl;
 
     std::vector<TempPosting> node_postings;
     std::uint64_t current_offset = 0;
     std::size_t next_node_record = 0;
     std::uint32_t current_node_id = 0;
     bool have_current_node = false;
+    std::uint64_t merged_postings = 0;
 
     auto flush_node = [&]() {
         if (!have_current_node) return;
@@ -466,6 +581,11 @@ std::uint64_t build_compressed_posting_blob_from_runs(
         }
 
         node_postings.push_back(item.posting);
+        ++merged_postings;
+        if (merged_postings % kPostingMergeProgressInterval == 0) {
+            std::cout << get_time() << ": Merged "
+                      << merged_postings << " postings into node blocks" << std::endl;
+        }
 
         auto& run = runs[item.run_index];
         if (run.advance()) {
@@ -474,6 +594,10 @@ std::uint64_t build_compressed_posting_blob_from_runs(
     }
 
     flush_node();
+
+    std::cout << get_time() << ": Final posting merge wrote "
+              << merged_postings << " postings into compressed node blocks" << std::endl;
+
     while (next_node_record < node_records.size()) {
         node_records[next_node_record].posting_begin = current_offset;
         node_records[next_node_record].posting_count = 0;
@@ -850,6 +974,13 @@ bool build_path_index(const std::string& input_gfa,
 
                 total_steps += entry.step_count;
                 paths.push_back(std::move(entry));
+                if (paths.size() % kPathRecordProgressInterval == 0) {
+                    std::cout << get_time() << ": Parsed "
+                              << paths.size() << " P/W records covering "
+                              << total_steps << " steps and "
+                              << posting_runs.run_count() << " completed posting runs"
+                              << std::endl;
+                }
             }
         }
 
@@ -858,6 +989,11 @@ bool build_path_index(const std::string& input_gfa,
         }
         steps_out.close();
         posting_runs.finish();
+
+        std::cout << get_time() << ": Finished scanning " << paths.size()
+                  << " P/W records covering " << total_steps
+                  << " steps; spilled " << posting_runs.run_count()
+                  << " posting runs" << std::endl;
 
         std::unordered_map<std::string, std::uint32_t>().swap(node_to_id);
 
@@ -886,11 +1022,15 @@ bool build_path_index(const std::string& input_gfa,
         std::vector<PathBuildEntry>().swap(paths);
 
         std::cout << get_time() << ": Building per-node path postings" << std::endl;
+        // Cap the final merge width so very large graphs do not require one
+        // open file handle per spilled posting run.
+        auto final_run_paths = collapse_posting_runs(posting_runs.run_paths(), tmp_dir);
         const std::uint64_t posting_blob_bytes =
-            build_compressed_posting_blob_from_runs(posting_runs.run_paths(),
+            build_compressed_posting_blob_from_runs(final_run_paths,
                                                     node_records,
                                                     tmp_posting_blob_path);
         const std::uint64_t posting_count = posting_runs.total_postings();
+        remove_paths_if_present(final_run_paths);
 
         PathIndexHeaderDisk header{};
         std::memcpy(header.magic, kPathIndexMagic, sizeof(kPathIndexMagic));
