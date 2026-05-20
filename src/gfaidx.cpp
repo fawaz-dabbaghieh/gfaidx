@@ -3,6 +3,7 @@
 #include <argparse/argparse.hpp>
 
 #include "chunk/get_chunk_command.h"
+#include "chunk/get_subgraph_command.h"
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/index_gfa_main.h"
 #include "paths/get_path_command.h"
@@ -11,7 +12,7 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.0.1";
+    constexpr const char* version = "1.2.1";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
@@ -25,6 +26,11 @@ int main(int argc, char** argv) {
     get_chunk.add_description("Stream a community chunk from an indexed GFA");
     gfaidx::chunk::configure_get_chunk_parser(get_chunk);
     program.add_subparser(get_chunk);
+
+    argparse::ArgumentParser get_subgraph("get_subgraph", version);
+    get_subgraph.add_description("Extract a BFS neighborhood subgraph from an indexed GFA");
+    gfaidx::chunk::configure_get_subgraph_parser(get_subgraph);
+    program.add_subparser(get_subgraph);
 
     argparse::ArgumentParser index_paths("index_paths", version);
     index_paths.add_description("Index the P and W lines of a GFA file into a binary path index");
@@ -51,6 +57,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (argc == 2 && std::string(argv[1]) == "get_subgraph") {
+        std::cerr << get_subgraph;
+        return 1;
+    }
+
     if (argc == 2 && std::string(argv[1]) == "get_path") {
         std::cerr << get_path;
         return 1;
@@ -74,6 +85,10 @@ int main(int argc, char** argv) {
 
     if (program.is_subcommand_used("index_paths")) {
         return gfaidx::paths::run_index_paths(index_paths);
+    }
+
+    if (program.is_subcommand_used("get_subgraph")) {
+        return gfaidx::chunk::run_get_subgraph(get_subgraph);
     }
 
     if (program.is_subcommand_used("get_path")) {

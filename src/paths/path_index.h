@@ -1,6 +1,7 @@
 #ifndef GFAIDX_PATH_INDEX_H
 #define GFAIDX_PATH_INDEX_H
 
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -45,10 +46,71 @@ struct SubpathRun {
     std::uint64_t step_count{};
 };
 
+// Build the disk-backed .pdx path index for P/W records in a GFA file. Node
+// ids are aligned to the supplied .ndx file so path queries and graph queries
+// share the same integer node space.
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
                       const std::string& node_index_path,
-                      const Reader::Options& reader_options = Reader::Options{});
+                      const Reader::Options& reader_options = Reader::Options{},
+                      const std::string& tmp_base_dir = std::string(""),
+                      bool keep_tmp = false);
+
+namespace detail {
+
+// Temporary posting emitted for each step occurrence before postings are sorted
+// by node and compressed into the final per-node posting blob.
+struct TempPosting {
+    std::uint32_t node_id{};
+    std::uint32_t path_id{};
+    std::uint32_t step_rank{};
+};
+
+// Bounded in-memory posting accumulator that spills sorted posting runs to disk
+// once the configured chunk size is reached.
+class PostingRunBuilder {
+public:
+    explicit PostingRunBuilder(std::string temp_dir, std::size_t max_records);
+
+    void add(std::uint32_t node_id, std::uint32_t path_id, std::uint32_t step_rank);
+    void finish();
+
+    [[nodiscard]] const std::vector<std::string>& run_paths() const;
+    [[nodiscard]] std::uint64_t total_postings() const;
+    [[nodiscard]] std::size_t run_count() const;
+
+private:
+    void flush_run();
+
+    std::string temp_dir_;
+    std::size_t max_records_{};
+    std::uint64_t total_postings_{};
+    std::vector<TempPosting> chunk_;
+    std::vector<std::string> run_paths_;
+};
+
+// Sequential reader over one sorted posting run file used during k-way merge.
+struct PostingRunCursor {
+    explicit PostingRunCursor(const std::string& path);
+
+    bool advance();
+
+    std::ifstream in;
+    TempPosting current{};
+    bool valid{false};
+};
+
+// Heap payload and comparator used by the posting-run k-way merge.
+struct PostingHeapItem {
+    TempPosting posting{};
+    std::size_t run_index{};
+};
+
+struct PostingHeapGreater {
+    bool operator()(const PostingHeapItem& lhs, const PostingHeapItem& rhs) const;
+};
+
+}  // namespace detail
 
 class PathIndexReader {
 public:

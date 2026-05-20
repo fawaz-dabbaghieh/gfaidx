@@ -8,6 +8,7 @@
 The main CLI subcommands are:
 
 - `index_gfa`
+- `get_subgraph`
 - `get_chunk`
 - `index_paths`
 - `get_path`
@@ -27,7 +28,11 @@ The main CLI subcommands are:
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
 
-`get_chunk` uses `.idx` and `.ndx` to stream one community back out.
+`get_subgraph` uses `.idx`, `.ndx`, and optionally `.pdx` to extract a BFS
+neighborhood across communities.
+
+`get_chunk` remains available as the compatibility command for streaming a
+single community member back out without graph expansion.
 
 ### Path index
 
@@ -118,9 +123,53 @@ Example:
 gfaidx index_gfa graph.gfa graph.gfa.gz --tmp_dir /scratch/tmp
 ```
 
+### `gfaidx get_subgraph`
+
+Extract a BFS neighborhood subgraph from the indexed graph, optionally followed
+by the matching `P/W` subpaths if a companion `.pdx` is available.
+
+```bash
+gfaidx get_subgraph <in_gz> <start_node> <out_gfa> [options]
+```
+
+Arguments:
+
+- `in_gz`
+  input indexed gzip graph produced by `index_gfa`
+- `start_node`
+  node ID to start the BFS neighborhood from
+- `out_gfa`
+  output file for the extracted GFA subgraph
+
+Index options:
+
+- `--idx <path>`
+  override the companion `.idx`; defaults to `<in_gz>.idx`
+- `--ndx <path>`
+  override the companion `.ndx`; defaults to `<in_gz>.ndx`
+- `--pdx <path>`
+  override the companion `.pdx`; defaults to `<in_gz>.pdx`
+
+- `--max_nodes <N>`
+  BFS node cap; defaults to `100`
+
+Behavior:
+
+- explicit `--idx`, `--ndx`, and `--pdx` take priority over inferred companion files
+- if `.pdx` is present, `get_subgraph` appends the matching `P/W` subpaths for the extracted node set
+- if `.pdx` is missing and was not explicitly requested, `get_subgraph` warns and continues with `S/L` output only
+- BFS discovery uses a simple node-level adjacency, but final output re-streams the original chunk lines so emitted `S/L` records preserve the original GFA edge orientations
+
+Examples:
+
+```bash
+gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa
+gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
+```
+
 ### `gfaidx get_chunk`
 
-Stream one community from the indexed gzip graph.
+Stream one community member from the indexed gzip graph.
 
 ```bash
 gfaidx get_chunk <in_gz> [--community_id <id> | --node_id <node>] [options]
@@ -133,9 +182,9 @@ Arguments:
 
 Options:
 
-- `--index <path>`
+- `--idx <path>`
   path to the `.idx` file; defaults to `<in_gz>.idx`
-- `--node_index <path>`
+- `--ndx <path>`
   path to the `.ndx` file; defaults to `<in_gz>.ndx`
 - `--community_id <id>`
   stream this community directly
@@ -145,6 +194,7 @@ Options:
 Notes:
 
 - if `--node_id` is provided, it takes precedence over `--community_id`
+- the legacy `--index` and `--node_index` spellings are still accepted
 - shared edges are stored in a final extra member so streamed communities remain self-contained
 
 Example:
@@ -172,6 +222,8 @@ Options:
 
 - `--ndx <path>`
   node hash index produced by `index_gfa`; required so `.pdx` node IDs match `.ndx` ranks
+- `--tmp_dir <dir>`
+  base directory for temporary files used by the external posting sort; defaults to the output directory
 - `--progress_every <N>`
   progress logging interval while reading
 
@@ -191,6 +243,7 @@ Current behavior:
 - `P` and `W` are both stored as ordered walks
 - steps are stored in a packed 4-byte format
 - per-node postings are compressed with delta + varint encoding
+- large posting tables are built through disk-backed sorted runs to reduce peak RAM
 
 Example:
 
