@@ -91,12 +91,6 @@ struct StepRecordDisk {
     std::uint32_t packed{};
 };
 
-struct TempPosting {
-    std::uint32_t node_id{};
-    std::uint32_t path_id{};
-    std::uint32_t step_rank{};
-};
-
 // Parsed views into one P line before we materialize it into the binary index.
 struct ParsedPathFields {
     std::string name;
@@ -139,9 +133,9 @@ static_assert(sizeof(StepRecordDisk) == 4, "Unexpected packed step record size")
 // instead of accumulating one giant in-memory postings vector.
 constexpr std::size_t kPostingChunkBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kPostingChunkRecords =
-    kPostingChunkBytes / sizeof(TempPosting) == 0
+    kPostingChunkBytes / sizeof(detail::TempPosting) == 0
         ? 1
-        : kPostingChunkBytes / sizeof(TempPosting);
+        : kPostingChunkBytes / sizeof(detail::TempPosting);
 
 constexpr std::uint64_t kPathRecordProgressInterval = 5000;
 constexpr std::uint64_t kPostingRunProgressInterval = 50;
@@ -152,6 +146,12 @@ constexpr std::uint64_t kPostingMergeProgressInterval = 100000000;
 constexpr std::size_t kPostingMergeFanIn = 128;
 
 constexpr std::size_t kFileCopyBufferBytes = 1ULL << 20;
+
+using detail::PostingHeapGreater;
+using detail::PostingHeapItem;
+using detail::PostingRunBuilder;
+using detail::PostingRunCursor;
+using detail::TempPosting;
 
 void append_varint(std::string& out, std::uint64_t value) {
     while (value >= 0x80) {
@@ -216,111 +216,6 @@ bool temp_posting_less(const TempPosting& lhs, const TempPosting& rhs) {
     if (lhs.path_id != rhs.path_id) return lhs.path_id < rhs.path_id;
     return lhs.step_rank < rhs.step_rank;
 }
-
-class PostingRunBuilder {
-public:
-    explicit PostingRunBuilder(std::string temp_dir,
-                               std::size_t max_records = kPostingChunkRecords)
-        : temp_dir_(std::move(temp_dir)),
-          max_records_(std::max<std::size_t>(1, max_records)) {
-        chunk_.reserve(max_records_);
-    }
-
-    void add(std::uint32_t node_id, std::uint32_t path_id, std::uint32_t step_rank) {
-        chunk_.push_back(TempPosting{node_id, path_id, step_rank});
-        ++total_postings_;
-        if (chunk_.size() >= max_records_) {
-            flush_run();
-        }
-    }
-
-    void finish() {
-        flush_run();
-    }
-
-    [[nodiscard]] const std::vector<std::string>& run_paths() const {
-        return run_paths_;
-    }
-
-    [[nodiscard]] std::uint64_t total_postings() const {
-        return total_postings_;
-    }
-
-    [[nodiscard]] std::size_t run_count() const {
-        return run_paths_.size();
-    }
-
-private:
-    void flush_run() {
-        if (chunk_.empty()) return;
-
-        std::sort(chunk_.begin(), chunk_.end(), temp_posting_less);
-
-        const std::string run_path =
-            temp_dir_ + "/posting_run_" + std::to_string(run_paths_.size()) + ".bin";
-        std::ofstream out(run_path, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            throw std::runtime_error("Failed to open posting run file: " + run_path);
-        }
-        write_vector(out, chunk_);
-        if (!out.good()) {
-            throw std::runtime_error("Failed while writing posting run file: " + run_path);
-        }
-
-        run_paths_.push_back(run_path);
-        chunk_.clear();
-
-        if (run_paths_.size() % kPostingRunProgressInterval == 0) {
-            std::cout << get_time() << ": Spilled "
-                      << run_paths_.size() << " posting runs covering "
-                      << total_postings_ << " postings" << std::endl;
-        }
-    }
-
-    std::string temp_dir_;
-    std::size_t max_records_{};
-    std::uint64_t total_postings_{};
-    std::vector<TempPosting> chunk_;
-    std::vector<std::string> run_paths_;
-};
-
-struct PostingRunCursor {
-    explicit PostingRunCursor(const std::string& path)
-        : in(path, std::ios::binary) {
-        if (!in) {
-            throw std::runtime_error("Failed to open posting run file: " + path);
-        }
-        advance();
-    }
-
-    bool advance() {
-        in.read(reinterpret_cast<char*>(&current), static_cast<std::streamsize>(sizeof(current)));
-        if (in.gcount() == 0) {
-            valid = false;
-            return false;
-        }
-        if (in.gcount() != static_cast<std::streamsize>(sizeof(current))) {
-            throw std::runtime_error("Posting run file ended in the middle of a record");
-        }
-        valid = true;
-        return true;
-    }
-
-    std::ifstream in;
-    TempPosting current{};
-    bool valid{false};
-};
-
-struct PostingHeapItem {
-    TempPosting posting{};
-    std::size_t run_index{};
-};
-
-struct PostingHeapGreater {
-    bool operator()(const PostingHeapItem& lhs, const PostingHeapItem& rhs) const {
-        return temp_posting_less(rhs.posting, lhs.posting);
-    }
-};
 
 StepRecordDisk pack_step_record(std::uint32_t node_id, bool is_reverse) {
     if (node_id > kStepPackedNodeMask) {
@@ -409,6 +304,8 @@ void remove_paths_if_present(const std::vector<std::string>& paths) {
     }
 }
 
+// Open every posting run in one bounded merge group so the heap can pull the
+// next smallest posting from each run without loading whole files into memory.
 std::vector<PostingRunCursor> open_posting_runs(const std::vector<std::string>& run_paths) {
     std::vector<PostingRunCursor> runs;
     runs.reserve(run_paths.size());
@@ -418,6 +315,7 @@ std::vector<PostingRunCursor> open_posting_runs(const std::vector<std::string>& 
     return runs;
 }
 
+// Seed the heap with the first posting from each sorted run.
 std::priority_queue<PostingHeapItem,
                     std::vector<PostingHeapItem>,
                     PostingHeapGreater> build_posting_heap(std::vector<PostingRunCursor>& runs) {
@@ -432,6 +330,7 @@ std::priority_queue<PostingHeapItem,
     return heap;
 }
 
+// Merge one bounded group of sorted posting runs into a larger sorted run.
 void merge_sorted_runs_to_run_file(const std::vector<std::string>& run_paths,
                                    const std::string& output_path) {
     std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
@@ -458,6 +357,8 @@ void merge_sorted_runs_to_run_file(const std::vector<std::string>& run_paths,
     }
 }
 
+// Repeatedly merge posting runs in bounded groups until the final merge width
+// fits under the configured fan-in cap.
 std::vector<std::string> collapse_posting_runs(std::vector<std::string> run_paths,
                                                const std::string& temp_dir) {
     if (run_paths.size() <= kPostingMergeFanIn) {
@@ -507,6 +408,8 @@ std::vector<std::string> collapse_posting_runs(std::vector<std::string> run_path
     return run_paths;
 }
 
+// Merge the final posting runs in node/path/step order and compress one node's
+// postings at a time into the on-disk posting blob.
 std::uint64_t build_compressed_posting_blob_from_runs(
     const std::vector<std::string>& run_paths,
     std::vector<NodeRecordDisk>& node_records,
@@ -731,6 +634,8 @@ std::uint64_t parse_path_steps(
     return step_rank;
 }
 
+// Parse the oriented step sequence of one W line and emit packed steps plus
+// raw postings for the external-sort pipeline.
 std::uint64_t parse_walk_steps(
     std::string_view walk,
     const std::unordered_map<std::string, std::uint32_t>& node_to_id,
@@ -829,6 +734,94 @@ void write_w_segments(std::ostream& out,
 
 }  // namespace
 
+namespace detail {
+
+PostingRunBuilder::PostingRunBuilder(std::string temp_dir, std::size_t max_records)
+    : temp_dir_(std::move(temp_dir)),
+      max_records_(std::max<std::size_t>(1, max_records)) {
+    chunk_.reserve(max_records_);
+}
+
+void PostingRunBuilder::add(std::uint32_t node_id,
+                            std::uint32_t path_id,
+                            std::uint32_t step_rank) {
+    chunk_.push_back(TempPosting{node_id, path_id, step_rank});
+    ++total_postings_;
+    if (chunk_.size() >= max_records_) {
+        flush_run();
+    }
+}
+
+void PostingRunBuilder::finish() {
+    flush_run();
+}
+
+const std::vector<std::string>& PostingRunBuilder::run_paths() const {
+    return run_paths_;
+}
+
+std::uint64_t PostingRunBuilder::total_postings() const {
+    return total_postings_;
+}
+
+std::size_t PostingRunBuilder::run_count() const {
+    return run_paths_.size();
+}
+
+void PostingRunBuilder::flush_run() {
+    if (chunk_.empty()) return;
+
+    std::sort(chunk_.begin(), chunk_.end(), temp_posting_less);
+
+    const std::string run_path =
+        temp_dir_ + "/posting_run_" + std::to_string(run_paths_.size()) + ".bin";
+    std::ofstream out(run_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("Failed to open posting run file: " + run_path);
+    }
+    write_vector(out, chunk_);
+    if (!out.good()) {
+        throw std::runtime_error("Failed while writing posting run file: " + run_path);
+    }
+
+    run_paths_.push_back(run_path);
+    chunk_.clear();
+
+    if (run_paths_.size() % kPostingRunProgressInterval == 0) {
+        std::cout << get_time() << ": Spilled "
+                  << run_paths_.size() << " posting runs covering "
+                  << total_postings_ << " postings" << std::endl;
+    }
+}
+
+PostingRunCursor::PostingRunCursor(const std::string& path)
+    : in(path, std::ios::binary) {
+    if (!in) {
+        throw std::runtime_error("Failed to open posting run file: " + path);
+    }
+    advance();
+}
+
+bool PostingRunCursor::advance() {
+    in.read(reinterpret_cast<char*>(&current), static_cast<std::streamsize>(sizeof(current)));
+    if (in.gcount() == 0) {
+        valid = false;
+        return false;
+    }
+    if (in.gcount() != static_cast<std::streamsize>(sizeof(current))) {
+        throw std::runtime_error("Posting run file ended in the middle of a record");
+    }
+    valid = true;
+    return true;
+}
+
+bool PostingHeapGreater::operator()(const PostingHeapItem& lhs,
+                                    const PostingHeapItem& rhs) const {
+    return temp_posting_less(rhs.posting, lhs.posting);
+}
+
+}  // namespace detail
+
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
                       const std::string& node_index_path,
@@ -920,7 +913,7 @@ bool build_path_index(const std::string& input_gfa,
         if (!steps_out) {
             throw std::runtime_error("Failed to open temporary step file: " + tmp_steps_path);
         }
-        PostingRunBuilder posting_runs(tmp_dir);
+        PostingRunBuilder posting_runs(tmp_dir, kPostingChunkRecords);
 
         {
             // Pass 2: write packed steps straight to a temp file and spill
