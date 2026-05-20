@@ -178,4 +178,11 @@ bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) con
     return true;
 }
 
+std::uint32_t NodeHashIndex::community_id_by_rank(std::uint32_t rank) const {
+    if (rank >= n_entries_) {
+        throw std::runtime_error("Node hash index rank out of range");
+    }
+    return data_[rank].community_id;
+}
+
 }  // namespace gfaidx::indexer

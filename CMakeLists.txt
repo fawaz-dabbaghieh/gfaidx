@@ -19,6 +19,7 @@ add_subdirectory(external/louvain_method)
 add_executable(gfaidx
         src/gfaidx.cpp
         src/chunk/get_chunk_command.cpp
+        src/chunk/get_subgraph_command.cpp
         src/chunk/chunk_reader.cpp
         src/chunk/text_handle_cache.cpp
         src/chunk/split_gfa_to_comms.cpp

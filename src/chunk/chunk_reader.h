@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 struct CommunitySpan {
     std::uint64_t gz_offset = 0;
@@ -12,6 +13,10 @@ struct CommunitySpan {
 
 CommunitySpan lookup_community_span_tsv(const std::string& index_path,
                                         std::uint32_t community_id);
+
+// Load the whole .idx file into memory when callers need repeated community
+// lookups, such as BFS neighborhood expansion across many chunks.
+std::vector<CommunitySpan> load_all_community_spans_tsv(const std::string& index_path);
 
 void stream_community_lines_from_gz_range(
     const std::string& gz_path,

@@ -37,6 +37,9 @@ public:
     [[nodiscard]] std::uint64_t size() const;
     bool lookup(std::string_view node_id, std::uint32_t& out_com) const;
     bool lookup_rank(std::string_view node_id, std::uint32_t& out_rank) const;
+    // When .pdx node IDs are aligned to .ndx entry rank, this gives direct
+    // rank->community access without rebuilding a separate in-memory map.
+    [[nodiscard]] std::uint32_t community_id_by_rank(std::uint32_t rank) const;
 
 private:
     // The node hash index is mmap-backed and only supported on Unix-like

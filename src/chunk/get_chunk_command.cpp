@@ -14,17 +14,28 @@ void configure_get_chunk_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("in_gz")
       .help("input indexed GFA gzip file");
 
-    // .idx with gzip member offsets/sizes (defaults to <input>.idx).
-    parser.add_argument("--index")
+    // Prefer --idx/--ndx to match get_subgraph, but keep the older flag names
+    // as compatibility aliases so existing scripts do not break.
+    parser.add_argument("--idx")
       .default_value(std::string(""))
       .nargs(1)
       .help("path to .idx file (defaults to <input>.idx)");
 
+    parser.add_argument("--index")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("legacy alias for --idx");
+
     // .ndx with node-hash->community mapping (defaults to <input>.ndx).
-    parser.add_argument("--node_index")
+    parser.add_argument("--ndx")
       .default_value(std::string(""))
       .nargs(1)
       .help("path to .ndx file (defaults to <input>.ndx)");
+
+    parser.add_argument("--node_index")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("legacy alias for --ndx");
 
     // Optional community id for direct lookup.
     parser.add_argument("--community_id")
@@ -46,7 +57,10 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
         return 1;
     }
 
-    auto index_path = program.get<std::string>("index");
+    auto index_path = program.get<std::string>("idx");
+    if (index_path.empty()) {
+        index_path = program.get<std::string>("index");
+    }
     if (index_path.empty()) {
         index_path = input_gz + ".idx";
     }
@@ -62,7 +76,10 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
     std::uint32_t community_id = 0;
     if (!node_id.empty()) {
         // Resolve node id to community id using the .ndx file.
-        auto node_index_path = program.get<std::string>("node_index");
+        auto node_index_path = program.get<std::string>("ndx");
+        if (node_index_path.empty()) {
+            node_index_path = program.get<std::string>("node_index");
+        }
         if (node_index_path.empty()) {
             node_index_path = input_gz + ".ndx";
         }

@@ -45,6 +45,50 @@ CommunitySpan lookup_community_span_tsv(const std::string& index_path,
     throw std::runtime_error("Community id not found in index: " + std::to_string(community_id));
 }
 
+std::vector<CommunitySpan> load_all_community_spans_tsv(const std::string& index_path) {
+    std::ifstream idx(index_path);
+    if (!idx) throw std::runtime_error("Failed to open index file: " + index_path);
+
+    struct SpanEntry {
+        std::uint32_t community_id{};
+        CommunitySpan span{};
+    };
+
+    std::vector<SpanEntry> entries;
+    entries.reserve(1024);
+
+    std::string line;
+    std::uint32_t max_community_id = 0;
+    while (std::getline(idx, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::size_t p0 = line.find('\t');
+        if (p0 == std::string::npos) continue;
+        std::size_t p1 = line.find('\t', p0 + 1);
+        if (p1 == std::string::npos) continue;
+        std::size_t p2 = line.find('\t', p1 + 1);
+
+        auto col0 = std::string_view(line).substr(0, p0);
+        auto col1 = std::string_view(line).substr(p0 + 1, p1 - (p0 + 1));
+        auto col2 = (p2 == std::string::npos)
+                      ? std::string_view(line).substr(p1 + 1)
+                      : std::string_view(line).substr(p1 + 1, p2 - (p1 + 1));
+
+        SpanEntry entry;
+        entry.community_id = static_cast<std::uint32_t>(std::stoul(std::string(col0)));
+        entry.span.gz_offset = static_cast<std::uint64_t>(std::stoull(std::string(col1)));
+        entry.span.gz_size = static_cast<std::uint64_t>(std::stoull(std::string(col2)));
+        max_community_id = std::max(max_community_id, entry.community_id);
+        entries.push_back(entry);
+    }
+
+    std::vector<CommunitySpan> spans(static_cast<std::size_t>(max_community_id) + 1);
+    for (const auto& entry : entries) {
+        spans[entry.community_id] = entry.span;
+    }
+    return spans;
+}
+
 void stream_community_lines_from_gz_range(
     const std::string& gz_path,
     std::uint64_t offset,
