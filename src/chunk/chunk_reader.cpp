@@ -82,6 +82,10 @@ std::vector<CommunitySpan> load_all_community_spans_tsv(const std::string& index
         entries.push_back(entry);
     }
 
+    if (entries.empty()) {
+        return {};
+    }
+
     std::vector<CommunitySpan> spans(static_cast<std::size_t>(max_community_id) + 1);
     for (const auto& entry : entries) {
         spans[entry.community_id] = entry.span;
