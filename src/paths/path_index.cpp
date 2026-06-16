@@ -829,6 +829,8 @@ bool build_path_index(const std::string& input_gfa,
                       const std::string& tmp_base_dir,
                       bool keep_tmp) {
     Timer timer;
+    // Stage the final .pdx beside its destination so failed builds never leave a truncated index behind.
+    const std::string temp_output_index = make_temp_output_path(output_index);
 
     indexer::NodeHashIndex node_index(node_index_path);
     if (node_index.size() > kStepPackedNodeMask) {
@@ -855,8 +857,13 @@ bool build_path_index(const std::string& input_gfa,
 
     auto cleanup_tmp = [&]() {
         if (keep_tmp) return;
+        // Remove the large working directory unless the caller explicitly asked to inspect it.
         std::error_code ec;
         std::filesystem::remove_all(tmp_dir, ec);
+    };
+    auto cleanup_output = [&]() {
+        // Remove any staged .pdx file left behind by an interrupted or failed write.
+        remove_path_if_exists(temp_output_index);
     };
 
     try {
@@ -1040,9 +1047,10 @@ bool build_path_index(const std::string& input_gfa,
         header.strings_offset = header.posting_table_offset + posting_blob_bytes;
         header.strings_size = strings_blob.size();
 
-        std::ofstream out(output_index, std::ios::binary | std::ios::trunc);
+        // Assemble the final binary index into the staged sibling file first.
+        std::ofstream out(temp_output_index, std::ios::binary | std::ios::trunc);
         if (!out) {
-            throw std::runtime_error("Failed to open output path index: " + output_index);
+            throw std::runtime_error("Failed to open output path index: " + temp_output_index);
         }
 
         out.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -1057,6 +1065,14 @@ bool build_path_index(const std::string& input_gfa,
         if (!out.good()) {
             throw std::runtime_error("Failed while writing path index: " + output_index);
         }
+        // Force close before publish so buffered write failures cannot slip past the rename boundary.
+        out.close();
+        if (!out) {
+            throw std::runtime_error("Failed while finalizing path index: " + output_index);
+        }
+
+        // Publish the fully written staged index into its final path in one rename step.
+        rename_path_or_throw(temp_output_index, output_index);
 
         cleanup_tmp();
         std::cout << get_time() << ": Indexed " << path_records.size() << " paths, "
@@ -1064,6 +1080,8 @@ bool build_path_index(const std::string& input_gfa,
                   << total_steps << " path steps in " << timer.elapsed() << " seconds" << std::endl;
         return true;
     } catch (...) {
+        // Clean up both the staged output and the working directory on any failure.
+        cleanup_output();
         cleanup_tmp();
         throw;
     }

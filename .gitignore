@@ -1,6 +1,8 @@
 # Prerequisites
 *.d
 
+.codex
+review_tmp/
 benchmarks/
 __pycache__
 *egg-info

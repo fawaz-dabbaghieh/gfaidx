@@ -6,8 +6,13 @@
 
 #include <chrono>
 #include <filesystem>
-#include <random>
 #include <sstream>
+#include <stdexcept>
+#include <system_error>
+#include <unistd.h>
+
+// Short alias so the helper code below stays readable.
+namespace fs = std::filesystem;
 
 bool file_exists(const char* file_name) {
     struct stat st{};
@@ -20,8 +25,26 @@ bool dir_exists(const char* dir_name) {
 }
 
 bool file_writable(const char* file_name) {
-    const std::ofstream f(file_name);
-    return f.good();
+    // Resolve the requested output path and the directory that must accept the write.
+    fs::path path(file_name);
+    fs::path parent = path.has_parent_path() ? path.parent_path() : fs::current_path();
+
+    // If the parent directory is missing or cannot be inspected, the path is not writable.
+    std::error_code ec;
+    if (!fs::exists(parent, ec) || ec) {
+        return false;
+    }
+    // Check directory write permission without creating or truncating the target file.
+    if (::access(parent.c_str(), W_OK) != 0) {
+        return false;
+    }
+
+    // A not-yet-created file is acceptable as long as its parent directory is writable.
+    if (!fs::exists(path, ec) || ec) {
+        return true;
+    }
+    // Existing files must also be writable themselves.
+    return ::access(path.c_str(), W_OK) == 0;
 }
 
 bool remove_file(const char* file_name) {
@@ -32,18 +55,58 @@ bool remove_file(const char* file_name) {
     return true;
 }
 
+void remove_path_if_exists(const std::string& path) {
+    // Cleanup paths are best-effort; ignore "already removed" style failures.
+    std::error_code ec;
+    fs::remove(path, ec);
+}
+
+std::string make_temp_output_path(const std::string& final_path) {
+    // Keep temp outputs beside the final file so a later rename is atomic on the same filesystem.
+    fs::path target(final_path);
+    fs::path parent = target.has_parent_path() ? target.parent_path() : fs::current_path();
+    // Reuse the final basename so staged files are still recognizable during debugging.
+    const std::string base_name = target.filename().string();
+    // Use a timestamp suffix to reduce collisions across concurrent or repeated runs.
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    // Probe a bounded set of candidate names until we find one that does not already exist.
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        std::ostringstream candidate_name;
+        candidate_name << "." << base_name << ".gfaidx_tmp_" << stamp << "_" << attempt;
+        fs::path candidate = parent / candidate_name.str();
+        std::error_code ec;
+        // Return the first unused sibling path.
+        if (!fs::exists(candidate, ec) && !ec) {
+            return candidate.string();
+        }
+    }
+
+    // If every candidate collided, surface that as a hard error to the caller.
+    throw std::runtime_error("Failed to allocate a temporary output path next to: " + final_path);
+}
+
+void rename_path_or_throw(const std::string& from_path, const std::string& to_path) {
+    // Publish the staged file into place only after the full write has already succeeded.
+    std::error_code ec;
+    fs::rename(from_path, to_path, ec);
+    if (ec) {
+        throw std::runtime_error("Failed to rename '" + from_path + "' to '" + to_path + "': " + ec.message());
+    }
+}
+
 std::string create_temp_dir(const std::string& base_dir,
                             const std::string& prefix,
                             const std::string& latest_name ,
                             bool keep_latest) {
     // checks for tmp dir existence and creates it if not present
     // makes a lates symlink in case the user used the same tmp dir again
-    std::filesystem::path base_path = base_dir.empty()
-        ? std::filesystem::current_path()
-        : std::filesystem::path(base_dir);
+    fs::path base_path = base_dir.empty()
+        ? fs::current_path()
+        : fs::path(base_dir);
 
-    if (!std::filesystem::exists(base_path)) {
-        std::filesystem::create_directories(base_path);
+    if (!fs::exists(base_path)) {
+        fs::create_directories(base_path);
     }
 
     // random directory name generation
@@ -53,31 +116,29 @@ std::string create_temp_dir(const std::string& base_dir,
     auto now = std::chrono::steady_clock::now().time_since_epoch().count();
 
 
-    std::filesystem::path tmp_path;
+    fs::path tmp_path;
     for (int attempt = 0; attempt < 10; ++attempt) {
         std::ostringstream name;
         name << prefix << now;
         tmp_path = base_path / name.str();
-        if (!std::filesystem::exists(tmp_path)) {
-            std::filesystem::create_directories(tmp_path);
+        if (!fs::exists(tmp_path)) {
+            fs::create_directories(tmp_path);
             break;
         }
     }
 
-    if (tmp_path.empty() || !std::filesystem::exists(tmp_path)) {
+    if (tmp_path.empty() || !fs::exists(tmp_path)) {
         throw std::runtime_error("Failed to create temporary directory after several tries in: " + base_path.string());
     }
 
     if (keep_latest) {
-        std::filesystem::path latest_path = base_path / latest_name;
+        fs::path latest_path = base_path / latest_name;
         std::error_code ec;
-        if (std::filesystem::exists(latest_path) || std::filesystem::is_symlink(latest_path)) {
-            std::filesystem::remove(latest_path, ec);
+        if (fs::exists(latest_path) || fs::is_symlink(latest_path)) {
+            fs::remove(latest_path, ec);
             ec.clear();
         }
-        std::filesystem::create_directory_symlink(std::filesystem::absolute(tmp_path),
-                                                  latest_path,
-                                                  ec);
+        fs::create_directory_symlink(fs::absolute(tmp_path), latest_path, ec);
         if (ec) {
             std::cerr << "Warning: could not create latest symlink at "
                       << latest_path.string() << std::endl;

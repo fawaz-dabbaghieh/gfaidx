@@ -1,15 +1,17 @@
 #include "index_gfa_helpers.h"
 
 #include <chrono>
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <vector>
 
-#ifdef __linux__
 #include <sys/wait.h>
-#endif
+#include <unistd.h>
 
 #include <community.h>
 #include <graph.h>
@@ -34,13 +36,6 @@ std::string in_gfa="in_gfa";
 std::string out_graph="out_indexed_graph";
 
 namespace {
-
-bool command_exists(const std::string& command = "sort") {
-    const std::string shell_command = "command -v " + command + " >/dev/null 2>&1";
-    int code = std::system(shell_command.c_str());
-    if (WEXITSTATUS(code) == 0) return true;
-    return false;
-}
 
  void get_int_node_id(std::unordered_map<std::string, unsigned int>& node_id_map,
                             const std::string& node_id,
@@ -101,23 +96,82 @@ bool run_sort(const std::string& input_edges,
               const std::string& mem,
               bool unique,
               int threads) {
-
-    if (!command_exists("sort")) {
-        std::cout << get_time() << ": the command 'sort' does not exist";
-        return false;
-    }
-
     if (!dir_exists(tmpdir.c_str())) {
         std::cerr << "Temporary directory does not exist: " << tmpdir << std::endl;
         return false;
     }
-    std::string command = "sort -k1,1 -k2,2 -n --parallel " + std::to_string(threads) + " -S " + mem;
-    if (unique) command += " -u";
-    command += " -T " + tmpdir;
-    command += " -o " + output_edges + " " + input_edges;
-    std::cout << get_time() << ": Running command: " << command << std::endl;
-    int code = std::system(command.c_str());
-    return (WEXITSTATUS(code) == 0);
+
+    std::vector<std::string> args{
+        "sort",
+        "-k1,1",
+        "-k2,2",
+        "-n",
+        "--parallel",
+        std::to_string(threads),
+        "-S",
+        mem
+    };
+    if (unique) {
+        args.emplace_back("-u");
+    }
+    args.emplace_back("-T");
+    args.emplace_back(tmpdir);
+    args.emplace_back("-o");
+    args.emplace_back(output_edges);
+    args.emplace_back(input_edges);
+
+    std::cout << get_time() << ": Running command: sort -k1,1 -k2,2 -n --parallel "
+              << threads << " -S " << mem;
+    if (unique) {
+        std::cout << " -u";
+    }
+    std::cout << " -T '" << tmpdir
+              << "' -o '" << output_edges
+              << "' '" << input_edges << "'" << std::endl;
+
+    std::vector<char*> argv;
+    argv.reserve(args.size() + 1);
+    for (auto& arg : args) {
+        argv.push_back(arg.data());
+    }
+    argv.push_back(nullptr);
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        std::cerr << "Failed to start sort: " << std::strerror(errno) << std::endl;
+        return false;
+    }
+
+    if (pid == 0) {
+        execvp(argv[0], argv.data());
+        std::cerr << "Failed to exec sort: " << std::strerror(errno) << std::endl;
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) == -1) {
+        if (errno == EINTR) {
+            continue;
+        }
+        std::cerr << "waitpid failed while waiting for sort: " << std::strerror(errno) << std::endl;
+        return false;
+    }
+
+    if (WIFEXITED(status)) {
+        if (WEXITSTATUS(status) == 0) {
+            return true;
+        }
+        std::cerr << "sort exited with code " << WEXITSTATUS(status) << std::endl;
+        return false;
+    }
+
+    if (WIFSIGNALED(status)) {
+        std::cerr << "sort was terminated by signal " << WTERMSIG(status) << std::endl;
+        return false;
+    }
+
+    std::cerr << "sort ended in an unexpected state" << std::endl;
+    return false;
 }
 
 void generate_edgelist(const std::string& input_gfa,
@@ -138,6 +192,10 @@ void generate_edgelist(const std::string& input_gfa,
     std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
 
     while (file_reader.read_line(line)) {
+        if (line.empty()) {
+            continue;
+        }
+
         if (line[0] == 'L') {
             N_EDGES++;
             auto [fst, snd] = extract_L_nodes(line);

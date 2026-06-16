@@ -12,6 +12,8 @@ static_assert(sizeof(gfaidx::indexer::NodeHashEntry) == 16, "NodeHashEntry size 
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "fs/fs_helpers.h"
+
 namespace gfaidx::indexer {
 
 std::uint64_t fnv1a_hash64(std::string_view s) {
@@ -45,6 +47,8 @@ std::uint64_t NodeHashIndex::size() const {
 void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& node_to_id,
                            const std::vector<std::uint32_t>& id_to_comm,
                            const std::string& out_path) {
+    // Stage the .ndx beside its final destination so we never expose a half-written index.
+    const std::string temp_out_path = make_temp_output_path(out_path);
 
     // maybe this is taking too much memory here, as I am generating the hash for each node in this list before
     // writing to disk
@@ -73,14 +77,26 @@ void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& 
                   return a.hash32 < b.hash32;
               });
 
-    // Writing the output node hash index file
-    std::ofstream out(out_path, std::ios::binary);
-    if (!out) {
-        throw std::runtime_error("Failed to open output file: " + out_path);
+    try {
+        // Write the complete hash table to the staged file first.
+        std::ofstream out(temp_out_path, std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("Failed to open output file: " + temp_out_path);
+        }
+        out.write(reinterpret_cast<const char*>(entries.data()),
+                  static_cast<std::streamsize>(entries.size() * sizeof(NodeHashEntry)));
+        // Close explicitly so delayed I/O errors surface before the publish rename.
+        out.close();
+        if (!out) {
+            throw std::runtime_error("Failed while writing output file: " + temp_out_path);
+        }
+        // Only replace the final path after the staged write has fully succeeded.
+        rename_path_or_throw(temp_out_path, out_path);
+    } catch (...) {
+        // If anything failed, remove the staged file so callers do not see leftover partial output.
+        remove_path_if_exists(temp_out_path);
+        throw;
     }
-    out.write(reinterpret_cast<const char*>(entries.data()),
-              static_cast<std::streamsize>(entries.size() * sizeof(NodeHashEntry)));
-    out.close();
 }
 
 NodeHashIndex::NodeHashIndex(const std::string& path) {
