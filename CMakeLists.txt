@@ -2,8 +2,12 @@ cmake_minimum_required(VERSION 4.0)
 project(gfaidx LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -ggdb -Wall")
+# Default to a release build so CLI users do not get forced debug-only performance.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 find_package(ZLIB REQUIRED)
 
@@ -35,4 +39,6 @@ add_executable(gfaidx
         src/fs/fs_helpers.cpp
         src/fs/gfa_line_parsers.cpp
 )
+# Keep warnings enabled for this target without forcing a specific optimization/debug profile.
+target_compile_options(gfaidx PRIVATE -Wall)
 target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)

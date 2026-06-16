@@ -66,8 +66,9 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     const auto progress_str = program.get<std::string>("progress_every");
     try {
         long long parsed = std::stoll(progress_str);
-        if (parsed <= 0) {
-            throw std::invalid_argument("progress must be a positive integer");
+        // Keep index_gfa consistent with index_paths: 0 disables progress logging cleanly.
+        if (parsed < 0) {
+            throw std::invalid_argument("progress must be >= 0");
         }
         progress_every = static_cast<std::uint64_t>(parsed);
     } catch (const std::exception& err) {
