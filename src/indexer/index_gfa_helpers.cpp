@@ -88,6 +88,10 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
       .help("skip building the .pdx path index; only write .gz, .idx, and .ndx");
+
+    parser.add_argument("--max_chunk_nodes").default_value(std::string("0"))
+      .nargs(1)
+      .help("re-run Louvain once inside any non-singleton community with at least this many nodes; 0 disables");
 }
 
 bool run_sort(const std::string& input_edges,
