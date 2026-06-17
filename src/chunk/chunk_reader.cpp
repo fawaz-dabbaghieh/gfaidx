@@ -152,12 +152,18 @@ void stream_community_lines_from_gz_range(
                     if (nl == std::string::npos) break;
                     std::string line = pending.substr(pos, nl - pos);
                     if (!on_line(line)) {
+                        // Mark the current line as consumed before stopping so
+                        // the same buffered record cannot be replayed on the
+                        // next inflate iteration.
                         stop = true;
+                        pos = nl + 1;
                         break;
                     }
                     pos = nl + 1;
                 }
                 if (pos > 0) pending.erase(0, pos);
+                // Stop immediately once the callback asked to terminate early.
+                if (stop) break;
             }
 
             if (ret == Z_STREAM_END) {
