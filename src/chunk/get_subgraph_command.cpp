@@ -1,11 +1,13 @@
 #include "chunk/get_subgraph_command.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,6 +20,7 @@
 #include "fs/gfa_line_parsers.h"
 #include "indexer/node_hash_index.h"
 #include "paths/path_index.h"
+#include "utils/debug_trace.h"
 #include "utils/Timer.h"
 
 namespace gfaidx::chunk {
@@ -58,6 +61,44 @@ void info_get_subgraph(std::string_view message) {
     std::cerr << get_time() << ": " << message << std::endl;
 }
 
+// Build contextual error text around the exact get_subgraph step that was
+// running so the large-graph repro can report where a rank or parse failure
+// first surfaced.
+std::runtime_error annotate_get_subgraph_error(std::string_view context,
+                                               const std::exception& err) {
+    return std::runtime_error(std::string(context) + ": " + err.what());
+}
+
+// Include the current .ndx size in rank checks so out-of-range values can be
+// diagnosed before they are used to address the mmap-backed node index.
+void log_rank_if_suspicious(const indexer::NodeHashIndex& node_index,
+                            std::uint32_t rank,
+                            std::string_view context) {
+    if (!gfaidx::debug::subgraph_trace_enabled()) {
+        return;
+    }
+    if (static_cast<std::uint64_t>(rank) < node_index.size()) {
+        return;
+    }
+    std::ostringstream oss;
+    oss << context << " produced suspicious rank " << rank
+        << " while .ndx contains " << node_index.size() << " entries";
+    gfaidx::debug::log_subgraph_trace(oss.str());
+}
+
+// Wrap rank->community resolution so failures from NodeHashIndex carry the
+// queue/chunk context from get_subgraph instead of only the low-level message.
+std::uint32_t community_id_by_rank_checked(const indexer::NodeHashIndex& node_index,
+                                           std::uint32_t rank,
+                                           std::string_view context) {
+    log_rank_if_suspicious(node_index, rank, context);
+    try {
+        return node_index.community_id_by_rank(rank);
+    } catch (const std::exception& err) {
+        throw annotate_get_subgraph_error(context, err);
+    }
+}
+
 std::string infer_companion_path(const std::string& input_gz, std::string_view suffix) {
     return input_gz + std::string(suffix);
 }
@@ -72,17 +113,36 @@ std::string extract_s_node_id_only(std::string_view line) {
 
 std::uint32_t resolve_node_rank(const indexer::NodeHashIndex& node_index,
                                 std::unordered_map<std::string, std::uint32_t>& cache,
-                                std::string_view node_name) {
+                                std::string_view node_name,
+                                std::string_view context) {
     std::string key(node_name);
     const auto it = cache.find(key);
     if (it != cache.end()) {
+        // Cache hits are common, so only emit them when the temporary trace is
+        // explicitly enabled for a large-graph debugging run.
+        if (gfaidx::debug::subgraph_trace_enabled()) {
+            std::ostringstream oss;
+            oss << context << " resolved cached node '" << key
+                << "' to rank " << it->second;
+            gfaidx::debug::log_subgraph_trace(oss.str());
+        }
         return it->second;
     }
 
     std::uint32_t rank = 0;
     if (!node_index.lookup_rank(key, rank)) {
-        throw std::runtime_error("Node id not found in .ndx: " + key);
+        std::ostringstream oss;
+        oss << context << " could not find node '" << key << "' in .ndx";
+        throw std::runtime_error(oss.str());
     }
+    // Log cache misses because they show exactly which line first introduced a
+    // new node id into the BFS/shared-edge working set.
+    if (gfaidx::debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << context << " resolved node '" << key << "' to rank " << rank;
+        gfaidx::debug::log_subgraph_trace(oss.str());
+    }
+    log_rank_if_suspicious(node_index, rank, context);
     cache.emplace(std::move(key), rank);
     return rank;
 }
@@ -164,27 +224,80 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
     info_get_subgraph("Loading adjacency for community " + std::to_string(community_id) +
                       " (" + std::to_string(state.touched_communities.size()) +
                       " communities touched so far)");
+    // Record the span metadata up front so a later failure can be tied to the
+    // exact gzip member being scanned on the large external graph.
+    if (gfaidx::debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << "Preparing adjacency load for community " << community_id
+            << " using chunk span offset=" << state.spans[community_id].gz_offset
+            << " size=" << state.spans[community_id].gz_size
+            << " shared_chunk_id=" << state.shared_chunk_id;
+        gfaidx::debug::log_subgraph_trace(oss.str());
+    }
 
     const auto span = state.spans[community_id];
     if (span.gz_size > 0) {
+        std::uint64_t local_edge_lines = 0;
         stream_community_lines_from_gz_range(
             state.gz_path,
             span.gz_offset,
             span.gz_size,
             [&](const std::string& line) -> bool {
                 if (line.empty() || line[0] != 'L') return true;
-
-                auto [left_name, right_name] = extract_L_nodes(line);
-                const auto left_id = resolve_node_rank(state.node_index, state.node_id_cache, left_name);
-                const auto right_id = resolve_node_rank(state.node_index, state.node_id_cache, right_name);
-                add_undirected_edge(state.adjacency, left_id, right_id);
+                ++local_edge_lines;
+                // Emit coarse progress through the member so the last completed
+                // line count is visible if the run aborts mid-community.
+                if (gfaidx::debug::subgraph_trace_enabled() && local_edge_lines % 100000 == 0) {
+                    std::ostringstream oss;
+                    oss << "Scanned " << local_edge_lines
+                        << " local L lines for community " << community_id;
+                    gfaidx::debug::log_subgraph_trace(oss.str());
+                }
+                try {
+                    auto [left_name, right_name] = extract_L_nodes(line);
+                    std::ostringstream left_context;
+                    left_context << "community " << community_id
+                                 << " local edge line " << local_edge_lines
+                                 << " left endpoint";
+                    const auto left_id = resolve_node_rank(state.node_index,
+                                                           state.node_id_cache,
+                                                           left_name,
+                                                           left_context.str());
+                    std::ostringstream right_context;
+                    right_context << "community " << community_id
+                                  << " local edge line " << local_edge_lines
+                                  << " right endpoint";
+                    const auto right_id = resolve_node_rank(state.node_index,
+                                                            state.node_id_cache,
+                                                            right_name,
+                                                            right_context.str());
+                    add_undirected_edge(state.adjacency, left_id, right_id);
+                } catch (const std::exception& err) {
+                    std::ostringstream oss;
+                    oss << "While processing local L line " << local_edge_lines
+                        << " for community " << community_id
+                        << " from span offset=" << span.gz_offset
+                        << " size=" << span.gz_size
+                        << " line='" << line << "'";
+                    throw annotate_get_subgraph_error(oss.str(), err);
+                }
                 return true;
             });
+        // Summarize the member scan once it completes so the large-graph log
+        // shows whether the failure happened before or after the local edges.
+        if (gfaidx::debug::subgraph_trace_enabled()) {
+            std::ostringstream oss;
+            oss << "Finished local adjacency scan for community " << community_id
+                << " after " << local_edge_lines << " L lines";
+            gfaidx::debug::log_subgraph_trace(oss.str());
+        }
     }
 
     if (state.shared_chunk_id < state.spans.size() && state.shared_chunk_id != community_id) {
         const auto shared_span = state.spans[state.shared_chunk_id];
         if (shared_span.gz_size > 0) {
+            std::uint64_t shared_edge_lines = 0;
+            std::uint64_t shared_edge_matches = 0;
             // TODO: rescanning the shared-edge member for every newly loaded
             // community is simple and acceptable for small neighborhood queries,
             // but can be replaced later with a shared-edge cache if needed.
@@ -194,16 +307,72 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
                 shared_span.gz_size,
                 [&](const std::string& line) -> bool {
                     if (line.empty() || line[0] != 'L') return true;
-
-                    auto [left_name, right_name] = extract_L_nodes(line);
-                    const auto left_id = resolve_node_rank(state.node_index, state.node_id_cache, left_name);
-                    const auto right_id = resolve_node_rank(state.node_index, state.node_id_cache, right_name);
-                    if (state.node_index.community_id_by_rank(left_id) == community_id ||
-                        state.node_index.community_id_by_rank(right_id) == community_id) {
-                        add_undirected_edge(state.adjacency, left_id, right_id);
+                    ++shared_edge_lines;
+                    // Shared-edge scans are the suspected hot path, so keep a
+                    // periodic heartbeat with the current line count.
+                    if (gfaidx::debug::subgraph_trace_enabled() && shared_edge_lines % 100000 == 0) {
+                        std::ostringstream oss;
+                        oss << "Scanned " << shared_edge_lines
+                            << " shared L lines while loading community "
+                            << community_id;
+                        gfaidx::debug::log_subgraph_trace(oss.str());
+                    }
+                    try {
+                        auto [left_name, right_name] = extract_L_nodes(line);
+                        std::ostringstream left_context;
+                        left_context << "community " << community_id
+                                     << " shared edge line " << shared_edge_lines
+                                     << " left endpoint";
+                        const auto left_id = resolve_node_rank(state.node_index,
+                                                               state.node_id_cache,
+                                                               left_name,
+                                                               left_context.str());
+                        std::ostringstream right_context;
+                        right_context << "community " << community_id
+                                      << " shared edge line " << shared_edge_lines
+                                      << " right endpoint";
+                        const auto right_id = resolve_node_rank(state.node_index,
+                                                                state.node_id_cache,
+                                                                right_name,
+                                                                right_context.str());
+                        std::ostringstream left_rank_context;
+                        left_rank_context << "community " << community_id
+                                          << " shared edge line " << shared_edge_lines
+                                          << " left rank=" << left_id;
+                        const auto left_comm = community_id_by_rank_checked(state.node_index,
+                                                                            left_id,
+                                                                            left_rank_context.str());
+                        std::ostringstream right_rank_context;
+                        right_rank_context << "community " << community_id
+                                           << " shared edge line " << shared_edge_lines
+                                           << " right rank=" << right_id;
+                        const auto right_comm = community_id_by_rank_checked(state.node_index,
+                                                                             right_id,
+                                                                             right_rank_context.str());
+                        if (left_comm == community_id || right_comm == community_id) {
+                            ++shared_edge_matches;
+                            add_undirected_edge(state.adjacency, left_id, right_id);
+                        }
+                    } catch (const std::exception& err) {
+                        std::ostringstream oss;
+                        oss << "While processing shared L line " << shared_edge_lines
+                            << " for community " << community_id
+                            << " from shared span offset=" << shared_span.gz_offset
+                            << " size=" << shared_span.gz_size
+                            << " line='" << line << "'";
+                        throw annotate_get_subgraph_error(oss.str(), err);
                     }
                     return true;
                 });
+            // Log both the scan size and the number of matching cross-community
+            // edges so the shared-member pass can be compared between runs.
+            if (gfaidx::debug::subgraph_trace_enabled()) {
+                std::ostringstream oss;
+                oss << "Finished shared adjacency scan for community " << community_id
+                    << " after " << shared_edge_lines << " L lines with "
+                    << shared_edge_matches << " matches";
+                gfaidx::debug::log_subgraph_trace(oss.str());
+            }
         }
     }
 }
@@ -215,7 +384,16 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
     std::unordered_set<std::uint32_t> discovered;
     discovered.reserve(max_nodes * 2);
 
-    load_community_adjacency(state, state.node_index.community_id_by_rank(start_node_id));
+    // Resolve the seed node community through the same checked helper used for
+    // BFS expansion so any out-of-range rank carries the start-node context.
+    {
+        std::ostringstream oss;
+        oss << "start node rank=" << start_node_id;
+        load_community_adjacency(state,
+                                 community_id_by_rank_checked(state.node_index,
+                                                              start_node_id,
+                                                              oss.str()));
+    }
     queue.push_back(start_node_id);
     discovered.insert(start_node_id);
 
@@ -233,7 +411,22 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
 
             if (discovered.insert(neighbor).second) {
                 queue.push_back(neighbor);
-                load_community_adjacency(state, state.node_index.community_id_by_rank(neighbor));
+                try {
+                    std::ostringstream oss;
+                    oss << "neighbor rank=" << neighbor
+                        << " discovered_from=" << current
+                        << " discovered_size=" << discovered.size()
+                        << " queue_size=" << queue.size();
+                    load_community_adjacency(state,
+                                             community_id_by_rank_checked(state.node_index,
+                                                                          neighbor,
+                                                                          oss.str()));
+                } catch (const std::exception& err) {
+                    std::ostringstream oss;
+                    oss << "While expanding BFS from rank " << current
+                        << " to neighbor rank " << neighbor;
+                    throw annotate_get_subgraph_error(oss.str(), err);
+                }
                 if (discovered.size() % 500 == 0) {
                     std::cerr << get_time() << ": BFS neighborhood currently has "
                               << discovered.size() << " nodes across "
@@ -289,7 +482,12 @@ EmissionStats emit_filtered_member(std::ostream& out,
             if (line.empty() || line[0] == 'H') return true;
 
             if (line[0] == 'S') {
-                const auto node_id = resolve_node_rank(node_index, cache, extract_s_node_id_only(line));
+                // Carry materialization context into node-rank resolution so a
+                // late failure can still identify the member being emitted.
+                const auto node_id = resolve_node_rank(node_index,
+                                                       cache,
+                                                       extract_s_node_id_only(line),
+                                                       "materializing S line");
                 if (node_set.find(node_id) != node_set.end()) {
                     out << line << '\n';
                     ++stats.s_lines;
@@ -299,8 +497,16 @@ EmissionStats emit_filtered_member(std::ostream& out,
 
             if (line[0] == 'L') {
                 auto [left_name, right_name] = extract_L_nodes(line);
-                const auto left_id = resolve_node_rank(node_index, cache, left_name);
-                const auto right_id = resolve_node_rank(node_index, cache, right_name);
+                // Reuse the same contextual resolver during final replay so the
+                // debug run can distinguish BFS failures from emit-time ones.
+                const auto left_id = resolve_node_rank(node_index,
+                                                       cache,
+                                                       left_name,
+                                                       "materializing L line left endpoint");
+                const auto right_id = resolve_node_rank(node_index,
+                                                        cache,
+                                                        right_name,
+                                                        "materializing L line right endpoint");
                 if (node_set.find(left_id) != node_set.end() &&
                     node_set.find(right_id) != node_set.end()) {
                     out << line << '\n';
@@ -373,6 +579,10 @@ void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
       .default_value(std::string("100"))
       .nargs(1)
       .help("maximum number of nodes to include in the BFS neighborhood (default: 100)");
+
+    parser.add_argument("--debug_trace").default_value(false)
+      .implicit_value(true)
+      .help("enable temporary cross-file tracing for get_subgraph debugging");
 }
 
 int run_get_subgraph(const argparse::ArgumentParser& program) {
@@ -385,12 +595,30 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
     const auto start_node = program.get<std::string>("start_node");
     const auto output_gfa = program.get<std::string>("out_gfa");
     const auto max_nodes_str = program.get<std::string>("max_nodes");
+    const auto debug_trace = program.get<bool>("debug_trace");
 
     try {
+        // Export the trace flag before opening indexes so helper code in other
+        // translation units can participate in the same debug run.
+        if (debug_trace) {
+            ::setenv("GFAIDX_DEBUG_SUBGRAPH", "1", 1);
+            gfaidx::debug::log_subgraph_trace("Enabled temporary get_subgraph trace logging");
+        }
         const auto index_paths = resolve_index_paths(program, input_gz);
         const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
         if (spans.empty()) {
             throw std::runtime_error("The .idx file does not contain any community spans");
+        }
+        // Record the resolved companion files once so the external repro log
+        // confirms which index set was paired with the input gzip.
+        if (gfaidx::debug::subgraph_trace_enabled()) {
+            std::ostringstream oss;
+            oss << "Resolved index paths idx=" << index_paths.idx_path
+                << " ndx=" << index_paths.ndx_path
+                << " pdx=" << index_paths.pdx_path
+                << " has_pdx=" << index_paths.has_pdx
+                << " spans=" << spans.size();
+            gfaidx::debug::log_subgraph_trace(oss.str());
         }
 
         indexer::NodeHashIndex node_index(index_paths.ndx_path);
@@ -406,6 +634,14 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         std::uint32_t start_node_id = 0;
         if (!node_index.lookup_rank(start_node, start_node_id)) {
             throw std::runtime_error("Start node was not found in .ndx: " + start_node);
+        }
+        // Log the seed rank and node-index size up front so later failures can
+        // be compared against the original start-node resolution.
+        if (gfaidx::debug::subgraph_trace_enabled()) {
+            std::ostringstream oss;
+            oss << "Start node '" << start_node << "' resolved to rank "
+                << start_node_id << " with .ndx size " << node_index.size();
+            gfaidx::debug::log_subgraph_trace(oss.str());
         }
 
         std::ofstream out(output_gfa);
