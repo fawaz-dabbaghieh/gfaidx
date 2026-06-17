@@ -46,6 +46,12 @@ struct NeighborhoodState {
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> adjacency;
     std::vector<std::uint8_t> loaded_communities;
     std::vector<std::uint32_t> touched_communities;
+    // Track the adjacency vector currently being iterated by BFS so temporary
+    // debug traces can detect whether a community load mutates that same vector.
+    std::uint32_t active_bfs_node{std::numeric_limits<std::uint32_t>::max()};
+    std::size_t active_bfs_vector_size{0};
+    std::size_t active_bfs_vector_capacity{0};
+    const void* active_bfs_vector_data{nullptr};
 };
 
 struct EmissionStats {
@@ -59,6 +65,39 @@ void warn_get_subgraph(std::string_view message) {
 
 void info_get_subgraph(std::string_view message) {
     std::cerr << get_time() << ": " << message << std::endl;
+}
+
+// Format vector storage details so the trace can show whether a push_back on
+// the active BFS node changed size, capacity, or the underlying data pointer.
+std::string format_vector_storage(const std::vector<std::uint32_t>& values) {
+    std::ostringstream oss;
+    oss << "size=" << values.size()
+        << " capacity=" << values.capacity()
+        << " data=" << static_cast<const void*>(values.data());
+    return oss.str();
+}
+
+// Emit a one-line summary of the active BFS adjacency vector before or after a
+// community load so iterator invalidation can be correlated with the crash.
+void log_active_bfs_vector_state(const NeighborhoodState& state, std::string_view context) {
+    if (!gfaidx::debug::subgraph_trace_enabled()) {
+        return;
+    }
+    if (state.active_bfs_node == std::numeric_limits<std::uint32_t>::max()) {
+        return;
+    }
+    const auto it = state.adjacency.find(state.active_bfs_node);
+    if (it == state.adjacency.end()) {
+        std::ostringstream oss;
+        oss << context << " active_bfs_node=" << state.active_bfs_node
+            << " has no adjacency entry";
+        gfaidx::debug::log_subgraph_trace(oss.str());
+        return;
+    }
+    std::ostringstream oss;
+    oss << context << " active_bfs_node=" << state.active_bfs_node
+        << " " << format_vector_storage(it->second);
+    gfaidx::debug::log_subgraph_trace(oss.str());
 }
 
 // Build contextual error text around the exact get_subgraph step that was
@@ -147,12 +186,41 @@ std::uint32_t resolve_node_rank(const indexer::NodeHashIndex& node_index,
     return rank;
 }
 
-void add_undirected_edge(std::unordered_map<std::uint32_t, std::vector<std::uint32_t>>& adjacency,
+void add_undirected_edge(NeighborhoodState& state,
                          std::uint32_t left,
-                         std::uint32_t right) {
-    adjacency[left].push_back(right);
+                         std::uint32_t right,
+                         std::string_view context) {
+    auto append_one = [&](std::uint32_t owner, std::uint32_t neighbor) {
+        auto& vec = state.adjacency[owner];
+        const auto before_size = vec.size();
+        const auto before_capacity = vec.capacity();
+        const void* before_data = static_cast<const void*>(vec.data());
+        const bool touches_active_bfs_node = owner == state.active_bfs_node;
+        // Log mutations to the exact vector BFS is currently iterating because
+        // even a push_back without reallocation can invalidate the stored end().
+        if (gfaidx::debug::subgraph_trace_enabled() && touches_active_bfs_node) {
+            std::ostringstream oss;
+            oss << context << " mutating active BFS vector for node " << owner
+                << " by appending neighbor " << neighbor
+                << " before " << format_vector_storage(vec);
+            gfaidx::debug::log_subgraph_trace(oss.str());
+        }
+        vec.push_back(neighbor);
+        if (gfaidx::debug::subgraph_trace_enabled() && touches_active_bfs_node) {
+            const void* after_data = static_cast<const void*>(vec.data());
+            std::ostringstream oss;
+            oss << context << " mutated active BFS vector for node " << owner
+                << " after " << format_vector_storage(vec)
+                << " size_changed=" << (vec.size() != before_size)
+                << " capacity_changed=" << (vec.capacity() != before_capacity)
+                << " data_changed=" << (after_data != before_data);
+            gfaidx::debug::log_subgraph_trace(oss.str());
+        }
+    };
+
+    append_one(left, right);
     if (left != right) {
-        adjacency[right].push_back(left);
+        append_one(right, left);
     }
 }
 
@@ -271,7 +339,10 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
                                                             state.node_id_cache,
                                                             right_name,
                                                             right_context.str());
-                    add_undirected_edge(state.adjacency, left_id, right_id);
+                    add_undirected_edge(state,
+                                        left_id,
+                                        right_id,
+                                        "local edge insertion");
                 } catch (const std::exception& err) {
                     std::ostringstream oss;
                     oss << "While processing local L line " << local_edge_lines
@@ -351,7 +422,10 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
                                                                              right_rank_context.str());
                         if (left_comm == community_id || right_comm == community_id) {
                             ++shared_edge_matches;
-                            add_undirected_edge(state.adjacency, left_id, right_id);
+                            add_undirected_edge(state,
+                                                left_id,
+                                                right_id,
+                                                "shared edge insertion");
                         }
                     } catch (const std::exception& err) {
                         std::ostringstream oss;
@@ -406,6 +480,14 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
             continue;
         }
 
+        // Snapshot the vector BFS is about to iterate so later logs can prove
+        // whether a community load mutated this same vector mid-iteration.
+        state.active_bfs_node = current;
+        state.active_bfs_vector_size = it->second.size();
+        state.active_bfs_vector_capacity = it->second.capacity();
+        state.active_bfs_vector_data = static_cast<const void*>(it->second.data());
+        log_active_bfs_vector_state(state, "Starting BFS adjacency iteration");
+
         for (const auto neighbor : it->second) {
             if (discovered.size() >= max_nodes) break;
 
@@ -421,6 +503,34 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
                                              community_id_by_rank_checked(state.node_index,
                                                                           neighbor,
                                                                           oss.str()));
+                    // Compare the current adjacency vector after loading a new
+                    // community so the trace can show if the active loop range changed.
+                    if (gfaidx::debug::subgraph_trace_enabled()) {
+                        const auto current_it = state.adjacency.find(current);
+                        if (current_it != state.adjacency.end()) {
+                            const bool size_changed =
+                                current_it->second.size() != state.active_bfs_vector_size;
+                            const bool capacity_changed =
+                                current_it->second.capacity() != state.active_bfs_vector_capacity;
+                            const bool data_changed =
+                                static_cast<const void*>(current_it->second.data()) !=
+                                state.active_bfs_vector_data;
+                            if (size_changed || capacity_changed || data_changed) {
+                                std::ostringstream mutation_oss;
+                                mutation_oss << "Active BFS vector changed while iterating node "
+                                             << current
+                                             << " after loading neighbor " << neighbor
+                                             << " before size=" << state.active_bfs_vector_size
+                                             << " capacity=" << state.active_bfs_vector_capacity
+                                             << " data=" << state.active_bfs_vector_data
+                                             << " after " << format_vector_storage(current_it->second)
+                                             << " size_changed=" << size_changed
+                                             << " capacity_changed=" << capacity_changed
+                                             << " data_changed=" << data_changed;
+                                gfaidx::debug::log_subgraph_trace(mutation_oss.str());
+                            }
+                        }
+                    }
                 } catch (const std::exception& err) {
                     std::ostringstream oss;
                     oss << "While expanding BFS from rank " << current
@@ -435,6 +545,13 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
                 }
             }
         }
+
+        // Clear the active-vector snapshot once BFS moves on to the next node
+        // so later adjacency insertions are not misattributed to this iteration.
+        state.active_bfs_node = std::numeric_limits<std::uint32_t>::max();
+        state.active_bfs_vector_size = 0;
+        state.active_bfs_vector_capacity = 0;
+        state.active_bfs_vector_data = nullptr;
     }
 
     std::vector<std::uint32_t> node_ids(discovered.begin(), discovered.end());
