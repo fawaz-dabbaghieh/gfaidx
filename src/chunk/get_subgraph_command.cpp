@@ -480,15 +480,19 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
             continue;
         }
 
-        // Snapshot the vector BFS is about to iterate so later logs can prove
-        // whether a community load mutated this same vector mid-iteration.
+        // Snapshot the live adjacency vector before iterating so later community
+        // loads cannot invalidate this loop by appending more neighbors.
         state.active_bfs_node = current;
         state.active_bfs_vector_size = it->second.size();
         state.active_bfs_vector_capacity = it->second.capacity();
         state.active_bfs_vector_data = static_cast<const void*>(it->second.data());
         log_active_bfs_vector_state(state, "Starting BFS adjacency iteration");
+        // TODO: shared-edge rescans currently re-add the same undirected edge
+        // when the opposite community is loaded later; deduplicate those edge
+        // insertions so this snapshot is only a safety measure, not a crutch.
+        const std::vector<std::uint32_t> neighbors_snapshot = it->second;
 
-        for (const auto neighbor : it->second) {
+        for (const auto neighbor : neighbors_snapshot) {
             if (discovered.size() >= max_nodes) break;
 
             if (discovered.insert(neighbor).second) {
