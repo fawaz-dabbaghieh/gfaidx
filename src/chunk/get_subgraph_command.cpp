@@ -241,7 +241,8 @@ std::uint32_t parse_required_u32(const std::string& value, const char* flag_name
 }
 
 ResolvedIndexPaths resolve_index_paths(const argparse::ArgumentParser& program,
-                                       const std::string& input_gz) {
+                                       const std::string& input_gz,
+                                       bool include_paths) {
     ResolvedIndexPaths paths;
     paths.idx_path = program.get<std::string>("idx");
     paths.ndx_path = program.get<std::string>("ndx");
@@ -264,6 +265,13 @@ ResolvedIndexPaths resolve_index_paths(const argparse::ArgumentParser& program,
     }
     if (!file_exists(paths.ndx_path.c_str())) {
         throw std::runtime_error("Node index file does not exist: " + paths.ndx_path);
+    }
+
+    // Skip all .pdx discovery and warnings when callers explicitly requested a
+    // graph-only subgraph extraction without any P/W subpath output.
+    if (!include_paths) {
+        paths.has_pdx = false;
+        return paths;
     }
 
     if (paths.pdx_explicit) {
@@ -483,15 +491,19 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
             continue;
         }
 
-        // Snapshot the vector BFS is about to iterate so later logs can prove
-        // whether a community load mutated this same vector mid-iteration.
+        // Snapshot the live adjacency vector before iterating so later community
+        // loads cannot invalidate this loop by appending more neighbors.
         state.active_bfs_node = current;
         state.active_bfs_vector_size = it->second.size();
         state.active_bfs_vector_capacity = it->second.capacity();
         state.active_bfs_vector_data = static_cast<const void*>(it->second.data());
         log_active_bfs_vector_state(state, "Starting BFS adjacency iteration");
+        // TODO: shared-edge rescans currently re-add the same undirected edge
+        // when the opposite community is loaded later; deduplicate those edge
+        // insertions so this snapshot is only a safety measure, not a crutch.
+        const std::vector<std::uint32_t> neighbors_snapshot = it->second;
 
-        for (const auto neighbor : it->second) {
+        for (const auto neighbor : neighbors_snapshot) {
             if (discovered.size() >= max_nodes) break;
 
             if (discovered.insert(neighbor).second) {
@@ -644,7 +656,6 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     paths::PathIndexReader index(pdx_path);
     const auto runs = paths::find_subpaths_for_node_ids(index, node_ids);
     if (runs.empty()) {
-        warn_get_subgraph("No indexed P/W subpaths overlapped the extracted node set");
         return 0;
     }
 
@@ -698,6 +709,10 @@ void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("maximum number of nodes to include in the BFS neighborhood (default: 100)");
 
+    parser.add_argument("--no_paths").default_value(false)
+      .implicit_value(true)
+      .help("skip indexed P/W subpath extraction and emit only the graph records");
+
     parser.add_argument("--debug_trace").default_value(false)
       .implicit_value(true)
       .help("enable temporary cross-file tracing for get_subgraph debugging");
@@ -713,6 +728,7 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
     const auto start_node = program.get<std::string>("start_node");
     const auto output_gfa = program.get<std::string>("out_gfa");
     const auto max_nodes_str = program.get<std::string>("max_nodes");
+    const auto no_paths = program.get<bool>("no_paths");
     const auto debug_trace = program.get<bool>("debug_trace");
 
     try {
@@ -722,7 +738,9 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
             ::setenv("GFAIDX_DEBUG_SUBGRAPH", "1", 1);
             debug::log_subgraph_trace("Enabled temporary get_subgraph trace logging");
         }
-        const auto index_paths = resolve_index_paths(program, input_gz);
+        // Thread the explicit graph-only mode into index discovery so .pdx is
+        // neither required nor warned about when --no_paths is in effect.
+        const auto index_paths = resolve_index_paths(program, input_gz, !no_paths);
         const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
         if (spans.empty()) {
             throw std::runtime_error("The .idx file does not contain any community spans");
