@@ -1383,6 +1383,19 @@ std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
         std::sort(ranks.begin(), ranks.end());
         if (ranks.empty()) continue;
 
+        // Only keep multi-step runs so extracted path output always spans at
+        // least one edge instead of degenerating into single-node fragments.
+        auto push_run_if_useful = [&](const std::uint64_t start_step,
+                                      const std::uint64_t end_step) {
+            const auto step_count = end_step - start_step + 1;
+            // Suppress singleton runs because they are valid formally but tend
+            // to confuse users and graph visualizers more than they help.
+            if (step_count < 2) {
+                return;
+            }
+            runs.push_back(SubpathRun{entry.first, start_step, step_count});
+        };
+
         // Consecutive step ranks become one subpath; gaps split the path into
         // multiple runs, which is what we want for arbitrary communities.
         std::uint64_t start = ranks.front();
@@ -1392,10 +1405,13 @@ std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
                 prev = ranks[i];
                 continue;
             }
-            runs.push_back(SubpathRun{entry.first, start, prev - start + 1});
+            // Flush the finished contiguous run, but only if it spans at least
+            // two path steps after the singleton filter above.
+            push_run_if_useful(start, prev);
             start = prev = ranks[i];
         }
-        runs.push_back(SubpathRun{entry.first, start, prev - start + 1});
+        // Apply the same singleton suppression to the trailing run.
+        push_run_if_useful(start, prev);
     }
 
     return runs;

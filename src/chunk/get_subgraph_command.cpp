@@ -647,7 +647,6 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     paths::PathIndexReader index(pdx_path);
     const auto runs = paths::find_subpaths_for_node_ids(index, node_ids);
     if (runs.empty()) {
-        warn_get_subgraph("No indexed P/W subpaths overlapped the extracted node set");
         return 0;
     }
 
