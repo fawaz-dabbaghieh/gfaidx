@@ -9,6 +9,7 @@
 #include <argparse/argparse.hpp>
 
 #include "fs/fs_helpers.h"
+#include "indexer/community_coarsening.h"
 #include "indexer/community_refinement.h"
 #include "indexer/direct_binary_writer.h"
 #include "indexer/index_gfa_helpers.h"
@@ -96,6 +97,29 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         std::cerr << "Warning: invalid --max_chunk_nodes value '" << max_chunk_nodes_str
                   << "', disabling refinement (" << err.what() << ")" << std::endl;
         max_chunk_nodes = 0;
+    }
+
+    // Parse the opt-in lower chunk-size target independently from the existing
+    // upper threshold used by local Louvain refinement.
+    std::uint32_t min_chunk_nodes;
+    const auto min_chunk_nodes_str = program.get<std::string>("min_chunk_nodes");
+    try {
+        const long long parsed = std::stoll(min_chunk_nodes_str);
+        if (parsed < 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("min chunk nodes must be in the uint32 range");
+        }
+        min_chunk_nodes = static_cast<std::uint32_t>(parsed);
+    } catch (const std::exception& err) {
+        std::cerr << "Warning: invalid --min_chunk_nodes value '" << min_chunk_nodes_str
+                  << "', disabling small-community merging (" << err.what() << ")" << std::endl;
+        min_chunk_nodes = 0;
+    }
+
+    // Reject contradictory bounds before creating temporary or staged output
+    // files; equality is valid because a merge may land exactly at the maximum.
+    if (max_chunk_nodes != 0 && min_chunk_nodes > max_chunk_nodes) {
+        std::cerr << "--min_chunk_nodes must not exceed --max_chunk_nodes" << std::endl;
+        return 1;
     }
 
     // check gzip_level user input
@@ -281,6 +305,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         } else {
             std::cout << get_time() << ": Refining " << refinement_work_items.size()
                       << " oversized communities with threshold " << max_chunk_nodes << std::endl;
+
             const CommunityRefinementSummary refinement_summary =
                 refine_oversized_communities(sorted_tmp_edgelist,
                                              tmp_dir,
@@ -294,6 +319,16 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                       << refinement_summary.added_community_count << " new community ids" << std::endl;
             log_memory("After community refinement");
         }
+
+        // Apply the final partition-only coarsening step before any GFA chunks
+        // or companion indexes consume the node-to-community assignments.
+        merge_undersized_communities(sorted_tmp_edgelist,
+                                     id_to_comm,
+                                     ncom,
+                                     min_chunk_nodes,
+                                     max_chunk_nodes);
+        log_memory("After small-community merging");
+
         std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
         // Write the chunked graph and its .idx into staged sibling paths rather than the final names.
         split_gzip_gfa(input_gfa, staged_out_gzip, tmp_dir, ncom, 150, node_id_map,
