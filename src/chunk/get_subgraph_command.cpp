@@ -191,6 +191,7 @@ void add_undirected_edge(NeighborhoodState& state,
                          std::uint32_t right,
                          std::string_view context) {
     auto append_one = [&](std::uint32_t owner, std::uint32_t neighbor) {
+
         auto& vec = state.adjacency[owner];
         const auto before_size = vec.size();
         const auto before_capacity = vec.capacity();
@@ -231,6 +232,9 @@ std::uint32_t parse_required_u32(const std::string& value, const char* flag_name
             throw std::out_of_range("value does not fit in uint32_t");
         }
         return static_cast<std::uint32_t>(parsed);
+        if (parsed == 0) {
+            throw std::runtime_error("--max_nodes must be greater than zero");
+        }
     } catch (const std::exception& err) {
         throw std::runtime_error(std::string("Invalid value for ") + flag_name + ": " + err.what());
     }
@@ -244,6 +248,7 @@ ResolvedIndexPaths resolve_index_paths(const argparse::ArgumentParser& program,
     paths.pdx_path = program.get<std::string>("pdx");
     paths.pdx_explicit = !paths.pdx_path.empty();
 
+    // inferred because it's usually just attached to the end of the input graph file
     if (paths.idx_path.empty()) {
         paths.idx_path = infer_companion_path(input_gz, ".idx");
     }
@@ -278,7 +283,7 @@ ResolvedIndexPaths resolve_index_paths(const argparse::ArgumentParser& program,
 }
 
 // Load the L-line adjacency for one community on demand. Shared-edge lines are
-// rescanned lazily when needed so BFS can cross community boundaries.
+// rescanned lazily when needed so BFS can cross community boundaries. NEEDS CHANGING
 void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_id) {
     if (community_id >= state.spans.size()) {
         throw std::runtime_error("Community id out of range in .idx: " + std::to_string(community_id));
@@ -463,10 +468,8 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
     {
         std::ostringstream oss;
         oss << "start node rank=" << start_node_id;
-        load_community_adjacency(state,
-                                 community_id_by_rank_checked(state.node_index,
-                                                              start_node_id,
-                                                              oss.str()));
+        std::uint32_t comm_id = community_id_by_rank_checked(state.node_index, start_node_id, oss.str());
+        load_community_adjacency(state, comm_id);
     }
     queue.push_back(start_node_id);
     discovered.insert(start_node_id);
@@ -499,10 +502,8 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
                         << " discovered_from=" << current
                         << " discovered_size=" << discovered.size()
                         << " queue_size=" << queue.size();
-                    load_community_adjacency(state,
-                                             community_id_by_rank_checked(state.node_index,
-                                                                          neighbor,
-                                                                          oss.str()));
+                    std::uint32_t comm_id =  community_id_by_rank_checked(state.node_index, neighbor, oss.str());
+                    load_community_adjacency(state, comm_id);
                     // Compare the current adjacency vector after loading a new
                     // community so the trace can show if the active loop range changed.
                     if (gfaidx::debug::subgraph_trace_enabled()) {
@@ -719,16 +720,17 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         // translation units can participate in the same debug run.
         if (debug_trace) {
             ::setenv("GFAIDX_DEBUG_SUBGRAPH", "1", 1);
-            gfaidx::debug::log_subgraph_trace("Enabled temporary get_subgraph trace logging");
+            debug::log_subgraph_trace("Enabled temporary get_subgraph trace logging");
         }
         const auto index_paths = resolve_index_paths(program, input_gz);
         const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
         if (spans.empty()) {
             throw std::runtime_error("The .idx file does not contain any community spans");
         }
+
         // Record the resolved companion files once so the external repro log
         // confirms which index set was paired with the input gzip.
-        if (gfaidx::debug::subgraph_trace_enabled()) {
+        if (debug::subgraph_trace_enabled()) {
             std::ostringstream oss;
             oss << "Resolved index paths idx=" << index_paths.idx_path
                 << " ndx=" << index_paths.ndx_path
@@ -744,9 +746,6 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         std::vector<std::uint32_t> touched_communities;
 
         const auto max_nodes = parse_required_u32(max_nodes_str, "--max_nodes");
-        if (max_nodes == 0) {
-            throw std::runtime_error("--max_nodes must be greater than zero");
-        }
 
         std::uint32_t start_node_id = 0;
         if (!node_index.lookup_rank(start_node, start_node_id)) {
@@ -754,11 +753,11 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         }
         // Log the seed rank and node-index size up front so later failures can
         // be compared against the original start-node resolution.
-        if (gfaidx::debug::subgraph_trace_enabled()) {
+        if (debug::subgraph_trace_enabled()) {
             std::ostringstream oss;
             oss << "Start node '" << start_node << "' resolved to rank "
                 << start_node_id << " with .ndx size " << node_index.size();
-            gfaidx::debug::log_subgraph_trace(oss.str());
+            debug::log_subgraph_trace(oss.str());
         }
 
         std::ofstream out(output_gfa);
