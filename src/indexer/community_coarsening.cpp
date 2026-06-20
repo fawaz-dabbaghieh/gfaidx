@@ -15,7 +15,7 @@
 namespace gfaidx::indexer {
 namespace {
 
-using NeighborWeights = std::unordered_map<std::uint32_t, std::uint64_t>;
+using NeighborWeights = std::unordered_map<std::uint32_t, std::uint32_t>;
 
 // Keep merge direction explicit: an undersized source community is always
 // attached to the selected target community rather than unioned by rank.
@@ -55,7 +55,7 @@ private:
 // Priority-queue entries carry the size observed when they were inserted.
 // Entries become stale after a merge and are discarded when popped.
 struct PendingCommunity {
-    std::uint64_t node_count = 0;
+    std::uint32_t node_count = 0;
     std::uint32_t community_id = 0;
 };
 
@@ -89,13 +89,13 @@ void collapse_neighbor_weights(std::uint32_t community_id,
 
 // Verify that a proposed merge respects the optional maximum without risking
 // unsigned overflow when the two community sizes are added.
-bool merge_fits_maximum(std::uint64_t left_size,
-                        std::uint64_t right_size,
+bool merge_fits_maximum(std::uint32_t left_size,
+                        std::uint32_t right_size,
                         std::uint32_t max_chunk_nodes) {
     if (max_chunk_nodes == 0) {
         return true;
     }
-    const std::uint64_t maximum = max_chunk_nodes;
+    const std::uint32_t maximum = max_chunk_nodes;
     return left_size <= maximum && right_size <= maximum - left_size;
 }
 
@@ -137,7 +137,7 @@ CommunityCoarseningSummary merge_undersized_communities(
 
     // Count current membership directly from id_to_comm because the full
     // Louvain graph has deliberately been released before this stage.
-    std::vector<std::uint64_t> community_sizes(community_count, 0);
+    std::vector<std::uint32_t> community_sizes(community_count, 0);
     for (const std::uint32_t community_id : id_to_comm) {
         if (community_id >= community_count) {
             throw std::runtime_error("Community id out of range before small-community merging");
@@ -250,8 +250,8 @@ CommunityCoarseningSummary merge_undersized_communities(
         // Select the neighbor that internalizes the most cross-community edges.
         // Prefer the smallest combined result, then the lowest id, on ties.
         std::uint32_t best_target = std::numeric_limits<std::uint32_t>::max();
-        std::uint64_t best_weight = 0;
-        std::uint64_t best_combined_size = std::numeric_limits<std::uint64_t>::max();
+        std::uint32_t best_weight = 0;
+        std::uint32_t best_combined_size = std::numeric_limits<std::uint32_t>::max();
         for (const auto& [neighbor_id, edge_count] : source_weights_it->second) {
             const std::uint32_t neighbor_root = sets.find(neighbor_id);
             if (neighbor_root == source_root || community_sizes[neighbor_root] == 0) {
@@ -263,7 +263,7 @@ CommunityCoarseningSummary merge_undersized_communities(
                 continue;
             }
 
-            const std::uint64_t combined_size =
+            const std::uint32_t combined_size =
                 community_sizes[source_root] + community_sizes[neighbor_root];
             if (edge_count > best_weight ||
                 (edge_count == best_weight && combined_size < best_combined_size) ||
@@ -329,14 +329,21 @@ CommunityCoarseningSummary merge_undersized_communities(
         }
     }
 
-    // Rewrite every node assignment through its final representative and the
-    // dense id map consumed by split_gzip_gfa and the node hash index writer.
-    for (std::uint32_t& community_id : id_to_comm) {
+    // Resolve every old community id once. This turns the much larger node-level
+    // rewrite below into one direct array lookup per node instead of repeating
+    // union-find traversal for every node in the same original community.
+    for (std::uint32_t community_id = 0; community_id < community_count; ++community_id) {
         const std::uint32_t root = sets.find(community_id);
         if (compact_id[root] == std::numeric_limits<std::uint32_t>::max()) {
             throw std::runtime_error("Missing compact community id after small-community merging");
         }
-        community_id = compact_id[root];
+        compact_id[community_id] = compact_id[root];
+    }
+
+    // Rewrite every node assignment using the precomputed old-to-final mapping
+    // consumed by split_gzip_gfa and the node hash index writer.
+    for (std::uint32_t& community_id : id_to_comm) {
+        community_id = compact_id[community_id];
     }
 
     community_count = compact_count;

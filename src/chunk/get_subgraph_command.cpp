@@ -34,24 +34,41 @@ struct ResolvedIndexPaths {
     bool pdx_explicit{false};
 };
 
-// BFS mode keeps only a simple node-level neighborhood state in memory.
-// Final GFA emission replays original chunk lines so edge orientation and
-// record text match the indexed graph instead of being reconstructed.
+// Store one parsed shared edge and refer to it from both endpoint posting lists.
+// This matches the Python shared-edge cache without duplicating the edge object.
+struct SharedEdge {
+    std::string left;
+    std::string right;
+};
+
+// BFS uses original node-name strings so reading L records never requires a
+// rank lookup across the mmap-backed .ndx. The node index is consulted only to
+// locate communities that have not already been loaded.
 struct NeighborhoodState {
+    // Initialize per-community load flags with the .idx span count while keeping
+    // the graph and node indexes as non-owning references for the query lifetime.
+    NeighborhoodState(const std::string& graph_path,
+                      const std::vector<CommunitySpan>& community_spans,
+                      const indexer::NodeHashIndex& index,
+                      std::uint32_t shared_id)
+        : gz_path(graph_path),
+          spans(community_spans),
+          node_index(index),
+          shared_chunk_id(shared_id),
+          loaded_communities(community_spans.size(), 0) {}
+
     const std::string& gz_path;
     const std::vector<CommunitySpan>& spans;
     const indexer::NodeHashIndex& node_index;
     std::uint32_t shared_chunk_id;
-    std::unordered_map<std::string, std::uint32_t> node_id_cache;
-    std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> adjacency;
+    std::unordered_map<std::string, std::uint32_t> node_community_cache;
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
     std::vector<std::uint8_t> loaded_communities;
     std::vector<std::uint32_t> touched_communities;
-    // Track the adjacency vector currently being iterated by BFS so temporary
-    // debug traces can detect whether a community load mutates that same vector.
-    std::uint32_t active_bfs_node{std::numeric_limits<std::uint32_t>::max()};
-    std::size_t active_bfs_vector_size{0};
-    std::size_t active_bfs_vector_capacity{0};
-    const void* active_bfs_vector_data{nullptr};
+    std::vector<SharedEdge> shared_edges;
+    std::unordered_map<std::string, std::vector<std::size_t>> shared_edges_by_node;
+    std::vector<std::uint8_t> applied_shared_edges;
+    bool shared_edge_cache_loaded{false};
 };
 
 struct EmissionStats {
@@ -67,75 +84,11 @@ void info_get_subgraph(std::string_view message) {
     std::cerr << get_time() << ": " << message << std::endl;
 }
 
-// Format vector storage details so the trace can show whether a push_back on
-// the active BFS node changed size, capacity, or the underlying data pointer.
-std::string format_vector_storage(const std::vector<std::uint32_t>& values) {
-    std::ostringstream oss;
-    oss << "size=" << values.size()
-        << " capacity=" << values.capacity()
-        << " data=" << static_cast<const void*>(values.data());
-    return oss.str();
-}
-
-// Emit a one-line summary of the active BFS adjacency vector before or after a
-// community load so iterator invalidation can be correlated with the crash.
-void log_active_bfs_vector_state(const NeighborhoodState& state, std::string_view context) {
-    if (!gfaidx::debug::subgraph_trace_enabled()) {
-        return;
-    }
-    if (state.active_bfs_node == std::numeric_limits<std::uint32_t>::max()) {
-        return;
-    }
-    const auto it = state.adjacency.find(state.active_bfs_node);
-    if (it == state.adjacency.end()) {
-        std::ostringstream oss;
-        oss << context << " active_bfs_node=" << state.active_bfs_node
-            << " has no adjacency entry";
-        gfaidx::debug::log_subgraph_trace(oss.str());
-        return;
-    }
-    std::ostringstream oss;
-    oss << context << " active_bfs_node=" << state.active_bfs_node
-        << " " << format_vector_storage(it->second);
-    gfaidx::debug::log_subgraph_trace(oss.str());
-}
-
 // Build contextual error text around the exact get_subgraph step that was
-// running so the large-graph repro can report where a rank or parse failure
-// first surfaced.
+// running so a malformed member still carries its community/line context.
 std::runtime_error annotate_get_subgraph_error(std::string_view context,
                                                const std::exception& err) {
     return std::runtime_error(std::string(context) + ": " + err.what());
-}
-
-// Include the current .ndx size in rank checks so out-of-range values can be
-// diagnosed before they are used to address the mmap-backed node index.
-void log_rank_if_suspicious(const indexer::NodeHashIndex& node_index,
-                            std::uint32_t rank,
-                            std::string_view context) {
-    if (!gfaidx::debug::subgraph_trace_enabled()) {
-        return;
-    }
-    if (static_cast<std::uint64_t>(rank) < node_index.size()) {
-        return;
-    }
-    std::ostringstream oss;
-    oss << context << " produced suspicious rank " << rank
-        << " while .ndx contains " << node_index.size() << " entries";
-    gfaidx::debug::log_subgraph_trace(oss.str());
-}
-
-// Wrap rank->community resolution so failures from NodeHashIndex carry the
-// queue/chunk context from get_subgraph instead of only the low-level message.
-std::uint32_t community_id_by_rank_checked(const indexer::NodeHashIndex& node_index,
-                                           std::uint32_t rank,
-                                           std::string_view context) {
-    log_rank_if_suspicious(node_index, rank, context);
-    try {
-        return node_index.community_id_by_rank(rank);
-    } catch (const std::exception& err) {
-        throw annotate_get_subgraph_error(context, err);
-    }
 }
 
 std::string infer_companion_path(const std::string& input_gz, std::string_view suffix) {
@@ -150,78 +103,60 @@ std::string extract_s_node_id_only(std::string_view line) {
     return std::string(line.substr(t1 + 1, t2 - (t1 + 1)));
 }
 
-std::uint32_t resolve_node_rank(const indexer::NodeHashIndex& node_index,
-                                std::unordered_map<std::string, std::uint32_t>& cache,
-                                std::string_view node_name,
-                                std::string_view context) {
+// Remember membership learned from a community member and reject an index/GFA
+// disagreement instead of silently assigning one string to two communities.
+void remember_node_community(NeighborhoodState& state,
+                             const std::string& node_name,
+                             std::uint32_t community_id) {
+    const auto [it, inserted] = state.node_community_cache.emplace(node_name, community_id);
+    if (!inserted && it->second != community_id) {
+        throw std::runtime_error("Node '" + node_name +
+                                 "' appeared in multiple community members");
+    }
+}
+
+// Resolve a node's community only when BFS reaches a node outside the chunks
+// already loaded. Unlike the old rank cache, this never receives every endpoint
+// from the global shared-edge member.
+std::uint32_t resolve_node_community(NeighborhoodState& state,
+                                     std::string_view node_name,
+                                     std::string_view context) {
     std::string key(node_name);
-    const auto it = cache.find(key);
-    if (it != cache.end()) {
-        // Cache hits are common, so only emit them when the temporary trace is
-        // explicitly enabled for a large-graph debugging run.
+    const auto it = state.node_community_cache.find(key);
+    if (it != state.node_community_cache.end()) {
         if (gfaidx::debug::subgraph_trace_enabled()) {
             std::ostringstream oss;
             oss << context << " resolved cached node '" << key
-                << "' to rank " << it->second;
+                << "' to community " << it->second;
             gfaidx::debug::log_subgraph_trace(oss.str());
         }
         return it->second;
     }
 
-    std::uint32_t rank = 0;
-    if (!node_index.lookup_rank(key, rank)) {
+    std::uint32_t community_id = 0;
+    if (!state.node_index.lookup(key, community_id)) {
         std::ostringstream oss;
         oss << context << " could not find node '" << key << "' in .ndx";
         throw std::runtime_error(oss.str());
     }
-    // Log cache misses because they show exactly which line first introduced a
-    // new node id into the BFS/shared-edge working set.
     if (gfaidx::debug::subgraph_trace_enabled()) {
         std::ostringstream oss;
-        oss << context << " resolved node '" << key << "' to rank " << rank;
+        oss << context << " resolved node '" << key
+            << "' to community " << community_id;
         gfaidx::debug::log_subgraph_trace(oss.str());
     }
-    log_rank_if_suspicious(node_index, rank, context);
-    cache.emplace(std::move(key), rank);
-    return rank;
+    state.node_community_cache.emplace(std::move(key), community_id);
+    return community_id;
 }
 
+// Keep one string adjacency entry in each direction. Community loading happens
+// before BFS iterates a node, so these vectors are not mutated mid-iteration.
 void add_undirected_edge(NeighborhoodState& state,
-                         std::uint32_t left,
-                         std::uint32_t right,
-                         std::string_view context) {
-    auto append_one = [&](std::uint32_t owner, std::uint32_t neighbor) {
-
-        auto& vec = state.adjacency[owner];
-        const auto before_size = vec.size();
-        const auto before_capacity = vec.capacity();
-        const void* before_data = static_cast<const void*>(vec.data());
-        const bool touches_active_bfs_node = owner == state.active_bfs_node;
-        // Log mutations to the exact vector BFS is currently iterating because
-        // even a push_back without reallocation can invalidate the stored end().
-        if (gfaidx::debug::subgraph_trace_enabled() && touches_active_bfs_node) {
-            std::ostringstream oss;
-            oss << context << " mutating active BFS vector for node " << owner
-                << " by appending neighbor " << neighbor
-                << " before " << format_vector_storage(vec);
-            gfaidx::debug::log_subgraph_trace(oss.str());
-        }
-        vec.push_back(neighbor);
-        if (gfaidx::debug::subgraph_trace_enabled() && touches_active_bfs_node) {
-            const void* after_data = static_cast<const void*>(vec.data());
-            std::ostringstream oss;
-            oss << context << " mutated active BFS vector for node " << owner
-                << " after " << format_vector_storage(vec)
-                << " size_changed=" << (vec.size() != before_size)
-                << " capacity_changed=" << (vec.capacity() != before_capacity)
-                << " data_changed=" << (after_data != before_data);
-            gfaidx::debug::log_subgraph_trace(oss.str());
-        }
-    };
-
-    append_one(left, right);
+                         const std::string& left,
+                         const std::string& right) {
+    state.adjacency[left].push_back(right);
     if (left != right) {
-        append_one(right, left);
+        state.adjacency[right].push_back(left);
     }
 }
 
@@ -231,10 +166,10 @@ std::uint32_t parse_required_u32(const std::string& value, const char* flag_name
         if (parsed > std::numeric_limits<std::uint32_t>::max()) {
             throw std::out_of_range("value does not fit in uint32_t");
         }
-        return static_cast<std::uint32_t>(parsed);
         if (parsed == 0) {
             throw std::runtime_error("--max_nodes must be greater than zero");
         }
+        return static_cast<std::uint32_t>(parsed);
     } catch (const std::exception& err) {
         throw std::runtime_error(std::string("Invalid value for ") + flag_name + ": " + err.what());
     }
@@ -290,11 +225,93 @@ ResolvedIndexPaths resolve_index_paths(const argparse::ArgumentParser& program,
     return paths;
 }
 
-// Load the L-line adjacency for one community on demand. Shared-edge lines are
-// rescanned lazily when needed so BFS can cross community boundaries. NEEDS CHANGING
+// Build the global shared-edge cache once using only endpoint strings. This is
+// the current-format compatibility backend; future boundary members can replace
+// it without changing the string-based BFS.
+void load_shared_edge_cache(NeighborhoodState& state) {
+    if (state.shared_edge_cache_loaded) {
+        return;
+    }
+    state.shared_edge_cache_loaded = true;
+
+    if (state.shared_chunk_id >= state.spans.size()) {
+        return;
+    }
+    const auto shared_span = state.spans[state.shared_chunk_id];
+    if (shared_span.gz_size == 0) {
+        return;
+    }
+
+    info_get_subgraph("Loading shared-edge cache from member " +
+                      std::to_string(state.shared_chunk_id));
+    std::uint64_t shared_edge_lines = 0;
+    stream_community_lines_from_gz_range(
+        state.gz_path,
+        shared_span.gz_offset,
+        shared_span.gz_size,
+        [&](const std::string& line) -> bool {
+            if (line.empty() || line[0] != 'L') return true;
+            ++shared_edge_lines;
+            try {
+                auto [left_name, right_name] = extract_L_nodes(line);
+                const std::size_t edge_id = state.shared_edges.size();
+                state.shared_edges.push_back(SharedEdge{left_name, right_name});
+                state.shared_edges_by_node[left_name].push_back(edge_id);
+                if (left_name != right_name) {
+                    state.shared_edges_by_node[right_name].push_back(edge_id);
+                }
+            } catch (const std::exception& err) {
+                std::ostringstream oss;
+                oss << "While caching shared L line " << shared_edge_lines
+                    << " from span offset=" << shared_span.gz_offset
+                    << " size=" << shared_span.gz_size
+                    << " line='" << line << "'";
+                throw annotate_get_subgraph_error(oss.str(), err);
+            }
+            return true;
+        });
+    state.applied_shared_edges.assign(state.shared_edges.size(), 0);
+    info_get_subgraph("Finished shared-edge cache with " +
+                      std::to_string(state.shared_edges.size()) + " edges across " +
+                      std::to_string(state.shared_edges_by_node.size()) + " endpoint nodes");
+}
+
+// Apply every cached shared edge incident to this community's S records. Edge
+// ids are sorted to preserve the original shared-member order, and each edge is
+// inserted once even after the opposite community is loaded later.
+void apply_shared_edges_for_nodes(NeighborhoodState& state,
+                                  const std::vector<std::string>& community_nodes) {
+    std::vector<std::size_t> edge_ids;
+    for (const auto& node_name : community_nodes) {
+        const auto posting_it = state.shared_edges_by_node.find(node_name);
+        if (posting_it == state.shared_edges_by_node.end()) {
+            continue;
+        }
+        for (const std::size_t edge_id : posting_it->second) {
+            if (state.applied_shared_edges[edge_id] == 0) {
+                edge_ids.push_back(edge_id);
+            }
+        }
+    }
+
+    std::sort(edge_ids.begin(), edge_ids.end());
+    edge_ids.erase(std::unique(edge_ids.begin(), edge_ids.end()), edge_ids.end());
+    for (const std::size_t edge_id : edge_ids) {
+        if (state.applied_shared_edges[edge_id] != 0) {
+            continue;
+        }
+        state.applied_shared_edges[edge_id] = 1;
+        const auto& edge = state.shared_edges[edge_id];
+        add_undirected_edge(state, edge.left, edge.right);
+    }
+}
+
+// Load one complete local community using node-name strings and then attach its
+// incident shared edges from the one-pass cache without consulting .ndx.
 void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_id) {
-    if (community_id >= state.spans.size()) {
-        throw std::runtime_error("Community id out of range in .idx: " + std::to_string(community_id));
+    if (community_id >= state.spans.size() || community_id == state.shared_chunk_id) {
+        throw std::runtime_error("Community id out of range in .idx: " +
+                                 std::to_string(community_id));
     }
     if (state.loaded_communities[community_id] != 0) {
         return;
@@ -305,61 +322,33 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
     info_get_subgraph("Loading adjacency for community " + std::to_string(community_id) +
                       " (" + std::to_string(state.touched_communities.size()) +
                       " communities touched so far)");
-    // Record the span metadata up front so a later failure can be tied to the
-    // exact gzip member being scanned on the large external graph.
-    if (gfaidx::debug::subgraph_trace_enabled()) {
-        std::ostringstream oss;
-        oss << "Preparing adjacency load for community " << community_id
-            << " using chunk span offset=" << state.spans[community_id].gz_offset
-            << " size=" << state.spans[community_id].gz_size
-            << " shared_chunk_id=" << state.shared_chunk_id;
-        gfaidx::debug::log_subgraph_trace(oss.str());
-    }
 
     const auto span = state.spans[community_id];
+    std::vector<std::string> community_nodes;
+    std::uint64_t local_edge_lines = 0;
     if (span.gz_size > 0) {
-        std::uint64_t local_edge_lines = 0;
         stream_community_lines_from_gz_range(
             state.gz_path,
             span.gz_offset,
             span.gz_size,
             [&](const std::string& line) -> bool {
-                if (line.empty() || line[0] != 'L') return true;
-                ++local_edge_lines;
-                // Emit coarse progress through the member so the last completed
-                // line count is visible if the run aborts mid-community.
-                if (gfaidx::debug::subgraph_trace_enabled() && local_edge_lines % 100000 == 0) {
-                    std::ostringstream oss;
-                    oss << "Scanned " << local_edge_lines
-                        << " local L lines for community " << community_id;
-                    gfaidx::debug::log_subgraph_trace(oss.str());
-                }
+                if (line.empty()) return true;
                 try {
-                    auto [left_name, right_name] = extract_L_nodes(line);
-                    std::ostringstream left_context;
-                    left_context << "community " << community_id
-                                 << " local edge line " << local_edge_lines
-                                 << " left endpoint";
-                    const auto left_id = resolve_node_rank(state.node_index,
-                                                           state.node_id_cache,
-                                                           left_name,
-                                                           left_context.str());
-                    std::ostringstream right_context;
-                    right_context << "community " << community_id
-                                  << " local edge line " << local_edge_lines
-                                  << " right endpoint";
-                    const auto right_id = resolve_node_rank(state.node_index,
-                                                            state.node_id_cache,
-                                                            right_name,
-                                                            right_context.str());
-                    add_undirected_edge(state,
-                                        left_id,
-                                        right_id,
-                                        "local edge insertion");
+                    if (line[0] == 'S') {
+                        std::string node_name = extract_s_node_id_only(line);
+                        remember_node_community(state, node_name, community_id);
+                        community_nodes.push_back(std::move(node_name));
+                    } else if (line[0] == 'L') {
+                        ++local_edge_lines;
+                        auto [left_name, right_name] = extract_L_nodes(line);
+                        remember_node_community(state, left_name, community_id);
+                        remember_node_community(state, right_name, community_id);
+                        add_undirected_edge(state, left_name, right_name);
+                    }
                 } catch (const std::exception& err) {
                     std::ostringstream oss;
-                    oss << "While processing local L line " << local_edge_lines
-                        << " for community " << community_id
+                    oss << "While processing community " << community_id
+                        << " local edge line " << local_edge_lines
                         << " from span offset=" << span.gz_offset
                         << " size=" << span.gz_size
                         << " line='" << line << "'";
@@ -367,189 +356,50 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
                 }
                 return true;
             });
-        // Summarize the member scan once it completes so the large-graph log
-        // shows whether the failure happened before or after the local edges.
-        if (gfaidx::debug::subgraph_trace_enabled()) {
-            std::ostringstream oss;
-            oss << "Finished local adjacency scan for community " << community_id
-                << " after " << local_edge_lines << " L lines";
-            gfaidx::debug::log_subgraph_trace(oss.str());
-        }
     }
 
-    if (state.shared_chunk_id < state.spans.size() && state.shared_chunk_id != community_id) {
-        const auto shared_span = state.spans[state.shared_chunk_id];
-        if (shared_span.gz_size > 0) {
-            std::uint64_t shared_edge_lines = 0;
-            std::uint64_t shared_edge_matches = 0;
-            // TODO: rescanning the shared-edge member for every newly loaded
-            // community is simple and acceptable for small neighborhood queries,
-            // but can be replaced later with a shared-edge cache if needed.
-            stream_community_lines_from_gz_range(
-                state.gz_path,
-                shared_span.gz_offset,
-                shared_span.gz_size,
-                [&](const std::string& line) -> bool {
-                    if (line.empty() || line[0] != 'L') return true;
-                    ++shared_edge_lines;
-                    // Shared-edge scans are the suspected hot path, so keep a
-                    // periodic heartbeat with the current line count.
-                    if (gfaidx::debug::subgraph_trace_enabled() && shared_edge_lines % 100000 == 0) {
-                        std::ostringstream oss;
-                        oss << "Scanned " << shared_edge_lines
-                            << " shared L lines while loading community "
-                            << community_id;
-                        gfaidx::debug::log_subgraph_trace(oss.str());
-                    }
-                    try {
-                        auto [left_name, right_name] = extract_L_nodes(line);
-                        std::ostringstream left_context;
-                        left_context << "community " << community_id
-                                     << " shared edge line " << shared_edge_lines
-                                     << " left endpoint";
-                        const auto left_id = resolve_node_rank(state.node_index,
-                                                               state.node_id_cache,
-                                                               left_name,
-                                                               left_context.str());
-                        std::ostringstream right_context;
-                        right_context << "community " << community_id
-                                      << " shared edge line " << shared_edge_lines
-                                      << " right endpoint";
-                        const auto right_id = resolve_node_rank(state.node_index,
-                                                                state.node_id_cache,
-                                                                right_name,
-                                                                right_context.str());
-                        std::ostringstream left_rank_context;
-                        left_rank_context << "community " << community_id
-                                          << " shared edge line " << shared_edge_lines
-                                          << " left rank=" << left_id;
-                        const auto left_comm = community_id_by_rank_checked(state.node_index,
-                                                                            left_id,
-                                                                            left_rank_context.str());
-                        std::ostringstream right_rank_context;
-                        right_rank_context << "community " << community_id
-                                           << " shared edge line " << shared_edge_lines
-                                           << " right rank=" << right_id;
-                        const auto right_comm = community_id_by_rank_checked(state.node_index,
-                                                                             right_id,
-                                                                             right_rank_context.str());
-                        if (left_comm == community_id || right_comm == community_id) {
-                            ++shared_edge_matches;
-                            add_undirected_edge(state,
-                                                left_id,
-                                                right_id,
-                                                "shared edge insertion");
-                        }
-                    } catch (const std::exception& err) {
-                        std::ostringstream oss;
-                        oss << "While processing shared L line " << shared_edge_lines
-                            << " for community " << community_id
-                            << " from shared span offset=" << shared_span.gz_offset
-                            << " size=" << shared_span.gz_size
-                            << " line='" << line << "'";
-                        throw annotate_get_subgraph_error(oss.str(), err);
-                    }
-                    return true;
-                });
-            // Log both the scan size and the number of matching cross-community
-            // edges so the shared-member pass can be compared between runs.
-            if (gfaidx::debug::subgraph_trace_enabled()) {
-                std::ostringstream oss;
-                oss << "Finished shared adjacency scan for community " << community_id
-                    << " after " << shared_edge_lines << " L lines with "
-                    << shared_edge_matches << " matches";
-                gfaidx::debug::log_subgraph_trace(oss.str());
-            }
-        }
+    load_shared_edge_cache(state);
+    apply_shared_edges_for_nodes(state, community_nodes);
+    if (gfaidx::debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << "Finished string adjacency load for community " << community_id
+            << " with " << community_nodes.size() << " S lines and "
+            << local_edge_lines << " local L lines";
+        gfaidx::debug::log_subgraph_trace(oss.str());
     }
 }
 
-std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
-                                                std::uint32_t start_node_id,
+// Collect a strict max_nodes BFS neighborhood using original GFA node names.
+// Community loading occurs only when a queued node is actually expanded, so the
+// final node admitted at the cap cannot trigger an unnecessary chunk load.
+std::vector<std::string> bfs_collect_node_names(NeighborhoodState& state,
+                                                const std::string& start_node,
                                                 std::uint32_t max_nodes) {
-    std::deque<std::uint32_t> queue;
-    std::unordered_set<std::uint32_t> discovered;
-    discovered.reserve(max_nodes * 2);
-
-    // Resolve the seed node community through the same checked helper used for
-    // BFS expansion so any out-of-range rank carries the start-node context.
-    {
-        std::ostringstream oss;
-        oss << "start node rank=" << start_node_id;
-        std::uint32_t comm_id = community_id_by_rank_checked(state.node_index, start_node_id, oss.str());
-        load_community_adjacency(state, comm_id);
-    }
-    queue.push_back(start_node_id);
-    discovered.insert(start_node_id);
+    std::deque<std::string> queue;
+    std::unordered_set<std::string> discovered;
+    discovered.reserve(static_cast<std::size_t>(max_nodes) * 2);
+    queue.push_back(start_node);
+    discovered.insert(start_node);
 
     while (!queue.empty() && discovered.size() < max_nodes) {
-        const auto current = queue.front();
+        std::string current = std::move(queue.front());
         queue.pop_front();
 
-        const auto it = state.adjacency.find(current);
-        if (it == state.adjacency.end()) {
+        std::ostringstream context;
+        context << "BFS node '" << current << "'";
+        const std::uint32_t community_id =
+            resolve_node_community(state, current, context.str());
+        load_community_adjacency(state, community_id);
+
+        const auto adjacency_it = state.adjacency.find(current);
+        if (adjacency_it == state.adjacency.end()) {
             continue;
         }
 
-        // Snapshot the live adjacency vector before iterating so later community
-        // loads cannot invalidate this loop by appending more neighbors.
-        state.active_bfs_node = current;
-        state.active_bfs_vector_size = it->second.size();
-        state.active_bfs_vector_capacity = it->second.capacity();
-        state.active_bfs_vector_data = static_cast<const void*>(it->second.data());
-        log_active_bfs_vector_state(state, "Starting BFS adjacency iteration");
-        // TODO: shared-edge rescans currently re-add the same undirected edge
-        // when the opposite community is loaded later; deduplicate those edge
-        // insertions so this snapshot is only a safety measure, not a crutch.
-        const std::vector<std::uint32_t> neighbors_snapshot = it->second;
-
-        for (const auto neighbor : neighbors_snapshot) {
+        for (const auto& neighbor : adjacency_it->second) {
             if (discovered.size() >= max_nodes) break;
-
             if (discovered.insert(neighbor).second) {
                 queue.push_back(neighbor);
-                try {
-                    std::ostringstream oss;
-                    oss << "neighbor rank=" << neighbor
-                        << " discovered_from=" << current
-                        << " discovered_size=" << discovered.size()
-                        << " queue_size=" << queue.size();
-                    std::uint32_t comm_id =  community_id_by_rank_checked(state.node_index, neighbor, oss.str());
-                    load_community_adjacency(state, comm_id);
-                    // Compare the current adjacency vector after loading a new
-                    // community so the trace can show if the active loop range changed.
-                    if (gfaidx::debug::subgraph_trace_enabled()) {
-                        const auto current_it = state.adjacency.find(current);
-                        if (current_it != state.adjacency.end()) {
-                            const bool size_changed =
-                                current_it->second.size() != state.active_bfs_vector_size;
-                            const bool capacity_changed =
-                                current_it->second.capacity() != state.active_bfs_vector_capacity;
-                            const bool data_changed =
-                                static_cast<const void*>(current_it->second.data()) !=
-                                state.active_bfs_vector_data;
-                            if (size_changed || capacity_changed || data_changed) {
-                                std::ostringstream mutation_oss;
-                                mutation_oss << "Active BFS vector changed while iterating node "
-                                             << current
-                                             << " after loading neighbor " << neighbor
-                                             << " before size=" << state.active_bfs_vector_size
-                                             << " capacity=" << state.active_bfs_vector_capacity
-                                             << " data=" << state.active_bfs_vector_data
-                                             << " after " << format_vector_storage(current_it->second)
-                                             << " size_changed=" << size_changed
-                                             << " capacity_changed=" << capacity_changed
-                                             << " data_changed=" << data_changed;
-                                gfaidx::debug::log_subgraph_trace(mutation_oss.str());
-                            }
-                        }
-                    }
-                } catch (const std::exception& err) {
-                    std::ostringstream oss;
-                    oss << "While expanding BFS from rank " << current
-                        << " to neighbor rank " << neighbor;
-                    throw annotate_get_subgraph_error(oss.str(), err);
-                }
                 if (discovered.size() % 500 == 0) {
                     std::cerr << get_time() << ": BFS neighborhood currently has "
                               << discovered.size() << " nodes across "
@@ -558,18 +408,11 @@ std::vector<std::uint32_t> bfs_collect_node_ids(NeighborhoodState& state,
                 }
             }
         }
-
-        // Clear the active-vector snapshot once BFS moves on to the next node
-        // so later adjacency insertions are not misattributed to this iteration.
-        state.active_bfs_node = std::numeric_limits<std::uint32_t>::max();
-        state.active_bfs_vector_size = 0;
-        state.active_bfs_vector_capacity = 0;
-        state.active_bfs_vector_data = nullptr;
     }
 
-    std::vector<std::uint32_t> node_ids(discovered.begin(), discovered.end());
-    std::sort(node_ids.begin(), node_ids.end());
-    return node_ids;
+    std::vector<std::string> node_names(discovered.begin(), discovered.end());
+    std::sort(node_names.begin(), node_names.end());
+    return node_names;
 }
 
 void emit_header_if_present(std::ostream& out,
@@ -594,13 +437,12 @@ void emit_header_if_present(std::ostream& out,
 }
 
 // Re-stream the original chunk lines and emit only the records whose endpoint
-// nodes are part of the final extracted node set.
+// names are part of the final extracted node set. String membership avoids
+// touching .ndx pages again during materialization.
 EmissionStats emit_filtered_member(std::ostream& out,
-                          const std::string& gz_path,
-                          const CommunitySpan& span,
-                          const std::unordered_set<std::uint32_t>& node_set,
-                          indexer::NodeHashIndex& node_index,
-                          std::unordered_map<std::string, std::uint32_t>& cache) {
+                                   const std::string& gz_path,
+                                   const CommunitySpan& span,
+                                   const std::unordered_set<std::string>& node_set) {
     EmissionStats stats{};
     if (span.gz_size == 0) return stats;
 
@@ -612,13 +454,8 @@ EmissionStats emit_filtered_member(std::ostream& out,
             if (line.empty() || line[0] == 'H') return true;
 
             if (line[0] == 'S') {
-                // Carry materialization context into node-rank resolution so a
-                // late failure can still identify the member being emitted.
-                const auto node_id = resolve_node_rank(node_index,
-                                                       cache,
-                                                       extract_s_node_id_only(line),
-                                                       "materializing S line");
-                if (node_set.find(node_id) != node_set.end()) {
+                const std::string node_name = extract_s_node_id_only(line);
+                if (node_set.find(node_name) != node_set.end()) {
                     out << line << '\n';
                     ++stats.s_lines;
                 }
@@ -627,18 +464,8 @@ EmissionStats emit_filtered_member(std::ostream& out,
 
             if (line[0] == 'L') {
                 auto [left_name, right_name] = extract_L_nodes(line);
-                // Reuse the same contextual resolver during final replay so the
-                // debug run can distinguish BFS failures from emit-time ones.
-                const auto left_id = resolve_node_rank(node_index,
-                                                       cache,
-                                                       left_name,
-                                                       "materializing L line left endpoint");
-                const auto right_id = resolve_node_rank(node_index,
-                                                        cache,
-                                                        right_name,
-                                                        "materializing L line right endpoint");
-                if (node_set.find(left_id) != node_set.end() &&
-                    node_set.find(right_id) != node_set.end()) {
+                if (node_set.find(left_name) != node_set.end() &&
+                    node_set.find(right_name) != node_set.end()) {
                     out << line << '\n';
                     ++stats.l_lines;
                 }
@@ -646,6 +473,24 @@ EmissionStats emit_filtered_member(std::ostream& out,
             return true;
         });
     return stats;
+}
+
+// Convert only the final selected node names to .ndx ranks when path extraction
+// needs the rank-aligned .pdx. Graph-only queries never call this helper.
+std::vector<std::uint32_t> resolve_selected_node_ranks(
+    const indexer::NodeHashIndex& node_index,
+    const std::vector<std::string>& node_names) {
+    std::vector<std::uint32_t> node_ids;
+    node_ids.reserve(node_names.size());
+    for (const auto& node_name : node_names) {
+        std::uint32_t rank = 0;
+        if (!node_index.lookup_rank(node_name, rank)) {
+            throw std::runtime_error("Selected node was not found in .ndx: " + node_name);
+        }
+        node_ids.push_back(rank);
+    }
+    std::sort(node_ids.begin(), node_ids.end());
+    return node_ids;
 }
 
 // Append indexed P/W subpaths for the extracted node set when a companion
@@ -759,89 +604,96 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         }
 
         indexer::NodeHashIndex node_index(index_paths.ndx_path);
-        std::unordered_map<std::string, std::uint32_t> node_id_cache;
-        std::vector<std::uint32_t> node_ids;
-        std::vector<std::uint32_t> touched_communities;
-
         const auto max_nodes = parse_required_u32(max_nodes_str, "--max_nodes");
 
-        std::uint32_t start_node_id = 0;
-        if (!node_index.lookup_rank(start_node, start_node_id)) {
+        // Only resolve the starting community up front. The rank is deliberately
+        // deferred unless optional path extraction later requires it.
+        std::uint32_t start_community_id = 0;
+        if (!node_index.lookup(start_node, start_community_id)) {
             throw std::runtime_error("Start node was not found in .ndx: " + start_node);
         }
-        // Log the seed rank and node-index size up front so later failures can
-        // be compared against the original start-node resolution.
         if (debug::subgraph_trace_enabled()) {
             std::ostringstream oss;
-            oss << "Start node '" << start_node << "' resolved to rank "
-                << start_node_id << " with .ndx size " << node_index.size();
+            oss << "Start node '" << start_node << "' resolved to community "
+                << start_community_id << " with .ndx size " << node_index.size();
             debug::log_subgraph_trace(oss.str());
         }
+
+        std::vector<std::string> node_names;
+        std::vector<std::uint32_t> materialization_communities;
+        std::size_t loaded_community_count = 0;
+        {
+            // Scope the potentially large string adjacency and shared-edge cache
+            // to BFS so they are released before materialization and path work.
+            const std::uint32_t shared_chunk_id =
+                spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
+                                  : std::numeric_limits<std::uint32_t>::max();
+            NeighborhoodState state(input_gz, spans, node_index, shared_chunk_id);
+            state.node_community_cache.emplace(start_node, start_community_id);
+
+            info_get_subgraph("Starting BFS from node " + start_node +
+                              " with max_nodes=" + std::to_string(max_nodes));
+            node_names = bfs_collect_node_names(state, start_node, max_nodes);
+            loaded_community_count = state.touched_communities.size();
+
+            // The last admitted node may never be expanded, so independently
+            // collect every selected node's community for final S/L replay.
+            std::unordered_set<std::uint32_t> community_set;
+            community_set.reserve(node_names.size());
+            for (const auto& node_name : node_names) {
+                const std::uint32_t community_id =
+                    resolve_node_community(state, node_name, "selected node materialization");
+                if (community_id >= spans.size() || community_id == shared_chunk_id) {
+                    throw std::runtime_error("Selected node resolved to an invalid community: " +
+                                             node_name);
+                }
+                community_set.insert(community_id);
+            }
+            materialization_communities.assign(community_set.begin(), community_set.end());
+        }
+
+        info_get_subgraph("BFS finished with " + std::to_string(node_names.size()) +
+                          " nodes across " + std::to_string(loaded_community_count) +
+                          " loaded communities");
+
+        if (node_names.empty()) {
+            warn_get_subgraph("No nodes were selected for the requested subgraph");
+            return 0;
+        }
+
+        std::sort(materialization_communities.begin(), materialization_communities.end());
+        std::unordered_set<std::string> node_set(node_names.begin(), node_names.end());
 
         std::ofstream out(output_gfa);
         if (!out) {
             throw std::runtime_error("Failed to open output GFA file for writing: " + output_gfa);
         }
 
-        NeighborhoodState state{
-            input_gz,
-            spans,
-            node_index,
-            spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
-                              : std::numeric_limits<std::uint32_t>::max(),
-            {},
-            {},
-            std::vector<std::uint8_t>(spans.size(), 0),
-            {}
-        };
-
-        info_get_subgraph("Starting BFS from node " + start_node +
-                          " with max_nodes=" + std::to_string(max_nodes));
-        node_ids = bfs_collect_node_ids(state, start_node_id, max_nodes);
-        touched_communities = std::move(state.touched_communities);
-        node_id_cache = std::move(state.node_id_cache);
-        info_get_subgraph("BFS finished with " + std::to_string(node_ids.size()) +
-                          " nodes across " + std::to_string(touched_communities.size()) +
-                          " touched communities");
-
-        if (node_ids.empty()) {
-            warn_get_subgraph("No nodes were selected for the requested subgraph");
-            return 0;
-        }
-
-        std::sort(touched_communities.begin(), touched_communities.end());
-        touched_communities.erase(std::unique(touched_communities.begin(), touched_communities.end()),
-                                  touched_communities.end());
-
-        std::unordered_set<std::uint32_t> node_set(node_ids.begin(), node_ids.end());
-
         info_get_subgraph("Starting subgraph materialization into " + output_gfa);
         emit_header_if_present(out, input_gz, spans);
         EmissionStats total_stats{};
-        for (const auto community_id : touched_communities) {
+        for (const auto community_id : materialization_communities) {
             info_get_subgraph("Materializing community " + std::to_string(community_id));
-            const auto stats = emit_filtered_member(out, input_gz, spans[community_id], node_set,
-                                                    node_index, node_id_cache);
+            const auto stats = emit_filtered_member(out, input_gz, spans[community_id], node_set);
             total_stats.s_lines += stats.s_lines;
             total_stats.l_lines += stats.l_lines;
         }
 
         if (spans.size() >= 2) {
             const auto shared_chunk_id = static_cast<std::uint32_t>(spans.size() - 1);
-            if (std::find(touched_communities.begin(), touched_communities.end(), shared_chunk_id) ==
-                touched_communities.end()) {
-                info_get_subgraph("Materializing shared-edge member " + std::to_string(shared_chunk_id));
-                const auto stats = emit_filtered_member(out, input_gz, spans[shared_chunk_id], node_set,
-                                                        node_index, node_id_cache);
-                total_stats.s_lines += stats.s_lines;
-                total_stats.l_lines += stats.l_lines;
-            }
+            info_get_subgraph("Materializing shared-edge member " + std::to_string(shared_chunk_id));
+            const auto stats = emit_filtered_member(out, input_gz, spans[shared_chunk_id], node_set);
+            total_stats.s_lines += stats.s_lines;
+            total_stats.l_lines += stats.l_lines;
         }
         info_get_subgraph("Finished subgraph materialization with " +
                           std::to_string(total_stats.s_lines) + " S lines and " +
                           std::to_string(total_stats.l_lines) + " L lines");
 
         if (index_paths.has_pdx) {
+            // Convert only the final subgraph node names to rank ids needed by
+            // the rank-aligned path index.
+            const auto node_ids = resolve_selected_node_ranks(node_index, node_names);
             info_get_subgraph("Starting indexed subpath extraction from " + index_paths.pdx_path);
             const auto subpath_count = emit_subpaths_if_available(out, index_paths.pdx_path, node_ids);
             info_get_subgraph("Finished indexed subpath extraction with " +
