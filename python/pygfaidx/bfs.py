@@ -8,11 +8,15 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 def main_while_loop(graph, start_node, queue, visited, n_size):
     neighborhood = {start_node}
     counter = 0
+    # Mirror the deque in a set for constant-time duplicate suppression.
+    queued = set(queue)
     while len(queue) > 0 and len(neighborhood) <= n_size:
         counter += 1
         if counter % 500 == 0:
             logging.info(f"BFS neighborhood is of length {len(neighborhood)}")
         start = queue.popleft()
+        # Keep the set synchronized so queue membership checks remain constant-time.
+        queued.discard(start)
 
         if start not in neighborhood:
             neighborhood.add(start)
@@ -22,8 +26,10 @@ def main_while_loop(graph, start_node, queue, visited, n_size):
         neighbors = graph.neighbors(start)
 
         for n in neighbors:
-            if n not in visited and n not in queue:
+            # Avoid scanning the deque for every neighbor on large frontiers.
+            if n not in visited and n not in queued:
                 queue.append(n)
+                queued.add(n)
 
     return neighborhood
 
