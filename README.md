@@ -12,6 +12,8 @@ The main CLI subcommands are:
 - `get_chunk`
 - `index_paths`
 - `get_path`
+- `index_coordinates`
+- `get_region`
 
 ## What The Indexes Are
 
@@ -27,9 +29,15 @@ The main CLI subcommands are:
   a sorted binary hash table mapping node string IDs to community IDs
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
+- `<graph>.gz.cdx`
+  an optional standalone reference-coordinate index built by `index_coordinates`
 
 `get_subgraph` uses `.idx`, `.ndx`, and optionally `.pdx` to extract a BFS
 neighborhood across communities.
+
+`get_region` additionally uses `.cdx` to resolve a 0-based reference interval
+to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
+The `.cdx` is separate from `.pdx`, so existing path indexes remain compatible.
 
 `get_chunk` remains available as the compatibility command for streaming a
 single community member back out without graph expansion.
@@ -172,6 +180,60 @@ Examples:
 ```bash
 gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa
 gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
+```
+
+### `gfaidx index_coordinates`
+
+Build a standalone `.cdx` aligned to an existing `.ndx`. Reference W records
+are selected from the header `RS:Z` sample list. If no eligible reference W
+record exists, `SR:i:0` segments with `SN` and `SO` tags are indexed instead.
+
+```bash
+gfaidx index_coordinates <in_gfa> <out.cdx> --ndx <graph.ndx> [options]
+```
+
+Options:
+
+- `--reference <sample>`
+  index only this sample from the header `RS:Z` list; by default all listed
+  reference samples are indexed
+- `--progress_every <N>`
+  report input progress every `N` lines; `0` disables progress logging
+
+Example:
+
+```bash
+gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
+  --ndx chr22.gfa.gz.ndx --reference CHM13
+```
+
+### `gfaidx get_region`
+
+Resolve a 0-based, half-open reference interval through `.cdx`, translate its
+node ranks through `.pdx`, and use all overlapping reference nodes as seeds for
+the existing subgraph and optional path-extraction pipeline.
+
+```bash
+gfaidx get_region <in_gz> <sequence:start-end> <out_gfa> [options]
+```
+
+Important options:
+
+- `--reference <sample>`
+  select the coordinate namespace when multiple reference samples contain the
+  requested sequence
+- `--cdx`, `--idx`, `--ndx`, `--pdx`
+  override companion indexes; each defaults to `<in_gz>.<suffix>`
+- `--max_nodes <N>`
+  cap the total seed plus BFS node count; it must be at least the seed count
+- `--no_paths`
+  omit P/W output; `.pdx` remains required for rank-to-node-name conversion
+
+Example:
+
+```bash
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
+  --reference CHM13 --max_nodes 100000
 ```
 
 ### `gfaidx get_chunk`

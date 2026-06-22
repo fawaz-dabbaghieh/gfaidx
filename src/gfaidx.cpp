@@ -4,6 +4,7 @@
 
 #include "chunk/get_chunk_command.h"
 #include "chunk/get_subgraph_command.h"
+#include "coordinates/coordinate_commands.h"
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/index_gfa_main.h"
 #include "paths/get_path_command.h"
@@ -12,7 +13,7 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.4.2";
+    constexpr const char* version = "1.5.0";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
@@ -42,6 +43,16 @@ int main(int argc, char** argv) {
     gfaidx::paths::configure_get_path_parser(get_path);
     program.add_subparser(get_path);
 
+    argparse::ArgumentParser index_coordinates("index_coordinates", version);
+    index_coordinates.add_description("Build a reference-coordinate sidecar from RS W records or SR:i:0 segments");
+    gfaidx::coordinates::configure_index_coordinates_parser(index_coordinates);
+    program.add_subparser(index_coordinates);
+
+    argparse::ArgumentParser get_region("get_region", version);
+    get_region.add_description("Extract a graph neighborhood from a reference-coordinate interval");
+    gfaidx::coordinates::configure_get_region_parser(get_region);
+    program.add_subparser(get_region);
+
     if (argc == 2 && std::string(argv[1]) == "index_gfa") {
         std::cerr << index_gfa;
         return 1;
@@ -64,6 +75,16 @@ int main(int argc, char** argv) {
 
     if (argc == 2 && std::string(argv[1]) == "get_path") {
         std::cerr << get_path;
+        return 1;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "index_coordinates") {
+        std::cerr << index_coordinates;
+        return 1;
+    }
+
+    if (argc == 2 && std::string(argv[1]) == "get_region") {
+        std::cerr << get_region;
         return 1;
     }
 
@@ -93,6 +114,14 @@ int main(int argc, char** argv) {
 
     if (program.is_subcommand_used("get_path")) {
         return gfaidx::paths::run_get_path(get_path);
+    }
+
+    if (program.is_subcommand_used("index_coordinates")) {
+        return gfaidx::coordinates::run_index_coordinates(index_coordinates);
+    }
+
+    if (program.is_subcommand_used("get_region")) {
+        return gfaidx::coordinates::run_get_region(get_region);
     }
 
     std::cerr << program;
