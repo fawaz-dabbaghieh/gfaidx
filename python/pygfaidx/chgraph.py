@@ -4,6 +4,7 @@ import re
 import logging
 import zlib
 import pdb
+import time
 from collections import deque
 from .bfs import bfs
 from .node_hash_index import NodeHashIndex
@@ -79,8 +80,8 @@ class ChGraph:
         self.shared_edges_by_node = {}
         self.shared_chunk_id = max(self.offsets.keys()) if self.offsets else None
         self.use_shared_edges_cache = use_shared_edges_cache
-        if self.use_shared_edges_cache:
-            self._load_shared_edges()
+        # Build the shared-edge cache only when a loaded chunk first needs it.
+        self._shared_edges_cache_loaded = False
 
         self.loaded_c = deque() # newly loaded chunk IDs
         self.loaded_c_limit = 50
@@ -419,6 +420,25 @@ class ChGraph:
             self.shared_edges_by_node.setdefault(n1, []).append(edge)
             self.shared_edges_by_node.setdefault(n2, []).append(edge)
 
+    def _ensure_shared_edges_loaded(self):
+        """
+        Lazily build the shared-edge cache before its first use.
+        """
+        # The explicit state flag also prevents rescanning a valid empty cache.
+        if self._shared_edges_cache_loaded:
+            return
+
+        # Log this potentially expensive operation so startup no longer appears idle.
+        start_time = time.perf_counter()
+        logger.info("Loading shared-edge cache")
+        self._load_shared_edges()
+        self._shared_edges_cache_loaded = True
+        logger.info(
+            "Loaded shared-edge cache for %d nodes in %.3f seconds",
+            len(self.shared_edges_by_node),
+            time.perf_counter() - start_time,
+        )
+
     def _apply_shared_edges(self, loaded_nodes):
         """
         Add shared edges involving currently loaded nodes.
@@ -426,6 +446,8 @@ class ChGraph:
         if self.shared_chunk_id is None:
             return
         if self.use_shared_edges_cache:
+            # Delay the graph-wide scan until shared edges are actually requested.
+            self._ensure_shared_edges_loaded()
             for node_id in loaded_nodes:
                 for edge in self.shared_edges_by_node.get(node_id, []):
                     self._add_edge_tuple(edge)
@@ -496,19 +518,35 @@ class ChGraph:
                 if not chunk:
                     continue
                 pending += chunk
+
+                # Scan with a cursor so the unconsumed buffer is copied only once
+                # per decompressed block instead of once for every complete line.
+                line_start = 0
                 while True:
-                    nl = pending.find(b"\n")
+                    nl = pending.find(b"\n", line_start)
                     if nl == -1:
                         break
-                    line = pending[:nl]
-                    pending = pending[nl + 1:]
+                    line = pending[line_start:nl]
                     yield line.decode("utf-8", errors="replace")
+                    line_start = nl + 1
+                pending = pending[line_start:]
 
             tail = inflater.flush()
             if tail:
                 pending += tail
-            if pending:
-                yield pending.decode("utf-8", errors="replace")
+
+            # Flush can contain complete lines, so process it with the same
+            # cursor strategy before yielding a final unterminated line.
+            line_start = 0
+            while True:
+                nl = pending.find(b"\n", line_start)
+                if nl == -1:
+                    break
+                line = pending[line_start:nl]
+                yield line.decode("utf-8", errors="replace")
+                line_start = nl + 1
+            if line_start < len(pending):
+                yield pending[line_start:].decode("utf-8", errors="replace")
 
     def write_gfa(self, set_of_nodes=None,
                   output_file="output_file.gfa", append=True):

@@ -107,6 +107,13 @@ Options:
   gzip compression level for the final chunked output
 - `--gzip_mem_level <1..9>`
   zlib memory level for gzip compression
+- `--max_chunk_nodes <N>`
+  re-run Louvain inside communities containing at least `N` nodes and prevent
+  small-community merges from producing a chunk larger than `N`; `0` disables
+  refinement and leaves merging without an upper bound
+- `--min_chunk_nodes <N>`
+  merge communities smaller than `N` nodes into the neighboring community with
+  the most connecting edges; `0` disables small-community merging
 - `--no_paths`
   skip building `<out_gfa.gz>.pdx`; only write the graph chunk index artifacts
 

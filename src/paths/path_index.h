@@ -185,6 +185,8 @@ private:
 };
 
 // Resolve a node set into all path runs that remain contiguous inside that set.
+// Runs shorter than two consecutive steps are suppressed to avoid emitting
+// single-node path fragments that tend to confuse downstream users and tools.
 std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
                                                    const std::vector<std::uint32_t>& node_ids);
 

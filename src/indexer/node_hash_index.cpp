@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 
 static_assert(sizeof(gfaidx::indexer::NodeHashEntry) == 16, "NodeHashEntry size must be 16 bytes");
@@ -12,6 +13,7 @@ static_assert(sizeof(gfaidx::indexer::NodeHashEntry) == 16, "NodeHashEntry size 
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "utils/debug_trace.h"
 #include "fs/fs_helpers.h"
 
 namespace gfaidx::indexer {
@@ -178,8 +180,26 @@ bool NodeHashIndex::lookup_rank(std::string_view node_id, std::uint32_t& out_ran
                     return true;
                 }
             }
+            // Log failed collision resolution so the temporary get_subgraph
+            // trace can distinguish a true miss from a later rank corruption.
+            if (gfaidx::debug::subgraph_trace_enabled()) {
+                std::ostringstream oss;
+                oss << "lookup_rank miss after hash64 match for node '" << node_id
+                    << "' hash64=" << query_hash
+                    << " hash32=" << query_hash32;
+                gfaidx::debug::log_subgraph_trace(oss.str());
+            }
             return false;
         }
+    }
+    // Log the full miss path once when the query hash never appears in .ndx.
+    if (gfaidx::debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << "lookup_rank miss for node '" << node_id
+            << "' hash64=" << query_hash
+            << " hash32=" << query_hash32
+            << " n_entries=" << n_entries_;
+        gfaidx::debug::log_subgraph_trace(oss.str());
     }
     return false;
 }
@@ -196,6 +216,14 @@ bool NodeHashIndex::lookup(std::string_view node_id, std::uint32_t& out_com) con
 
 std::uint32_t NodeHashIndex::community_id_by_rank(std::uint32_t rank) const {
     if (rank >= n_entries_) {
+        // Emit the exact bad rank and table size before throwing so external
+        // repro logs keep the low-level values that triggered the abort.
+        if (gfaidx::debug::subgraph_trace_enabled()) {
+            std::ostringstream oss;
+            oss << "community_id_by_rank out of range rank=" << rank
+                << " n_entries=" << n_entries_;
+            gfaidx::debug::log_subgraph_trace(oss.str());
+        }
         throw std::runtime_error("Node hash index rank out of range");
     }
     return data_[rank].community_id;

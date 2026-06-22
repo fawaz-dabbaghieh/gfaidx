@@ -4,9 +4,12 @@
 
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
+
+#include "utils/debug_trace.h"
 
 static void throw_zlib(const char* where, int zret) {
     throw std::runtime_error(std::string(where) + " (zlib ret=" + std::to_string(zret) + ")");
@@ -115,6 +118,11 @@ void stream_community_lines_from_gz_range(
     std::vector<unsigned char> outbuf(1 << 16);
     std::string pending;
     pending.reserve(1 << 20);
+    // Track coarse stream progress so a failing large-graph repro can show the
+    // last completed inflate/read cycle before the exception surfaced.
+    std::uint64_t read_calls = 0;
+    std::uint64_t line_count = 0;
+    std::uint64_t stream_end_count = 0;
 
     std::uint64_t remaining = gz_size;
     bool stop = false;
@@ -125,6 +133,16 @@ void stream_community_lines_from_gz_range(
         if (ret != Z_OK) throw_zlib("inflateInit2", ret);
     };
 
+    // Record the gzip span boundaries once per call so repeated shared-member
+    // rescans can be distinguished in the user-supplied debug log.
+    if (gfaidx::debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << "Starting gz-range stream path=" << gz_path
+            << " offset=" << offset
+            << " size=" << gz_size;
+        gfaidx::debug::log_subgraph_trace(oss.str());
+    }
+
     while (!stop) {
         if (remaining == 0) break;
 
@@ -132,6 +150,7 @@ void stream_community_lines_from_gz_range(
         in.read(reinterpret_cast<char*>(inbuf.data()), static_cast<std::streamsize>(want));
         std::streamsize got = in.gcount();
         if (got <= 0) break;
+        ++read_calls;
         remaining -= static_cast<std::uint64_t>(got);
 
         strm.next_in = inbuf.data();
@@ -151,18 +170,37 @@ void stream_community_lines_from_gz_range(
                     std::size_t nl = pending.find('\n', pos);
                     if (nl == std::string::npos) break;
                     std::string line = pending.substr(pos, nl - pos);
+                    ++line_count;
                     if (!on_line(line)) {
+                        // Mark the current line as consumed before stopping so
+                        // the same buffered record cannot be replayed on the
+                        // next inflate iteration.
                         stop = true;
+                        pos = nl + 1;
                         break;
                     }
                     pos = nl + 1;
                 }
                 if (pos > 0) pending.erase(0, pos);
+                // Stop immediately once the callback asked to terminate early.
+                if (stop) break;
             }
 
             if (ret == Z_STREAM_END) {
                 Bytef* leftover_ptr = strm.next_in;
                 uInt leftover_len = strm.avail_in;
+                ++stream_end_count;
+                // Log every gzip-member boundary because the current bug hunt
+                // is focused on behavior around Z_STREAM_END handling.
+                if (gfaidx::debug::subgraph_trace_enabled()) {
+                    std::ostringstream oss;
+                    oss << "Reached Z_STREAM_END after " << line_count
+                        << " lines and " << read_calls
+                        << " read calls with leftover_len=" << leftover_len
+                        << " remaining=" << remaining
+                        << " stop=" << stop;
+                    gfaidx::debug::log_subgraph_trace(oss.str());
+                }
 
                 inflateEnd(&strm);
 
@@ -177,12 +215,33 @@ void stream_community_lines_from_gz_range(
             }
 
             if (ret != Z_OK) {
+                // Include the stream counters before rethrowing so zlib errors
+                // can be aligned with the surrounding get_subgraph context.
+                if (gfaidx::debug::subgraph_trace_enabled()) {
+                    std::ostringstream oss;
+                    oss << "inflate returned ret=" << ret
+                        << " after " << line_count
+                        << " lines and " << read_calls
+                        << " read calls";
+                    gfaidx::debug::log_subgraph_trace(oss.str());
+                }
                 inflateEnd(&strm);
                 throw std::runtime_error("inflate failed ret=" + std::to_string(ret));
             }
         }
     }
 
+    // Log the final stream summary before cleanup so successful and failing
+    // scans can be compared across repeated reproductions.
+    if (gfaidx::debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << "Finishing gz-range stream after " << line_count
+            << " lines, " << read_calls
+            << " read calls, " << stream_end_count
+            << " stream-end events, stop=" << stop
+            << " remaining=" << remaining;
+        gfaidx::debug::log_subgraph_trace(oss.str());
+    }
     inflateEnd(&strm);
 }
 

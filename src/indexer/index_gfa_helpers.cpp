@@ -88,6 +88,16 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
       .help("skip building the .pdx path index; only write .gz, .idx, and .ndx");
+
+    parser.add_argument("--max_chunk_nodes").default_value(std::string("0"))
+      .nargs(1)
+      .help("re-run Louvain inside communities at least this large and cap small-community merges at this size; 0 disables refinement and leaves merging uncapped");
+
+    // Keep small-community coarsening opt-in so existing indexing runs preserve
+    // their current partition unless the caller provides a minimum chunk size.
+    parser.add_argument("--min_chunk_nodes").default_value(std::string("0"))
+      .nargs(1)
+      .help("merge communities smaller than this into their strongest eligible neighbor; 0 disables");
 }
 
 bool run_sort(const std::string& input_edges,

@@ -3,10 +3,14 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <optional>
 
 #include <argparse/argparse.hpp>
 
 #include "fs/fs_helpers.h"
+#include "indexer/community_coarsening.h"
+#include "indexer/community_refinement.h"
 #include "indexer/direct_binary_writer.h"
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/node_hash_index.h"
@@ -79,6 +83,44 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     Reader::Options reader_options;
     reader_options.progress_every = progress_every;
+
+    std::uint32_t max_chunk_nodes;
+    const auto max_chunk_nodes_str = program.get<std::string>("max_chunk_nodes");
+    try {
+        const long long parsed = std::stoll(max_chunk_nodes_str);
+        // A value of 0 keeps the current one-pass behavior with no local community refinement.
+        if (parsed < 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("max chunk nodes must be in the uint32 range");
+        }
+        max_chunk_nodes = static_cast<std::uint32_t>(parsed);
+    } catch (const std::exception& err) {
+        std::cerr << "Warning: invalid --max_chunk_nodes value '" << max_chunk_nodes_str
+                  << "', disabling refinement (" << err.what() << ")" << std::endl;
+        max_chunk_nodes = 0;
+    }
+
+    // Parse the opt-in lower chunk-size target independently from the existing
+    // upper threshold used by local Louvain refinement.
+    std::uint32_t min_chunk_nodes;
+    const auto min_chunk_nodes_str = program.get<std::string>("min_chunk_nodes");
+    try {
+        const long long parsed = std::stoll(min_chunk_nodes_str);
+        if (parsed < 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("min chunk nodes must be in the uint32 range");
+        }
+        min_chunk_nodes = static_cast<std::uint32_t>(parsed);
+    } catch (const std::exception& err) {
+        std::cerr << "Warning: invalid --min_chunk_nodes value '" << min_chunk_nodes_str
+                  << "', disabling small-community merging (" << err.what() << ")" << std::endl;
+        min_chunk_nodes = 0;
+    }
+
+    // Reject contradictory bounds before creating temporary or staged output
+    // files; equality is valid because a merge may land exactly at the maximum.
+    if (max_chunk_nodes != 0 && min_chunk_nodes > max_chunk_nodes) {
+        std::cerr << "--min_chunk_nodes must not exceed --max_chunk_nodes" << std::endl;
+        return 1;
+    }
 
     // check gzip_level user input
     int gzip_level;
@@ -212,6 +254,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
          * performing community detection on the binary graph
          */
         std::vector<std::uint32_t> id_to_comm;
+        std::vector<CommunityRefinementWorkItem> refinement_work_items;
         std::uint32_t ncom = 0;
         // scoping so objects that are not needed anymore get destructed, mainly final_graph
         {
@@ -225,6 +268,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
             timer.reset();
             std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
+            // Record the pre-singleton community count so the appended singleton-only bucket can be skipped later.
+            const std::uint32_t communities_before_singletons = static_cast<std::uint32_t>(final_graph.nodes.size());
             add_singleton_community(input_gfa, node_id_map, final_graph, reader_options);
             std::cout << get_time() << ": Finished scanning for singleton nodes in " << timer.elapsed() << " seconds" << std::endl;
             log_memory("After singleton scan");
@@ -237,10 +282,53 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                 }
             }
             ncom = static_cast<std::uint32_t>(final_graph.nodes.size());
+
+            // Treat the appended singleton-only bucket as a special case that should never be re-split.
+            std::optional<std::uint32_t> singleton_community_id;
+            if (ncom > communities_before_singletons) {
+                singleton_community_id = communities_before_singletons;
+            }
+
+            // Move the oversized membership lists out before the full Louvain graph is destroyed to reduce peak RAM.
+            refinement_work_items = collect_oversized_community_work(final_graph,
+                                                                     max_chunk_nodes,
+                                                                     singleton_community_id);
         }
 
         timer.reset();
         log_memory("After releasing final graph");
+        if (max_chunk_nodes == 0) {
+            std::cout << get_time() << ": Community refinement disabled because --max_chunk_nodes is 0" << std::endl;
+        } else if (refinement_work_items.empty()) {
+            std::cout << get_time() << ": No non-singleton communities reach " << max_chunk_nodes
+                      << " nodes, skipping refinement" << std::endl;
+        } else {
+            std::cout << get_time() << ": Refining " << refinement_work_items.size()
+                      << " oversized communities with threshold " << max_chunk_nodes << std::endl;
+
+            const CommunityRefinementSummary refinement_summary =
+                refine_oversized_communities(sorted_tmp_edgelist,
+                                             tmp_dir,
+                                             refinement_work_items,
+                                             id_to_comm,
+                                             ncom,
+                                             keep_tmp);
+            ncom = refinement_summary.final_community_count;
+            std::cout << get_time() << ": Finished community refinement; refined "
+                      << refinement_summary.refined_community_count << " communities and added "
+                      << refinement_summary.added_community_count << " new community ids" << std::endl;
+            log_memory("After community refinement");
+        }
+
+        // Apply the final partition-only coarsening step before any GFA chunks
+        // or companion indexes consume the node-to-community assignments.
+        merge_undersized_communities(sorted_tmp_edgelist,
+                                     id_to_comm,
+                                     ncom,
+                                     min_chunk_nodes,
+                                     max_chunk_nodes);
+        log_memory("After small-community merging");
+
         std::cout << get_time() << ": Starting splitting and gzipping" << std::endl;
         // Write the chunked graph and its .idx into staged sibling paths rather than the final names.
         split_gzip_gfa(input_gfa, staged_out_gzip, tmp_dir, ncom, 150, node_id_map,
