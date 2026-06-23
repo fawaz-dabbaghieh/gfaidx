@@ -220,6 +220,10 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .implicit_value(true)
       .help("skip P/W subpath output; .pdx is still required to resolve coordinate ranks");
 
+    parser.add_argument("--with_walk_coordinates", "--with_walk_coords").default_value(false)
+      .implicit_value(true)
+      .help("emit W subpaths with SeqStart/SeqEnd coordinates using the resolved .pdx and indexed GFA S-line lengths");
+
     parser.add_argument("--debug_trace").default_value(false)
       .implicit_value(true)
       .help("enable detailed cross-index tracing for subgraph extraction");
@@ -230,6 +234,11 @@ int run_get_region(const argparse::ArgumentParser& program) {
         const auto input_gz = program.get<std::string>("in_gz");
         const auto region = parse_region(program.get<std::string>("region"));
         const auto reference = program.get<std::string>("reference");
+        const bool no_paths = program.get<bool>("no_paths");
+        const bool with_walk_coordinates = program.get<bool>("with_walk_coordinates");
+        if (no_paths && with_walk_coordinates) {
+            throw std::runtime_error("--with_walk_coordinates requires path output; remove --no_paths");
+        }
 
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
@@ -274,7 +283,8 @@ int run_get_region(const argparse::ArgumentParser& program) {
         options.ndx_path = program.get<std::string>("ndx");
         options.pdx_path = pdx_path;
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
-        options.include_paths = !program.get<bool>("no_paths");
+        options.include_paths = !no_paths;
+        options.with_walk_coordinates = with_walk_coordinates;
         options.debug_trace = program.get<bool>("debug_trace");
         return chunk::extract_subgraph_from_seeds(options, seed_nodes);
     } catch (const std::exception& err) {

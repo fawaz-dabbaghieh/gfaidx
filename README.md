@@ -237,6 +237,11 @@ Important options:
   cap the total seed plus BFS node count; it must be at least the seed count
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
+- `--with_walk_coordinates` / `--with_walk_coords`
+  emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates. The
+  command uses the resolved `.pdx` for W metadata and scans the indexed GFA S
+  lines for node lengths; if validation fails, it falls back to `* *`
+  coordinates and logs a warning.
 
 Example:
 

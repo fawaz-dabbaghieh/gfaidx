@@ -20,6 +20,7 @@
 #include "fs/gfa_line_parsers.h"
 #include "indexer/node_hash_index.h"
 #include "paths/path_index.h"
+#include "paths/walk_coords.h"
 #include "utils/debug_trace.h"
 #include "utils/Timer.h"
 
@@ -503,12 +504,30 @@ std::vector<std::uint32_t> resolve_selected_node_ranks(
 // Append indexed P/W subpaths for the extracted node set when a companion
 // .pdx exists. This keeps graph extraction and path extraction in one command.
 std::uint64_t emit_subpaths_if_available(std::ostream& out,
-                                const std::string& pdx_path,
-                                const std::vector<std::uint32_t>& node_ids) {
+                                         const std::string& pdx_path,
+                                         const std::vector<std::uint32_t>& node_ids,
+                                         const indexer::NodeHashIndex& node_index,
+                                         const std::string& source_gfa,
+                                         bool with_walk_coordinates) {
     paths::PathIndexReader index(pdx_path);
     const auto runs = paths::find_subpaths_for_node_ids(index, node_ids);
     if (runs.empty()) {
         return 0;
+    }
+
+    paths::WalkCoordState walk_coord_state;
+    std::unordered_map<std::uint32_t, paths::PathCoordCacheEntry> path_coord_cache;
+    if (with_walk_coordinates) {
+        // The indexed graph is the length source for get_region: P/W records live
+        // in .pdx, but all S records needed to compute W subwalk spans remain in
+        // the readable multi-member gzip.
+        walk_coord_state = paths::load_node_lengths_by_index(
+            index,
+            node_index,
+            source_gfa,
+            [](const std::string& message) {
+                warn_get_subgraph(message);
+            });
     }
 
     std::uint64_t emitted = 0;
@@ -518,6 +537,28 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
         const std::string subpath_name = std::string(base_name) + "#subpath_" +
             std::to_string(run.start_step) + "_" +
             std::to_string(run.start_step + run.step_count - 1);
+
+        if (with_walk_coordinates && walk_coord_state.usable && info.record_type == 'W') {
+            auto& coord_entry = paths::get_or_build_path_coord_cache(
+                index,
+                run.path_id,
+                walk_coord_state.node_lengths,
+                path_coord_cache,
+                [](const std::string& message) {
+                    warn_get_subgraph(message);
+                });
+            if (coord_entry.usable) {
+                paths::write_w_subpath_with_coords(out,
+                                                   index,
+                                                   coord_entry,
+                                                   run.start_step,
+                                                   run.step_count,
+                                                   subpath_name);
+                ++emitted;
+                continue;
+            }
+        }
+
         paths::write_subpath_as_gfa_line(out,
                                          index,
                                          run.path_id,
@@ -712,7 +753,12 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
         // rank-aligned path index.
         const auto node_ids = resolve_selected_node_ranks(node_index, node_names);
         info_get_subgraph("Starting indexed subpath extraction from " + index_paths.pdx_path);
-        const auto subpath_count = emit_subpaths_if_available(out, index_paths.pdx_path, node_ids);
+        const auto subpath_count = emit_subpaths_if_available(out,
+                                                             index_paths.pdx_path,
+                                                             node_ids,
+                                                             node_index,
+                                                             options.input_gz,
+                                                             options.with_walk_coordinates);
         info_get_subgraph("Finished indexed subpath extraction with " +
                           std::to_string(subpath_count) + " P/W records");
     }

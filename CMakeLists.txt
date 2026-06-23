@@ -38,6 +38,7 @@ add_executable(gfaidx
         src/paths/get_path_command.cpp
         src/paths/index_paths_command.cpp
         src/paths/path_index.cpp
+        src/paths/walk_coords.cpp
         src/utils/Memory.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
