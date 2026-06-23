@@ -185,15 +185,22 @@ gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
 ### `gfaidx index_coordinates`
 
 Build a standalone `.cdx` aligned to an existing `.ndx`. Reference W records
-are selected from the header `RS:Z` sample list. If no eligible reference W
-record exists, `SR:i:0` segments with `SN` and `SO` tags are indexed instead.
+are selected from the header `RS:Z` sample list. If the supplied GFA is an
+indexed gzip that no longer contains W records, `index_coordinates` can read the
+reference W metadata and steps from a companion `.pdx`. If no eligible reference
+W record exists, `SR:i:0` segments with `SN` and `SO` tags are indexed instead.
 
 ```bash
-gfaidx index_coordinates <in_gfa> <out.cdx> --ndx <graph.ndx> [options]
+gfaidx index_coordinates <in_gfa> <out.cdx> [options]
 ```
 
 Options:
 
+- `--ndx <path>`
+  node hash index; defaults to `<in_gfa>.ndx` when present
+- `--pdx <path>`
+  optional path index used as the source of reference W records when they are
+  absent from the supplied GFA; defaults to `<in_gfa>.pdx` when present
 - `--reference <sample>`
   index only this sample from the header `RS:Z` list; by default all listed
   reference samples are indexed
@@ -205,6 +212,8 @@ Example:
 ```bash
 gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
   --ndx chr22.gfa.gz.ndx --reference CHM13
+
+gfaidx index_coordinates chr22.gfa.gz chr22.gfa.gz.cdx --reference CHM13
 ```
 
 ### `gfaidx get_region`

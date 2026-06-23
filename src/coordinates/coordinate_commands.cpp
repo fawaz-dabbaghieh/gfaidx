@@ -101,7 +101,12 @@ void configure_index_coordinates_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--ndx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("node hash index whose sorted ranks must align with the coordinate index");
+      .help("node hash index whose sorted ranks must align with the coordinate index; defaults to <in_gfa>.ndx when present");
+
+    parser.add_argument("--pdx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("optional path index to source reference W records when they are absent from the GFA; defaults to <in_gfa>.pdx when present");
 
     parser.add_argument("--reference")
       .default_value(std::string(""))
@@ -117,15 +122,28 @@ void configure_index_coordinates_parser(argparse::ArgumentParser& parser) {
 int run_index_coordinates(const argparse::ArgumentParser& program) {
     const auto input_gfa = program.get<std::string>("in_gfa");
     const auto output_index = program.get<std::string>("out_index");
-    const auto node_index = program.get<std::string>("ndx");
+    auto node_index = program.get<std::string>("ndx");
+    auto path_index = program.get<std::string>("pdx");
     const auto reference = program.get<std::string>("reference");
 
     if (!file_exists(input_gfa.c_str())) {
         std::cerr << "Input GFA does not exist: " << input_gfa << std::endl;
         return 1;
     }
+    if (node_index.empty()) {
+        const auto inferred = infer_companion_path(input_gfa, ".ndx");
+        if (file_exists(inferred.c_str())) node_index = inferred;
+    }
+    if (path_index.empty()) {
+        const auto inferred = infer_companion_path(input_gfa, ".pdx");
+        if (file_exists(inferred.c_str())) path_index = inferred;
+    }
     if (node_index.empty() || !file_exists(node_index.c_str())) {
         std::cerr << "Provide an existing --ndx aligned to the input GFA" << std::endl;
+        return 1;
+    }
+    if (!path_index.empty() && !file_exists(path_index.c_str())) {
+        std::cerr << "Path index does not exist: " << path_index << std::endl;
         return 1;
     }
     if (file_exists(output_index.c_str())) {
@@ -140,7 +158,8 @@ int run_index_coordinates(const argparse::ArgumentParser& program) {
                                output_index,
                                node_index,
                                reference,
-                               parse_reader_options(program));
+                               parse_reader_options(program),
+                               path_index);
 
         // Reopen the completed file to validate its header and report exactly
         // what was published without retaining builder-only vectors in memory.

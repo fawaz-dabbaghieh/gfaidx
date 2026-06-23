@@ -8,6 +8,7 @@
 
 #include "fs/fs_helpers.h"
 #include "indexer/node_hash_index.h"
+#include "paths/path_index.h"
 
 namespace gfaidx::coordinates {
 namespace {
@@ -225,6 +226,65 @@ bool vector_contains(const std::vector<std::string>& values, std::string_view qu
     return std::find(values.begin(), values.end(), query) != values.end();
 }
 
+void append_reference_walks_from_path_index(const std::string& path_index_path,
+                                            const std::vector<std::string>& selected_references,
+                                            const std::vector<std::uint64_t>& node_lengths,
+                                            std::vector<BuildTrack>& tracks) {
+    if (path_index_path.empty() || selected_references.empty()) return;
+
+    paths::PathIndexReader path_index(path_index_path);
+    if (path_index.node_count() != node_lengths.size()) {
+        throw std::runtime_error(".pdx and .ndx node counts differ; rebuild them together");
+    }
+
+    // Reuse the rank-aligned .pdx step table when the GFA being indexed no
+    // longer carries original W records, as in the chunked multi-member output.
+    for (std::uint32_t path_id = 0; path_id < path_index.path_count(); ++path_id) {
+        const auto info = path_index.get_path_info(path_id);
+        if (info.record_type != 'W') continue;
+        if (!vector_contains(selected_references, info.sample_id)) continue;
+        if (info.seq_start < 0 || info.seq_end < 0) {
+            throw std::runtime_error("Reference W path in .pdx is missing SeqStart/SeqEnd: " +
+                                     std::string(info.name));
+        }
+        if (info.seq_end < info.seq_start) {
+            throw std::runtime_error("Reference W path in .pdx has SeqEnd before SeqStart: " +
+                                     std::string(info.name));
+        }
+
+        BuildTrack track;
+        track.source_type = 'W';
+        track.reference_name = std::string(info.sample_id);
+        track.sequence_name = std::string(info.seq_id);
+        track.haplotype = info.hap_index;
+        track.sequence_start = static_cast<std::uint64_t>(info.seq_start);
+        track.sequence_end = static_cast<std::uint64_t>(info.seq_end);
+
+        const auto steps = path_index.read_steps(path_id);
+        track.entries.reserve(steps.size());
+        std::uint64_t coordinate = track.sequence_start;
+        for (const auto& step : steps) {
+            if (step.node_id >= node_lengths.size() ||
+                node_lengths[step.node_id] == kMissingLength) {
+                throw std::runtime_error("Missing segment length for reference W step in .pdx path: " +
+                                         std::string(info.name));
+            }
+            const auto length = node_lengths[step.node_id];
+            if (length > std::numeric_limits<std::uint64_t>::max() - coordinate) {
+                throw std::runtime_error("Reference W coordinate overflow in .pdx path: " +
+                                         std::string(info.name));
+            }
+            track.entries.push_back(BuildEntry{coordinate, coordinate + length, step.node_id});
+            coordinate += length;
+        }
+        if (coordinate != track.sequence_end) {
+            throw std::runtime_error("Reference W span in .pdx is inconsistent with segment lengths: " +
+                                     std::string(info.name));
+        }
+        tracks.push_back(std::move(track));
+    }
+}
+
 std::uint64_t append_string(std::string& blob, std::string_view value) {
     const auto offset = static_cast<std::uint64_t>(blob.size());
     blob.append(value.data(), value.size());
@@ -244,7 +304,8 @@ bool build_coordinate_index(const std::string& input_gfa,
                             const std::string& output_index,
                             const std::string& node_index_path,
                             const std::string& reference_filter,
-                            const Reader::Options& reader_options) {
+                            const Reader::Options& reader_options,
+                            const std::string& path_index_path) {
     indexer::NodeHashIndex node_index(node_index_path);
     std::vector<std::uint64_t> node_lengths(static_cast<std::size_t>(node_index.size()),
                                             kMissingLength);
@@ -308,7 +369,7 @@ bool build_coordinate_index(const std::string& input_gfa,
     std::sort(reference_samples.begin(), reference_samples.end());
     reference_samples.erase(std::unique(reference_samples.begin(), reference_samples.end()),
                             reference_samples.end());
-    if (!reference_filter.empty() &&
+    if (!reference_filter.empty() && !reference_samples.empty() &&
         !vector_contains(reference_samples, reference_filter)) {
         throw std::runtime_error("Reference sample '" + reference_filter +
                                  "' is not listed by an H-line RS:Z tag");
@@ -384,8 +445,15 @@ bool build_coordinate_index(const std::string& input_gfa,
         }
     }
 
+    if (tracks.empty()) {
+        append_reference_walks_from_path_index(path_index_path,
+                                               selected_references,
+                                               node_lengths,
+                                               tracks);
+    }
+
     if (tracks.empty() && !reference_filter.empty()) {
-        throw std::runtime_error("No W records were found for requested RS reference sample '" +
+        throw std::runtime_error("No W records were found in the GFA or .pdx for reference sample '" +
                                  reference_filter + "'");
     }
 

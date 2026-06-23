@@ -29,7 +29,8 @@ bool build_coordinate_index(const std::string& input_gfa,
                             const std::string& output_index,
                             const std::string& node_index_path,
                             const std::string& reference_filter = std::string(""),
-                            const Reader::Options& reader_options = Reader::Options{});
+                            const Reader::Options& reader_options = Reader::Options{},
+                            const std::string& path_index_path = std::string(""));
 
 // Read the compact .cdx metadata eagerly while leaving the potentially large
 // coordinate entry table on disk for binary-search and range reads.
