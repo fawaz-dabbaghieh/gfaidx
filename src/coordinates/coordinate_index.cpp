@@ -226,6 +226,73 @@ bool vector_contains(const std::vector<std::string>& values, std::string_view qu
     return std::find(values.begin(), values.end(), query) != values.end();
 }
 
+std::vector<std::string> scan_header_reference_samples(const std::string& input_gfa,
+                                                       const Reader::Options& reader_options) {
+    std::vector<std::string> references;
+    Reader reader(reader_options);
+    if (!reader.open(input_gfa)) {
+        throw std::runtime_error("Could not open GFA for reference header check: " + input_gfa);
+    }
+
+    // Only inspect the leading header block. If there is no RS:Z header, callers
+    // must continue to the full scan because W lines or rGFA S tags may still be
+    // usable coordinate sources.
+    std::string_view line;
+    while (reader.read_line(line)) {
+        if (line.empty()) continue;
+        if (line[0] != 'H') break;
+        const auto parsed = parse_reference_samples(line);
+        references.insert(references.end(), parsed.begin(), parsed.end());
+    }
+
+    std::sort(references.begin(), references.end());
+    references.erase(std::unique(references.begin(), references.end()), references.end());
+    return references;
+}
+
+bool path_index_has_reference_walk(const std::string& path_index_path,
+                                   std::string_view reference_name) {
+    paths::PathIndexReader path_index(path_index_path);
+
+    // The .pdx metadata table is small compared with the graph body, so checking
+    // only W record sample ids here avoids a wasted full S-line scan for a
+    // misspelled or absent explicit --reference.
+    for (std::uint32_t path_id = 0; path_id < path_index.path_count(); ++path_id) {
+        const auto info = path_index.get_path_info(path_id);
+        if (info.record_type == 'W' && info.sample_id == reference_name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void validate_explicit_reference_before_full_scan(const std::string& input_gfa,
+                                                  const std::string& path_index_path,
+                                                  const std::string& reference_filter,
+                                                  const Reader::Options& reader_options) {
+    if (reference_filter.empty()) return;
+
+    if (!path_index_path.empty()) {
+        // When a .pdx is available it is the cheapest authoritative source for
+        // indexed W metadata. Fail before loading .ndx or scanning graph records
+        // if the requested reference sample does not exist there.
+        if (!path_index_has_reference_walk(path_index_path, reference_filter)) {
+            throw std::runtime_error("Reference sample '" + reference_filter +
+                                     "' was not found in the path index: " +
+                                     path_index_path);
+        }
+        return;
+    }
+
+    const auto header_references = scan_header_reference_samples(input_gfa, reader_options);
+    if (!header_references.empty() && !vector_contains(header_references, reference_filter)) {
+        // An RS:Z header explicitly lists the reference namespace, so a missing
+        // requested sample can be rejected without scanning all S lines.
+        throw std::runtime_error("Reference sample '" + reference_filter +
+                                 "' is not listed by an H-line RS:Z tag");
+    }
+}
+
 void append_reference_walks_from_path_index(const std::string& path_index_path,
                                             const std::vector<std::string>& selected_references,
                                             const std::vector<std::uint64_t>& node_lengths,
@@ -306,6 +373,11 @@ bool build_coordinate_index(const std::string& input_gfa,
                             const std::string& reference_filter,
                             const Reader::Options& reader_options,
                             const std::string& path_index_path) {
+    validate_explicit_reference_before_full_scan(input_gfa,
+                                                 path_index_path,
+                                                 reference_filter,
+                                                 reader_options);
+
     indexer::NodeHashIndex node_index(node_index_path);
     std::vector<std::uint64_t> node_lengths(static_cast<std::size_t>(node_index.size()),
                                             kMissingLength);
