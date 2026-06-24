@@ -162,6 +162,28 @@ bool lookup_walk_path_id(const PathIndexReader& index,
     return found;
 }
 
+void write_indexed_path_names(std::ostream& out, const PathIndexReader& index) {
+    for (std::uint32_t path_id = 0; path_id < index.path_count(); ++path_id) {
+        const auto info = index.get_path_info(path_id);
+        if (info.record_type == 'W') {
+            // W records do not have one path-name field in GFA; print the fields
+            // that identify the walk coordinate namespace and interval.
+            out << "W\t" << info.sample_id << '\t' << info.hap_index << '\t'
+                << info.seq_id << '\t';
+            if (info.seq_start >= 0) out << info.seq_start;
+            else out << '*';
+            out << '\t';
+            if (info.seq_end >= 0) out << info.seq_end;
+            else out << '*';
+            out << '\n';
+        } else {
+            // For P records the path name is the second field of the original
+            // GFA P line, stored as info.name in the path index.
+            out << "P\t" << info.name << '\n';
+        }
+    }
+}
+
 }  // namespace
 
 void configure_get_path_parser(argparse::ArgumentParser& parser) {
@@ -177,6 +199,10 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
       .default_value(std::string(""))
       .nargs(1)
       .help("canonical path id; for W-lines use sample|hap|seq_id|start|end");
+
+    parser.add_argument("--print_path_names").default_value(false)
+      .implicit_value(true)
+      .help("print indexed P path names and W walk coordinate identifiers, then exit");
 
     parser.add_argument("--sample")
       .default_value(std::string(""))
@@ -247,18 +273,21 @@ int run_get_path(const argparse::ArgumentParser& program) {
     const auto subgraph_gfa = program.get<std::string>("subgraph_gfa");
     const auto source_gfa = program.get<std::string>("source_gfa");
     const bool with_walk_coords = program.get<bool>("with_walk_coords");
+    const bool print_path_names = program.get<bool>("print_path_names");
 
     const bool has_node_query = !nodes_csv.empty() || !nodes_file.empty() || !subgraph_gfa.empty();
     const bool has_structured_walk_query = !sample_id.empty() || !hap_index_str.empty() ||
                                            !seq_id.empty() || !seq_start_str.empty() || !seq_end_str.empty();
+    const int query_mode_count = (print_path_names ? 1 : 0) +
+                                 (!path_name.empty() ? 1 : 0) +
+                                 (has_structured_walk_query ? 1 : 0) +
+                                 (has_node_query ? 1 : 0);
 
-    if (path_name.empty() && !has_structured_walk_query && !has_node_query) {
-        std::cerr << "Provide --path_id, a structured W lookup, or a node set via --nodes / --nodes_file / --subgraph_gfa" << std::endl;
+    if (query_mode_count == 0) {
+        std::cerr << "Provide --print_path_names, --path_id, a structured W lookup, or a node set via --nodes / --nodes_file / --subgraph_gfa" << std::endl;
         return 1;
     }
-    if ((!path_name.empty() && has_structured_walk_query) ||
-        (!path_name.empty() && has_node_query) ||
-        (has_structured_walk_query && has_node_query)) {
+    if (query_mode_count > 1) {
         std::cerr << "Use only one lookup mode at a time" << std::endl;
         return 1;
     }
@@ -289,6 +318,11 @@ int run_get_path(const argparse::ArgumentParser& program) {
 
     try {
         PathIndexReader index(input_index);
+
+        if (print_path_names) {
+            write_indexed_path_names(std::cout, index);
+            return 0;
+        }
 
         if (!path_name.empty()) {
             std::uint32_t path_id = 0;

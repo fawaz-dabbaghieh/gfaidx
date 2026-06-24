@@ -336,11 +336,12 @@ gfaidx index_paths graph.gfa graph.paths.pdx --ndx graph.gfa.gz.ndx
 
 ### `gfaidx get_path`
 
-Query a `.pdx` index in one of three modes:
+Query a `.pdx` index in one of four modes:
 
-1. full path lookup by canonical path ID
-2. full `W` lookup by structured fields
-3. node-set or subgraph lookup returning subpaths/subwalks
+1. list indexed `P` path names and `W` walk coordinate identifiers
+2. full path lookup by canonical path ID
+3. full `W` lookup by structured fields
+4. node-set or subgraph lookup returning subpaths/subwalks
 
 ```bash
 gfaidx get_path <in_index.pdx> [query mode options]
@@ -358,7 +359,19 @@ General options:
   first tries the companion file obtained by replacing the input `.pdx` suffix
   with `.ndx`
 
-#### Mode 1: exact path ID lookup
+#### Mode 1: print path names
+
+```bash
+gfaidx get_path graph.pdx --print_path_names
+```
+
+Output is tab-separated:
+
+- `P <path_name>` for original `P` records
+- `W <sample> <hap_index> <seq_id> <seq_start|*> <seq_end|*>` for original
+  `W` records
+
+#### Mode 2: exact path ID lookup
 
 ```bash
 gfaidx get_path graph.pdx --path_id <id>
@@ -380,7 +393,7 @@ Example:
 gfaidx get_path graph.pdx --path_id loopbackP
 ```
 
-#### Mode 2: structured `W` lookup
+#### Mode 3: structured `W` lookup
 
 ```bash
 gfaidx get_path graph.pdx --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
@@ -407,7 +420,7 @@ Example:
 gfaidx get_path graph.pdx --sample HG002 --hap_index 1 --seq_id chr22
 ```
 
-#### Mode 3: node-set or subgraph lookup
+#### Mode 4: node-set or subgraph lookup
 
 Return all `P`/`W` runs that remain contiguous inside the requested node set.
 
