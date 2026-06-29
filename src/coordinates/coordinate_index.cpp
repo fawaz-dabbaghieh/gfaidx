@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -352,6 +353,195 @@ void append_reference_walks_from_path_index(const std::string& path_index_path,
     }
 }
 
+bool is_ignored_path_names_line(std::string_view line) {
+    // Files produced by get_path --print_path_names are plain P/W rows. Ignore
+    // comments and the version banner in case stderr was redirected with stdout.
+    constexpr std::string_view version_prefix = "gfaidx version ";
+    return line.empty() || line[0] == '#' ||
+           (line.size() >= version_prefix.size() &&
+            line.substr(0, version_prefix.size()) == version_prefix);
+}
+
+std::string make_walk_key_from_printed_fields(const std::vector<std::string_view>& fields,
+                                              std::size_t line_number) {
+    // W rows from --print_path_names are converted back to the canonical .pdx
+    // lookup key: sample|hap|seq_id|start|end.
+    if (fields.size() != 6) {
+        throw std::runtime_error("Path/walk names line " + std::to_string(line_number) +
+                                 " must be W<TAB>sample<TAB>hap<TAB>seq<TAB>start<TAB>end");
+    }
+    for (std::size_t i = 1; i < fields.size(); ++i) {
+        if (fields[i].empty()) {
+            throw std::runtime_error("Path/walk names line " + std::to_string(line_number) +
+                                     " contains an empty W field");
+        }
+    }
+    if (fields[4] == "*" || fields[5] == "*") {
+        throw std::runtime_error("Path/walk names line " + std::to_string(line_number) +
+                                 " selects a W record without concrete coordinates");
+    }
+    return std::string(fields[1]) + "|" + std::string(fields[2]) + "|" +
+           std::string(fields[3]) + "|" + std::string(fields[4]) + "|" +
+           std::string(fields[5]);
+}
+
+std::vector<std::uint32_t> load_requested_coordinate_path_ids(
+    const std::string& path_names_file,
+    const paths::PathIndexReader& path_index) {
+    std::ifstream in(path_names_file);
+    if (!in) {
+        throw std::runtime_error("Failed to open path/walk names file: " + path_names_file);
+    }
+
+    // Keep the selection as a sorted vector of ids. This avoids a map/set while
+    // still deduplicating repeated rows cheaply after parsing.
+    std::vector<std::uint32_t> path_ids;
+    std::string line;
+    std::size_t line_number = 0;
+    while (std::getline(in, line)) {
+        ++line_number;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (is_ignored_path_names_line(line)) continue;
+
+        const auto fields = split_tab_fields(line);
+        std::string path_key;
+        if (fields[0] == "P") {
+            if (fields.size() != 2 || fields[1].empty()) {
+                throw std::runtime_error("Path/walk names line " +
+                                         std::to_string(line_number) +
+                                         " must be P<TAB>path_name");
+            }
+            path_key = std::string(fields[1]);
+        } else if (fields[0] == "W") {
+            path_key = make_walk_key_from_printed_fields(fields, line_number);
+        } else {
+            throw std::runtime_error("Path/walk names line " + std::to_string(line_number) +
+                                     " must start with P or W");
+        }
+
+        std::uint32_t path_id = 0;
+        if (!path_index.lookup_path_id(path_key, path_id)) {
+            throw std::runtime_error("Selected path/walk from line " +
+                                     std::to_string(line_number) +
+                                     " was not found in the .pdx: " + path_key);
+        }
+        path_ids.push_back(path_id);
+    }
+    if (!in.eof()) {
+        throw std::runtime_error("Failed while reading path/walk names file: " + path_names_file);
+    }
+    if (path_ids.empty()) {
+        throw std::runtime_error("Path/walk names file did not select any P or W records");
+    }
+
+    std::sort(path_ids.begin(), path_ids.end());
+    path_ids.erase(std::unique(path_ids.begin(), path_ids.end()), path_ids.end());
+    return path_ids;
+}
+
+std::uint64_t append_entries_from_indexed_steps(const paths::PathIndexReader& path_index,
+                                                std::uint32_t path_id,
+                                                std::string_view path_name,
+                                                std::uint64_t coordinate,
+                                                const std::vector<std::uint64_t>& node_lengths,
+                                                std::vector<BuildEntry>& entries) {
+    // The .pdx step table is already rank-aligned to .ndx, so coordinate tracks
+    // only need the segment lengths collected from S lines in the indexed GFA.
+    const auto steps = path_index.read_steps(path_id);
+    entries.reserve(entries.size() + steps.size());
+    for (const auto& step : steps) {
+        if (step.node_id >= node_lengths.size() ||
+            node_lengths[step.node_id] == kMissingLength) {
+            throw std::runtime_error("Missing segment length for coordinate path step in .pdx path: " +
+                                     std::string(path_name));
+        }
+        const auto length = node_lengths[step.node_id];
+        if (length > std::numeric_limits<std::uint64_t>::max() - coordinate) {
+            throw std::runtime_error("Coordinate overflow in .pdx path: " +
+                                     std::string(path_name));
+        }
+        entries.push_back(BuildEntry{coordinate, coordinate + length, step.node_id});
+        coordinate += length;
+    }
+    return coordinate;
+}
+
+bool p_path_has_no_overlaps(std::string_view overlap_field) {
+    // Coordinate indexing of P lines assumes path coordinates advance by node
+    // length. A real overlap/CIGAR field would make those coordinates ambiguous.
+    return overlap_field.empty() || overlap_field == "*";
+}
+
+void append_selected_paths_from_path_index(const std::string& path_index_path,
+                                           const std::vector<std::uint32_t>& selected_path_ids,
+                                           const std::vector<std::uint64_t>& node_lengths,
+                                           std::vector<BuildTrack>& tracks) {
+    if (selected_path_ids.empty()) return;
+
+    paths::PathIndexReader path_index(path_index_path);
+    if (path_index.node_count() != node_lengths.size()) {
+        throw std::runtime_error(".pdx and .ndx node counts differ; rebuild them together");
+    }
+
+    // The selection file is explicit: W records keep their original coordinate
+    // interval, while P records get a path-local 0-based coordinate system.
+    for (const auto path_id : selected_path_ids) {
+        const auto info = path_index.get_path_info(path_id);
+        if (info.record_type == 'W') {
+            if (info.seq_start < 0 || info.seq_end < 0) {
+                throw std::runtime_error("Selected W path in .pdx is missing SeqStart/SeqEnd: " +
+                                         std::string(info.name));
+            }
+            if (info.seq_end < info.seq_start) {
+                throw std::runtime_error("Selected W path in .pdx has SeqEnd before SeqStart: " +
+                                         std::string(info.name));
+            }
+
+            BuildTrack track;
+            track.source_type = 'W';
+            track.reference_name = std::string(info.sample_id);
+            track.sequence_name = std::string(info.seq_id);
+            track.haplotype = info.hap_index;
+            track.sequence_start = static_cast<std::uint64_t>(info.seq_start);
+            track.sequence_end = static_cast<std::uint64_t>(info.seq_end);
+
+            const auto coordinate = append_entries_from_indexed_steps(path_index,
+                                                                      path_id,
+                                                                      info.name,
+                                                                      track.sequence_start,
+                                                                      node_lengths,
+                                                                      track.entries);
+            if (coordinate != track.sequence_end) {
+                throw std::runtime_error("Selected W span in .pdx is inconsistent with segment lengths: " +
+                                         std::string(info.name));
+            }
+            tracks.push_back(std::move(track));
+        } else if (info.record_type == 'P') {
+            if (!p_path_has_no_overlaps(info.overlap_field)) {
+                throw std::runtime_error("Cannot coordinate-index P path '" +
+                                         std::string(info.name) +
+                                         "' because its overlap field is not '*'");
+            }
+
+            BuildTrack track;
+            track.source_type = 'P';
+            track.sequence_name = std::string(info.name);
+            track.haplotype = 0;
+            track.sequence_start = 0;
+            track.sequence_end = append_entries_from_indexed_steps(path_index,
+                                                                   path_id,
+                                                                   info.name,
+                                                                   0,
+                                                                   node_lengths,
+                                                                   track.entries);
+            tracks.push_back(std::move(track));
+        } else {
+            throw std::runtime_error("Selected .pdx record is neither P nor W: " +
+                                     std::string(info.name));
+        }
+    }
+}
+
 std::uint64_t append_string(std::string& blob, std::string_view value) {
     const auto offset = static_cast<std::uint64_t>(blob.size());
     blob.append(value.data(), value.size());
@@ -372,11 +562,27 @@ bool build_coordinate_index(const std::string& input_gfa,
                             const std::string& node_index_path,
                             const std::string& reference_filter,
                             const Reader::Options& reader_options,
-                            const std::string& path_index_path) {
-    validate_explicit_reference_before_full_scan(input_gfa,
-                                                 path_index_path,
-                                                 reference_filter,
-                                                 reader_options);
+                            const std::string& path_index_path,
+                            const std::string& path_names_file) {
+    if (!path_names_file.empty() && !reference_filter.empty()) {
+        throw std::runtime_error("Use either a path/walk names file or a reference filter, not both");
+    }
+    if (!path_names_file.empty() && path_index_path.empty()) {
+        throw std::runtime_error("Path/walk coordinate selection requires a .pdx path index");
+    }
+
+    std::vector<std::uint32_t> selected_path_ids;
+    if (!path_names_file.empty()) {
+        // Validate the user-selected P/W names before scanning the potentially
+        // large GFA body. The node lengths are still collected later from S lines.
+        paths::PathIndexReader path_index(path_index_path);
+        selected_path_ids = load_requested_coordinate_path_ids(path_names_file, path_index);
+    } else {
+        validate_explicit_reference_before_full_scan(input_gfa,
+                                                     path_index_path,
+                                                     reference_filter,
+                                                     reader_options);
+    }
 
     indexer::NodeHashIndex node_index(node_index_path);
     std::vector<std::uint64_t> node_lengths(static_cast<std::size_t>(node_index.size()),
@@ -455,7 +661,12 @@ bool build_coordinate_index(const std::string& input_gfa,
     }
 
     std::vector<BuildTrack> tracks;
-    if (!selected_references.empty()) {
+    if (!selected_path_ids.empty()) {
+        append_selected_paths_from_path_index(path_index_path,
+                                              selected_path_ids,
+                                              node_lengths,
+                                              tracks);
+    } else if (!selected_references.empty()) {
         // Pass 2 parses only W records belonging to selected reference samples;
         // non-reference haplotype walks never enter the coordinate index.
         Reader second_pass(reader_options);
@@ -517,7 +728,7 @@ bool build_coordinate_index(const std::string& input_gfa,
         }
     }
 
-    if (tracks.empty()) {
+    if (tracks.empty() && selected_path_ids.empty()) {
         append_reference_walks_from_path_index(path_index_path,
                                                selected_references,
                                                node_lengths,
@@ -728,7 +939,9 @@ CoordinateIndexReader::CoordinateIndexReader(const std::string& index_path)
             record.entry_begin > entry_count_ ||
             record.entry_count > entry_count_ - record.entry_begin ||
             record.sequence_end < record.sequence_start ||
-            (record.source_type != 'W' && record.source_type != 'S')) {
+            (record.source_type != 'W' &&
+             record.source_type != 'P' &&
+             record.source_type != 'S')) {
             throw std::runtime_error("Coordinate index track metadata is invalid");
         }
         tracks_.push_back(CoordinateTrackInfo{
@@ -793,11 +1006,13 @@ std::vector<std::uint32_t> CoordinateIndexReader::query_node_ranks(
     // When the caller omits a reference, accept exactly one reference namespace
     // for the requested sequence and reject ambiguous multi-reference queries.
     std::string inferred_reference;
+    bool have_inferred_reference = false;
     if (reference_name.empty()) {
         for (const auto& track : tracks_) {
             if (track.sequence_name != sequence_name) continue;
-            if (inferred_reference.empty()) {
+            if (!have_inferred_reference) {
                 inferred_reference = track.reference_name;
+                have_inferred_reference = true;
             } else if (track.reference_name != inferred_reference) {
                 throw std::runtime_error("Coordinate sequence '" +
                                          std::string(sequence_name) +

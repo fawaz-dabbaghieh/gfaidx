@@ -93,7 +93,7 @@ Reader::Options parse_reader_options(const argparse::ArgumentParser& program) {
 
 void configure_index_coordinates_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("in_gfa")
-      .help("input GFA containing reference W records or rGFA SR:i:0 segments");
+      .help("input GFA or indexed GFA gzip; S lines provide lengths, and W/P records may come from the GFA or .pdx");
 
     parser.add_argument("out_index")
       .help("output standalone coordinate index (.cdx)");
@@ -106,12 +106,17 @@ void configure_index_coordinates_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--pdx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("optional path index to source reference W records when they are absent from the GFA; defaults to <in_gfa>.pdx when present");
+      .help("optional path index to source selected P/W records or fallback reference W records; defaults to <in_gfa>.pdx when present");
 
     parser.add_argument("--reference")
       .default_value(std::string(""))
       .nargs(1)
       .help("optional RS:Z reference sample to index; defaults to every listed reference");
+
+    parser.add_argument("--path_names_file")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("optional file produced by get_path --print_path_names; selected P paths and W walks are indexed from the .pdx");
 
     parser.add_argument("--progress_every")
       .default_value(std::string("1000000"))
@@ -125,6 +130,7 @@ int run_index_coordinates(const argparse::ArgumentParser& program) {
     auto node_index = program.get<std::string>("ndx");
     auto path_index = program.get<std::string>("pdx");
     const auto reference = program.get<std::string>("reference");
+    const auto path_names_file = program.get<std::string>("path_names_file");
 
     if (!file_exists(input_gfa.c_str())) {
         std::cerr << "Input GFA does not exist: " << input_gfa << std::endl;
@@ -146,6 +152,18 @@ int run_index_coordinates(const argparse::ArgumentParser& program) {
         std::cerr << "Path index does not exist: " << path_index << std::endl;
         return 1;
     }
+    if (!path_names_file.empty() && !file_exists(path_names_file.c_str())) {
+        std::cerr << "Path/walk names file does not exist: " << path_names_file << std::endl;
+        return 1;
+    }
+    if (!path_names_file.empty() && path_index.empty()) {
+        std::cerr << "--path_names_file requires an existing --pdx or companion <in_gfa>.pdx" << std::endl;
+        return 1;
+    }
+    if (!path_names_file.empty() && !reference.empty()) {
+        std::cerr << "Use either --path_names_file or --reference; the names file is already an explicit selection" << std::endl;
+        return 1;
+    }
     if (file_exists(output_index.c_str())) {
         std::cerr << "Output coordinate index already exists: " << output_index << std::endl;
         return 1;
@@ -159,7 +177,8 @@ int run_index_coordinates(const argparse::ArgumentParser& program) {
                                node_index,
                                reference,
                                parse_reader_options(program),
-                               path_index);
+                               path_index,
+                               path_names_file);
 
         // Reopen the completed file to validate its header and report exactly
         // what was published without retaining builder-only vectors in memory.

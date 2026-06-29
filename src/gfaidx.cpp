@@ -13,7 +13,7 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.5.3";
+    constexpr const char* version = "1.5.4";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
     program.add_subparser(get_path);
 
     argparse::ArgumentParser index_coordinates("index_coordinates", version);
-    index_coordinates.add_description("Build a reference-coordinate sidecar from RS W records or SR:i:0 segments");
+    index_coordinates.add_description("Build a coordinate sidecar from selected P/W records, RS W records, or SR:i:0 segments");
     gfaidx::coordinates::configure_index_coordinates_parser(index_coordinates);
     program.add_subparser(index_coordinates);
 

@@ -11,9 +11,9 @@
 
 namespace gfaidx::coordinates {
 
-// Public metadata for one continuous reference-coordinate track fragment.
+// Public metadata for one continuous coordinate track fragment.
 struct CoordinateTrackInfo {
-    char source_type{};  // 'W' for a reference walk or 'S' for rGFA SR:i:0 nodes.
+    char source_type{};  // 'W' walk, 'P' path, or 'S' rGFA SR:i:0 nodes.
     std::string reference_name;
     std::string sequence_name;
     std::uint64_t haplotype{};
@@ -30,7 +30,8 @@ bool build_coordinate_index(const std::string& input_gfa,
                             const std::string& node_index_path,
                             const std::string& reference_filter = std::string(""),
                             const Reader::Options& reader_options = Reader::Options{},
-                            const std::string& path_index_path = std::string(""));
+                            const std::string& path_index_path = std::string(""),
+                            const std::string& path_names_file = std::string(""));
 
 // Read the compact .cdx metadata eagerly while leaving the potentially large
 // coordinate entry table on disk for binary-search and range reads.

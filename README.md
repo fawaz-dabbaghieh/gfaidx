@@ -189,6 +189,8 @@ are selected from the header `RS:Z` sample list. If the supplied GFA is an
 indexed gzip that no longer contains W records, `index_coordinates` can read the
 reference W metadata and steps from a companion `.pdx`. If no eligible reference
 W record exists, `SR:i:0` segments with `SN` and `SO` tags are indexed instead.
+Alternatively, provide a filtered `get_path --print_path_names` output file to
+index explicit P paths and W walks from the `.pdx`.
 
 ```bash
 gfaidx index_coordinates <in_gfa> <out.cdx> [options]
@@ -204,6 +206,12 @@ Options:
 - `--reference <sample>`
   index only this sample from the header `RS:Z` list; by default all listed
   reference samples are indexed
+- `--path_names_file <path>`
+  tab-separated file in the same format emitted by
+  `gfaidx get_path graph.pdx --print_path_names`; selected `W` rows keep their
+  W coordinates, while selected `P` rows are indexed as path-local coordinates
+  starting at 0 and advancing by segment length. P paths with non-`*` overlaps
+  are rejected because their coordinate lengths would be ambiguous.
 - `--progress_every <N>`
   report input progress every `N` lines; `0` disables progress logging
 
@@ -214,6 +222,10 @@ gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
   --ndx chr22.gfa.gz.ndx --reference CHM13
 
 gfaidx index_coordinates chr22.gfa.gz chr22.gfa.gz.cdx --reference CHM13
+
+gfaidx get_path graph.gfa.gz.pdx --print_path_names > path_names.tsv
+# edit or filter path_names.tsv, then index exactly those P/W records
+gfaidx index_coordinates graph.gfa.gz graph.gfa.gz.cdx --path_names_file path_names.tsv
 ```
 
 ### `gfaidx get_region`
@@ -370,6 +382,10 @@ Output is tab-separated:
 - `P <path_name>` for original `P` records
 - `W <sample> <hap_index> <seq_id> <seq_start|*> <seq_end|*>` for original
   `W` records
+
+This output can be filtered and supplied to
+`gfaidx index_coordinates --path_names_file` to coordinate-index selected paths
+or walks.
 
 #### Mode 2: exact path ID lookup
 
