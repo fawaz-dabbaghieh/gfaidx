@@ -1,0 +1,4 @@
+# Fill one row per node-neighborhood query.
+# context values are taken from config.yaml: node_contexts.
+graph	query_id	node_id	notes
+hprc_minigraph_chm13	s100000_chr8	s100000	random real minigraph node; SN=chr8 SO=62408685 LN=175 SR=0

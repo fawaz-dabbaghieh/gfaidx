@@ -1,0 +1,10 @@
+# Fill one row per graph. Paths may be absolute or relative to the repository root.
+# graph IDs should be file-safe: letters, digits, dots, underscores, and dashes.
+#
+# gfaidx_path_names_file is optional. If present, it should be produced by:
+#   gfaidx get_path <graph>.pdx --print_path_names
+# and filtered to the P/W records to coordinate-index.
+#
+# gfaidx_reference is optional and is used only when gfaidx_path_names_file is empty.
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_index_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
+hprc_minigraph_chm13	test_graphs/hprc_minigraph/hprc-v1.0-minigraph-chm13.gfa									

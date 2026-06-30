@@ -5,6 +5,10 @@ build-asan/
 .codex
 review_tmp/
 benchmarks/
+.snakemake/
+benchmark/results/
+benchmark/.cache/
+benchmark/.snakemake/
 __pycache__
 *egg-info
 build/

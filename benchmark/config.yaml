@@ -1,0 +1,45 @@
+# Default configuration for the gfaidx/vg/odgi benchmark workflow.
+#
+# Paths are interpreted relative to the repository root unless they are already
+# absolute. Keep generated files under benchmark/results so the workflow stays
+# separate from the older benchmarks/ directory.
+
+graphs_tsv: benchmark/graphs.tsv
+node_queries_tsv: benchmark/node_queries.tsv
+region_queries_tsv: benchmark/region_queries.tsv
+results_dir: benchmark/results
+
+# Snakemake will also enforce its own --cores setting. These values are passed
+# to tools with thread-aware commands where the tool supports it.
+threads: 1
+
+# Context values used for vg/odgi node-neighborhood queries. gfaidx is then run
+# with --max_nodes equal to the node count produced by each source tool.
+node_contexts: [0, 1, 2, 5, 10]
+
+# Process-tree RSS sampling interval in seconds. Smaller values catch shorter
+# memory spikes at the cost of slightly more sampling overhead.
+sample_interval_seconds: 0.10
+
+tools:
+  gfaidx: build/gfaidx
+  vg: vg
+  odgi: odgi
+  python: python3
+
+gfaidx:
+  index_extra: "--progress_every 0"
+  coordinate_extra: "--progress_every 0"
+  get_subgraph_extra: ""
+  get_region_extra: ""
+
+vg:
+  convert_extra: ""
+  index_extra: ""
+  find_extra: ""
+
+odgi:
+  build_extra: ""
+  pathindex_extra: ""
+  stepindex_extra: ""
+  extract_extra: ""

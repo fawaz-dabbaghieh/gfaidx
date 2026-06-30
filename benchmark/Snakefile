@@ -1,0 +1,605 @@
+# Snakemake workflow for benchmarking gfaidx against vg and odgi.
+#
+# The workflow is intentionally manifest-driven. Fill benchmark/graphs.tsv,
+# benchmark/node_queries.tsv, and benchmark/region_queries.tsv, then run this
+# Snakefile from the repository root.
+
+configfile: "benchmark/config.yaml"
+
+import csv
+import shlex
+from pathlib import Path
+
+
+BENCH_DIR = Path(workflow.basedir)
+REPO_ROOT = BENCH_DIR.parent
+RESULTS = Path(config.get("results_dir", "benchmark/results"))
+TABLES = RESULTS / "tables"
+SCRIPTS = BENCH_DIR / "scripts"
+
+PYTHON = config.get("tools", {}).get("python", "python3")
+GFAIDX = config.get("tools", {}).get("gfaidx", "build/gfaidx")
+VG = config.get("tools", {}).get("vg", "vg")
+ODGI = config.get("tools", {}).get("odgi", "odgi")
+
+THREADS = int(config.get("threads", 1))
+SAMPLE_INTERVAL = str(config.get("sample_interval_seconds", 0.10))
+CONTEXTS = [str(value) for value in config.get("node_contexts", [])]
+
+
+def repo_path(value):
+    """Return an absolute-or-repository-relative path as a string."""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str(REPO_ROOT / path)
+
+
+def read_tsv(path_value):
+    """Read a TSV manifest, skipping blank lines and comments."""
+    path = Path(repo_path(path_value))
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        lines = [line for line in handle if line.strip() and not line.startswith("#")]
+    if not lines:
+        return []
+    return list(csv.DictReader(lines, delimiter="\t"))
+
+
+def clean(value):
+    """Normalize optional TSV cells and config values."""
+    return str(value or "").strip()
+
+
+def extra(section, key):
+    """Return one optional extra-argument string from config.yaml."""
+    return clean(config.get(section, {}).get(key, ""))
+
+
+def join_options(*parts):
+    """Join optional command-line fragments while ignoring empty values."""
+    return " ".join(clean(part) for part in parts if clean(part))
+
+
+def graph_extra(wildcards, key):
+    """Fetch one per-graph extra option string."""
+    return clean(GRAPHS[wildcards.graph].get(key, ""))
+
+
+def graph_gfa(wildcards):
+    """Return the input GFA path for a graph wildcard."""
+    return repo_path(GRAPHS[wildcards.graph]["gfa"])
+
+
+def gfaidx_coordinate_selection(wildcards):
+    """Build gfaidx coordinate-selection arguments for one graph."""
+    row = GRAPHS[wildcards.graph]
+    path_names_file = repo_path(row.get("gfaidx_path_names_file", ""))
+    reference = clean(row.get("gfaidx_reference", ""))
+    if path_names_file:
+        return f"--path_names_file {shlex.quote(path_names_file)}"
+    if reference:
+        return f"--reference {shlex.quote(reference)}"
+    return ""
+
+
+def gfaidx_region_reference(wildcards):
+    """Build the optional get_region --reference argument for one query."""
+    query = REGION_BY_ID[(wildcards.graph, wildcards.query)]
+    graph = GRAPHS[wildcards.graph]
+    reference = clean(query.get("gfaidx_reference", "")) or clean(graph.get("gfaidx_reference", ""))
+    if reference:
+        return f"--reference {shlex.quote(reference)}"
+    return ""
+
+
+def gfaidx_prefix(graph):
+    """Return the gfaidx indexed graph prefix for one graph."""
+    return RESULTS / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz"
+
+
+def vg_prefix(graph):
+    """Return the vg index prefix directory for one graph."""
+    return RESULTS / "indexes" / "vg" / graph / graph
+
+
+def odgi_prefix(graph):
+    """Return the odgi index prefix directory for one graph."""
+    return RESULTS / "indexes" / "odgi" / graph / graph
+
+
+def source_node_native(graph, query, context, source):
+    """Return native source-tool output for one node query."""
+    ext = "vg" if source == "vg" else "og"
+    return RESULTS / "queries" / "node" / source / graph / query / f"context_{context}" / f"subgraph.{ext}"
+
+
+def source_node_gfa(graph, query, context, source):
+    """Return converted GFA output for one source-tool node query."""
+    return RESULTS / "queries" / "node" / source / graph / query / f"context_{context}" / "subgraph.gfa"
+
+
+def source_region_native(graph, query, source):
+    """Return native source-tool output for one region query."""
+    ext = "vg" if source == "vg" else "og"
+    return RESULTS / "queries" / "region" / source / graph / query / f"subgraph.{ext}"
+
+
+def source_region_gfa(graph, query, source):
+    """Return converted GFA output for one source-tool region query."""
+    return RESULTS / "queries" / "region" / source / graph / query / "subgraph.gfa"
+
+
+def gfaidx_node_gfa(graph, query, context, source):
+    """Return gfaidx output matched to one source-tool node query."""
+    return RESULTS / "queries" / "node" / f"gfaidx_matched_{source}" / graph / query / f"context_{context}" / "subgraph.gfa"
+
+
+def gfaidx_region_gfa(graph, query, source):
+    """Return gfaidx output matched to one source-tool region query."""
+    return RESULTS / "queries" / "region" / f"gfaidx_matched_{source}" / graph / query / "subgraph.gfa"
+
+
+GRAPH_ROWS = read_tsv(config.get("graphs_tsv", "benchmark/graphs.tsv"))
+GRAPHS = {row["graph"]: row for row in GRAPH_ROWS}
+
+NODE_QUERIES = read_tsv(config.get("node_queries_tsv", "benchmark/node_queries.tsv"))
+REGION_QUERIES = read_tsv(config.get("region_queries_tsv", "benchmark/region_queries.tsv"))
+NODE_BY_ID = {(row["graph"], row["query_id"]): row for row in NODE_QUERIES}
+REGION_BY_ID = {(row["graph"], row["query_id"]): row for row in REGION_QUERIES}
+
+
+def require_known_graphs():
+    """Fail early when query manifests refer to missing graph IDs."""
+    known = set(GRAPHS)
+    for row in NODE_QUERIES + REGION_QUERIES:
+        if row["graph"] not in known:
+            raise ValueError(f"query {row['query_id']} refers to unknown graph {row['graph']}")
+
+
+require_known_graphs()
+
+
+INDEX_INPUTS = []
+QUERY_INPUTS = []
+
+for graph in GRAPHS:
+    gp = gfaidx_prefix(graph)
+    vp = vg_prefix(graph)
+    op = odgi_prefix(graph)
+    INDEX_INPUTS.extend([
+        RESULTS / "metrics" / "index" / "gfaidx" / graph / "index_gfa.json",
+        RESULTS / "metrics" / "index" / "gfaidx" / graph / "index_coordinates.json",
+        RESULTS / "metrics" / "index" / "vg" / graph / "convert.json",
+        RESULTS / "metrics" / "index" / "vg" / graph / "xg.json",
+        RESULTS / "metrics" / "index" / "odgi" / graph / "build.json",
+        RESULTS / "metrics" / "index" / "odgi" / graph / "pathindex.json",
+        RESULTS / "metrics" / "index" / "odgi" / graph / "stepindex.json",
+        gp,
+        Path(str(gp) + ".idx"),
+        Path(str(gp) + ".ndx"),
+        Path(str(gp) + ".pdx"),
+        Path(str(gp) + ".cdx"),
+        Path(str(vp) + ".vg"),
+        Path(str(vp) + ".xg"),
+        Path(str(op) + ".og"),
+        Path(str(op) + ".xp"),
+        Path(str(op) + ".stpidx"),
+    ])
+
+for row in NODE_QUERIES:
+    graph = row["graph"]
+    query = row["query_id"]
+    for context in CONTEXTS:
+        for source in ("vg", "odgi"):
+            source_gfa = source_node_gfa(graph, query, context, source)
+            gfaidx_gfa = gfaidx_node_gfa(graph, query, context, source)
+            QUERY_INPUTS.extend([
+                source_gfa.with_suffix(".stats.json"),
+                gfaidx_gfa.with_suffix(".stats.json"),
+                RESULTS / "metrics" / "queries" / "node" / source / graph / query / f"context_{context}.json",
+                RESULTS / "metrics" / "queries" / "node" / f"gfaidx_matched_{source}" / graph / query / f"context_{context}.json",
+            ])
+
+for row in REGION_QUERIES:
+    graph = row["graph"]
+    query = row["query_id"]
+    for source in ("vg", "odgi"):
+        source_gfa = source_region_gfa(graph, query, source)
+        gfaidx_gfa = gfaidx_region_gfa(graph, query, source)
+        QUERY_INPUTS.extend([
+            source_gfa.with_suffix(".stats.json"),
+            gfaidx_gfa.with_suffix(".stats.json"),
+            RESULTS / "metrics" / "queries" / "region" / source / graph / f"{query}.json",
+            RESULTS / "metrics" / "queries" / "region" / f"gfaidx_matched_{source}" / graph / f"{query}.json",
+        ])
+
+
+localrules: all
+
+
+rule all:
+    input:
+        TABLES / "tool_versions.tsv",
+        TABLES / "index_metrics.tsv",
+        TABLES / "query_metrics.tsv"
+
+
+rule tool_versions:
+    output:
+        TABLES / "tool_versions.tsv"
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/tool_versions.py \
+          --out {output} \
+          --gfaidx {GFAIDX} \
+          --vg {VG} \
+          --odgi {ODGI}
+        """
+
+
+rule collect_results:
+    input:
+        INDEX_INPUTS + QUERY_INPUTS
+    output:
+        index=TABLES / "index_metrics.tsv",
+        query=TABLES / "query_metrics.tsv"
+    params:
+        contexts=",".join(CONTEXTS),
+        results_dir=str(RESULTS),
+        graphs=repo_path(config.get("graphs_tsv", "benchmark/graphs.tsv")),
+        node_queries=repo_path(config.get("node_queries_tsv", "benchmark/node_queries.tsv")),
+        region_queries=repo_path(config.get("region_queries_tsv", "benchmark/region_queries.tsv"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/collect_results.py \
+          --results-dir {params.results_dir} \
+          --graphs {params.graphs} \
+          --node-queries {params.node_queries} \
+          --region-queries {params.region_queries} \
+          --contexts {params.contexts} \
+          --index-out {output.index} \
+          --query-out {output.query}
+        """
+
+
+rule gfaidx_index:
+    input:
+        gfa=graph_gfa
+    output:
+        gz=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz",
+        idx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.idx",
+        ndx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.ndx",
+        pdx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.pdx",
+        metrics=f"{RESULTS}/metrics/index/gfaidx/{{graph}}/index_gfa.json",
+        log=f"{RESULTS}/logs/index/gfaidx/{{graph}}/index_gfa.log"
+    threads: THREADS
+    params:
+        extra=lambda wildcards: join_options(extra("gfaidx", "index_extra"), graph_extra(wildcards, "gfaidx_index_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {GFAIDX} index_gfa {input.gfa} {output.gz} {params.extra}
+        """
+
+
+rule gfaidx_coordinates:
+    input:
+        gz=lambda wildcards: gfaidx_prefix(wildcards.graph),
+        idx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".idx"),
+        ndx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".ndx"),
+        pdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".pdx")
+    output:
+        cdx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.cdx",
+        metrics=f"{RESULTS}/metrics/index/gfaidx/{{graph}}/index_coordinates.json",
+        log=f"{RESULTS}/logs/index/gfaidx/{{graph}}/index_coordinates.log"
+    threads: THREADS
+    params:
+        selection=gfaidx_coordinate_selection,
+        extra=lambda wildcards: join_options(extra("gfaidx", "coordinate_extra"), graph_extra(wildcards, "gfaidx_coord_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {GFAIDX} index_coordinates {input.gz} {output.cdx} \
+             --ndx {input.ndx} --pdx {input.pdx} {params.selection} {params.extra}
+        """
+
+
+rule vg_convert:
+    input:
+        gfa=graph_gfa
+    output:
+        vg=f"{RESULTS}/indexes/vg/{{graph}}/{{graph}}.vg",
+        metrics=f"{RESULTS}/metrics/index/vg/{{graph}}/convert.json",
+        log=f"{RESULTS}/logs/index/vg/{{graph}}/convert.log"
+    threads: THREADS
+    params:
+        extra=lambda wildcards: join_options(extra("vg", "convert_extra"), graph_extra(wildcards, "vg_convert_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --stdout {output.vg} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {VG} convert -g -v {input.gfa} {params.extra}
+        """
+
+
+rule vg_xg:
+    input:
+        vg=lambda wildcards: Path(str(vg_prefix(wildcards.graph)) + ".vg")
+    output:
+        xg=f"{RESULTS}/indexes/vg/{{graph}}/{{graph}}.xg",
+        metrics=f"{RESULTS}/metrics/index/vg/{{graph}}/xg.json",
+        log=f"{RESULTS}/logs/index/vg/{{graph}}/xg.log"
+    threads: THREADS
+    params:
+        extra=lambda wildcards: join_options(extra("vg", "index_extra"), graph_extra(wildcards, "vg_index_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {VG} index -t {threads} -x {output.xg} {input.vg} {params.extra}
+        """
+
+
+rule odgi_build:
+    input:
+        gfa=graph_gfa
+    output:
+        og=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.og",
+        metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/build.json",
+        log=f"{RESULTS}/logs/index/odgi/{{graph}}/build.log"
+    threads: THREADS
+    params:
+        extra=lambda wildcards: join_options(extra("odgi", "build_extra"), graph_extra(wildcards, "odgi_build_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {ODGI} build -g {input.gfa} -o {output.og} -t {threads} {params.extra}
+        """
+
+
+rule odgi_pathindex:
+    input:
+        og=lambda wildcards: Path(str(odgi_prefix(wildcards.graph)) + ".og")
+    output:
+        xp=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.xp",
+        metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/pathindex.json",
+        log=f"{RESULTS}/logs/index/odgi/{{graph}}/pathindex.log"
+    threads: THREADS
+    params:
+        extra=lambda wildcards: join_options(extra("odgi", "pathindex_extra"), graph_extra(wildcards, "odgi_pathindex_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {ODGI} pathindex -i {input.og} -o {output.xp} -t {threads} {params.extra}
+        """
+
+
+rule odgi_stepindex:
+    input:
+        og=lambda wildcards: Path(str(odgi_prefix(wildcards.graph)) + ".og")
+    output:
+        stpidx=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.stpidx",
+        metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/stepindex.json",
+        log=f"{RESULTS}/logs/index/odgi/{{graph}}/stepindex.log"
+    threads: THREADS
+    params:
+        extra=lambda wildcards: join_options(extra("odgi", "stepindex_extra"), graph_extra(wildcards, "odgi_stepindex_extra"))
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {ODGI} stepindex -i {input.og} -o {output.stpidx} -t {threads} {params.extra}
+        """
+
+
+rule vg_node_query:
+    input:
+        xg=lambda wildcards: Path(str(vg_prefix(wildcards.graph)) + ".xg")
+    output:
+        vg=f"{RESULTS}/queries/node/vg/{{graph}}/{{query}}/context_{{context}}/subgraph.vg",
+        metrics=f"{RESULTS}/metrics/queries/node/vg/{{graph}}/{{query}}/context_{{context}}.json",
+        log=f"{RESULTS}/logs/queries/node/vg/{{graph}}/{{query}}/context_{{context}}.log"
+    threads: THREADS
+    params:
+        node=lambda wildcards: NODE_BY_ID[(wildcards.graph, wildcards.query)]["node_id"],
+        extra=lambda wildcards: extra("vg", "find_extra")
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --stdout {output.vg} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {VG} find -x {input.xg} -n {params.node} -c {wildcards.context} {params.extra}
+        """
+
+
+rule vg_node_to_gfa:
+    input:
+        vg=lambda wildcards: source_node_native(wildcards.graph, wildcards.query, wildcards.context, "vg")
+    output:
+        gfa=f"{RESULTS}/queries/node/vg/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa"
+    shell:
+        "{VG} view -g {input.vg} > {output.gfa}"
+
+
+rule odgi_node_query:
+    input:
+        og=lambda wildcards: Path(str(odgi_prefix(wildcards.graph)) + ".og")
+    output:
+        og=f"{RESULTS}/queries/node/odgi/{{graph}}/{{query}}/context_{{context}}/subgraph.og",
+        metrics=f"{RESULTS}/metrics/queries/node/odgi/{{graph}}/{{query}}/context_{{context}}.json",
+        log=f"{RESULTS}/logs/queries/node/odgi/{{graph}}/{{query}}/context_{{context}}.log"
+    threads: THREADS
+    params:
+        node=lambda wildcards: NODE_BY_ID[(wildcards.graph, wildcards.query)]["node_id"],
+        extra=lambda wildcards: extra("odgi", "extract_extra")
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {ODGI} extract -i {input.og} -n {params.node} -c {wildcards.context} -o {output.og} -t {threads} {params.extra}
+        """
+
+
+rule odgi_node_to_gfa:
+    input:
+        og=lambda wildcards: source_node_native(wildcards.graph, wildcards.query, wildcards.context, "odgi")
+    output:
+        gfa=f"{RESULTS}/queries/node/odgi/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa"
+    shell:
+        "{ODGI} view -i {input.og} -g > {output.gfa}"
+
+
+rule gfaidx_node_matched:
+    input:
+        gz=lambda wildcards: gfaidx_prefix(wildcards.graph),
+        idx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".idx"),
+        ndx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".ndx"),
+        pdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".pdx"),
+        source_stats=lambda wildcards: source_node_gfa(wildcards.graph, wildcards.query, wildcards.context, wildcards.source).with_suffix(".stats.json")
+    output:
+        gfa=f"{RESULTS}/queries/node/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/node/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}.json",
+        log=f"{RESULTS}/logs/queries/node/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}.log"
+    threads: THREADS
+    params:
+        node=lambda wildcards: NODE_BY_ID[(wildcards.graph, wildcards.query)]["node_id"],
+        extra=lambda wildcards: extra("gfaidx", "get_subgraph_extra")
+    shell:
+        """
+        max_nodes="$({PYTHON} {SCRIPTS}/json_value.py --input {input.source_stats} --key nodes --minimum 1)"
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {GFAIDX} get_subgraph {input.gz} {params.node} {output.gfa} \
+             --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
+             --max_nodes "$max_nodes" {params.extra}
+        """
+
+
+rule vg_region_query:
+    input:
+        xg=lambda wildcards: Path(str(vg_prefix(wildcards.graph)) + ".xg")
+    output:
+        vg=f"{RESULTS}/queries/region/vg/{{graph}}/{{query}}/subgraph.vg",
+        metrics=f"{RESULTS}/metrics/queries/region/vg/{{graph}}/{{query}}.json",
+        log=f"{RESULTS}/logs/queries/region/vg/{{graph}}/{{query}}.log"
+    threads: THREADS
+    params:
+        region=lambda wildcards: REGION_BY_ID[(wildcards.graph, wildcards.query)]["vg_region"],
+        extra=lambda wildcards: extra("vg", "find_extra")
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --stdout {output.vg} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {VG} find -x {input.xg} -p {params.region} {params.extra}
+        """
+
+
+rule vg_region_to_gfa:
+    input:
+        vg=lambda wildcards: source_region_native(wildcards.graph, wildcards.query, "vg")
+    output:
+        gfa=f"{RESULTS}/queries/region/vg/{{graph}}/{{query}}/subgraph.gfa"
+    shell:
+        "{VG} view -g {input.vg} > {output.gfa}"
+
+
+rule odgi_region_query:
+    input:
+        og=lambda wildcards: Path(str(odgi_prefix(wildcards.graph)) + ".og")
+    output:
+        og=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/subgraph.og",
+        metrics=f"{RESULTS}/metrics/queries/region/odgi/{{graph}}/{{query}}.json",
+        log=f"{RESULTS}/logs/queries/region/odgi/{{graph}}/{{query}}.log"
+    threads: THREADS
+    params:
+        region=lambda wildcards: REGION_BY_ID[(wildcards.graph, wildcards.query)]["odgi_region"],
+        extra=lambda wildcards: extra("odgi", "extract_extra")
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {ODGI} extract -i {input.og} -r {params.region} -o {output.og} -t {threads} {params.extra}
+        """
+
+
+rule odgi_region_to_gfa:
+    input:
+        og=lambda wildcards: source_region_native(wildcards.graph, wildcards.query, "odgi")
+    output:
+        gfa=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/subgraph.gfa"
+    shell:
+        "{ODGI} view -i {input.og} -g > {output.gfa}"
+
+
+rule gfaidx_region_matched:
+    input:
+        gz=lambda wildcards: gfaidx_prefix(wildcards.graph),
+        idx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".idx"),
+        ndx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".ndx"),
+        pdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".pdx"),
+        cdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".cdx"),
+        source_stats=lambda wildcards: source_region_gfa(wildcards.graph, wildcards.query, wildcards.source).with_suffix(".stats.json")
+    output:
+        gfa=f"{RESULTS}/queries/region/gfaidx_matched_{{source}}/{{graph}}/{{query}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_matched_{{source}}/{{graph}}/{{query}}.json",
+        log=f"{RESULTS}/logs/queries/region/gfaidx_matched_{{source}}/{{graph}}/{{query}}.log"
+    threads: THREADS
+    params:
+        region=lambda wildcards: REGION_BY_ID[(wildcards.graph, wildcards.query)]["gfaidx_region"],
+        reference=gfaidx_region_reference,
+        extra=lambda wildcards: extra("gfaidx", "get_region_extra")
+    shell:
+        """
+        max_nodes="$({PYTHON} {SCRIPTS}/json_value.py --input {input.source_stats} --key nodes --minimum 1)"
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {GFAIDX} get_region {input.gz} {params.region} {output.gfa} \
+             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
+             --max_nodes "$max_nodes" {params.reference} {params.extra}
+        """
+
+
+rule gfa_stats:
+    input:
+        gfa="{prefix}.gfa"
+    output:
+        stats="{prefix}.stats.json"
+    shell:
+        "{PYTHON} {SCRIPTS}/graph_stats.py --gfa {input.gfa} --out {output.stats}"
