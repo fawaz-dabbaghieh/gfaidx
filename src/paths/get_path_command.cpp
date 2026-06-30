@@ -12,38 +12,14 @@
 #include "fs/fs_helpers.h"
 #include "indexer/node_hash_index.h"
 #include "paths/path_index.h"
+#include "paths/walk_coords.h"
 #include "utils/Timer.h"
 
 namespace gfaidx::paths {
 namespace {
 
-struct WalkCoordState {
-    bool usable{false};
-    std::vector<std::uint64_t> node_lengths;
-};
-
-struct PathCoordCacheEntry {
-    bool ready{false};
-    bool usable{false};
-    PathInfo info;
-    std::vector<StepRecord> steps;
-    std::vector<std::uint64_t> prefix_lengths;
-};
-
 void warn_get_path(std::string_view message) {
     std::cerr << get_time() << ": Warning: " << message << std::endl;
-}
-
-bool test_seen_bit(const std::vector<std::uint64_t>& bits, std::uint32_t value) {
-    const std::size_t word = value / 64;
-    const unsigned bit = value % 64;
-    return (bits[word] & (1ULL << bit)) != 0;
-}
-
-void set_seen_bit(std::vector<std::uint64_t>& bits, std::uint32_t value) {
-    const std::size_t word = value / 64;
-    const unsigned bit = value % 64;
-    bits[word] |= (1ULL << bit);
 }
 
 std::int64_t parse_optional_int_arg(const std::string& value, const char* flag_name) {
@@ -136,49 +112,6 @@ std::vector<std::string> load_node_names_from_gfa(const std::string& gfa_path) {
     return nodes;
 }
 
-bool parse_s_line_name_and_length(std::string_view line,
-                                  std::string& out_name,
-                                  std::uint64_t& out_length) {
-    const auto t1 = line.find('\t');
-    if (t1 == std::string_view::npos) return false;
-    const auto t2 = line.find('\t', t1 + 1);
-    if (t2 == std::string_view::npos) return false;
-    const auto t3 = line.find('\t', t2 + 1);
-
-    out_name.assign(line.substr(t1 + 1, t2 - (t1 + 1)));
-    const auto seq = (t3 == std::string_view::npos)
-        ? line.substr(t2 + 1)
-        : line.substr(t2 + 1, t3 - (t2 + 1));
-
-    if (seq != "*") {
-        out_length = static_cast<std::uint64_t>(seq.size());
-        return true;
-    }
-
-    if (t3 == std::string_view::npos) {
-        return false;
-    }
-
-    std::size_t pos = t3 + 1;
-    while (pos < line.size()) {
-        const auto next_tab = line.find('\t', pos);
-        const auto end = (next_tab == std::string_view::npos) ? line.size() : next_tab;
-        const auto field = line.substr(pos, end - pos);
-        if (field.substr(0, 5) == "LN:i:" && field.size() > 5) {
-            try {
-                out_length = static_cast<std::uint64_t>(std::stoull(std::string(field.substr(5))));
-                return true;
-            } catch (const std::exception&) {
-                return false;
-            }
-        }
-        if (next_tab == std::string_view::npos) break;
-        pos = next_tab + 1;
-    }
-
-    return false;
-}
-
 std::vector<std::uint32_t> resolve_node_names_with_index(
     const indexer::NodeHashIndex& node_index,
     const std::vector<std::string>& node_names) {
@@ -196,143 +129,6 @@ std::vector<std::uint32_t> resolve_node_names_with_index(
     std::sort(node_ids.begin(), node_ids.end());
     node_ids.erase(std::unique(node_ids.begin(), node_ids.end()), node_ids.end());
     return node_ids;
-}
-
-WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
-                                          const indexer::NodeHashIndex& node_index,
-                                          const std::string& source_gfa) {
-    WalkCoordState state;
-    state.node_lengths.resize(index.node_count());
-    std::vector<std::uint64_t> seen_nodes((static_cast<std::size_t>(index.node_count()) + 63) / 64, 0);
-    std::uint64_t seen_node_count = 0;
-
-    Reader reader;
-    if (!reader.open(source_gfa)) {
-        warn_get_path("could not open --source_gfa '" + source_gfa +
-                      "', falling back to W subpaths without coordinates");
-        state.usable = false;
-        return state;
-    }
-
-    std::string_view line;
-    std::string node_name;
-    std::uint64_t node_length = 0;
-
-    while (reader.read_line(line)) {
-        if (line.empty() || line[0] != 'S') continue;
-
-        if (!parse_s_line_name_and_length(line, node_name, node_length)) {
-            warn_get_path("could not derive segment length for node '" + node_name +
-                          "', falling back to W subpaths without coordinates");
-            return state;
-        }
-
-        std::uint32_t node_id = 0;
-        if (!node_index.lookup_rank(node_name, node_id)) {
-            warn_get_path("node '" + node_name +
-                          "' from --source_gfa was not found in .ndx, falling back to W subpaths without coordinates");
-            return state;
-        }
-        if (node_id >= index.node_count()) {
-            warn_get_path("node '" + node_name +
-                          "' resolved to an id outside the .pdx node range, falling back to W subpaths without coordinates");
-            return state;
-        }
-        if (test_seen_bit(seen_nodes, node_id)) {
-            warn_get_path("duplicate source node or .ndx collision for node '" + node_name +
-                          "', falling back to W subpaths without coordinates");
-            return state;
-        }
-
-        set_seen_bit(seen_nodes, node_id);
-        ++seen_node_count;
-        state.node_lengths[node_id] = node_length;
-    }
-
-    if (seen_node_count != index.node_count()) {
-        warn_get_path("the node set in --source_gfa does not match the node set in .pdx/.ndx, falling back to W subpaths without coordinates");
-        return state;
-    }
-
-    state.usable = true;
-    return state;
-}
-
-PathCoordCacheEntry& get_or_build_path_coord_cache(
-    const PathIndexReader& index,
-    std::uint32_t path_id,
-    const std::vector<std::uint64_t>& node_lengths,
-    std::unordered_map<std::uint32_t, PathCoordCacheEntry>& cache) {
-
-    auto [it, inserted] = cache.emplace(path_id, PathCoordCacheEntry{});
-    auto& entry = it->second;
-    if (!inserted && entry.ready) {
-        return entry;
-    }
-
-    entry.ready = true;
-    entry.usable = false;
-    entry.info = index.get_path_info(path_id);
-    entry.steps = index.read_steps(path_id);
-
-    if (entry.info.record_type != 'W') {
-        return entry;
-    }
-    if (entry.info.seq_start < 0 || entry.info.seq_end < 0) {
-        warn_get_path("W-line '" + std::string(entry.info.name) +
-                      "' is missing SeqStart/SeqEnd, falling back to subwalk output without coordinates");
-        return entry;
-    }
-    if (entry.info.seq_end < entry.info.seq_start) {
-        warn_get_path("W-line '" + std::string(entry.info.name) +
-                      "' has SeqEnd < SeqStart, falling back to subwalk output without coordinates");
-        return entry;
-    }
-
-    entry.prefix_lengths.resize(entry.steps.size() + 1, 0);
-    for (std::size_t i = 0; i < entry.steps.size(); ++i) {
-        const auto node_id = entry.steps[i].node_id;
-        if (node_id >= node_lengths.size()) {
-            warn_get_path("W-line '" + std::string(entry.info.name) +
-                          "' references a node outside the length table, falling back to subwalk output without coordinates");
-            entry.prefix_lengths.clear();
-            return entry;
-        }
-        entry.prefix_lengths[i + 1] = entry.prefix_lengths[i] + node_lengths[node_id];
-    }
-
-    const auto expected_span = static_cast<std::uint64_t>(entry.info.seq_end - entry.info.seq_start);
-    if (entry.prefix_lengths.back() != expected_span) {
-        warn_get_path("W-line '" + std::string(entry.info.name) +
-                      "' has inconsistent SeqStart/SeqEnd versus segment lengths, falling back to subwalk output without coordinates");
-        entry.prefix_lengths.clear();
-        return entry;
-    }
-
-    entry.usable = true;
-    return entry;
-}
-
-void write_w_subpath_with_coords(std::ostream& out,
-                                 const PathIndexReader& index,
-                                 const PathCoordCacheEntry& entry,
-                                 std::uint64_t start_step,
-                                 std::uint64_t step_count,
-                                 std::string_view output_name) {
-    const auto sub_start = static_cast<std::uint64_t>(entry.info.seq_start) + entry.prefix_lengths[start_step];
-    const auto sub_end = static_cast<std::uint64_t>(entry.info.seq_start) + entry.prefix_lengths[start_step + step_count];
-
-    out << "W\t" << entry.info.sample_id << '\t' << entry.info.hap_index << '\t'
-        << output_name << '\t' << sub_start << '\t' << sub_end << '\t';
-    for (std::uint64_t i = start_step; i < start_step + step_count; ++i) {
-        const auto& step = entry.steps[static_cast<std::size_t>(i)];
-        out << (step.is_reverse ? '<' : '>');
-        out << index.get_node_name(step.node_id);
-    }
-    if (!entry.info.tags.empty()) {
-        out << '\t' << entry.info.tags;
-    }
-    out << '\n';
 }
 
 bool lookup_walk_path_id(const PathIndexReader& index,
@@ -366,6 +162,28 @@ bool lookup_walk_path_id(const PathIndexReader& index,
     return found;
 }
 
+void write_indexed_path_names(std::ostream& out, const PathIndexReader& index) {
+    for (std::uint32_t path_id = 0; path_id < index.path_count(); ++path_id) {
+        const auto info = index.get_path_info(path_id);
+        if (info.record_type == 'W') {
+            // W records do not have one path-name field in GFA; print the fields
+            // that identify the walk coordinate namespace and interval.
+            out << "W\t" << info.sample_id << '\t' << info.hap_index << '\t'
+                << info.seq_id << '\t';
+            if (info.seq_start >= 0) out << info.seq_start;
+            else out << '*';
+            out << '\t';
+            if (info.seq_end >= 0) out << info.seq_end;
+            else out << '*';
+            out << '\n';
+        } else {
+            // For P records the path name is the second field of the original
+            // GFA P line, stored as info.name in the path index.
+            out << "P\t" << info.name << '\n';
+        }
+    }
+}
+
 }  // namespace
 
 void configure_get_path_parser(argparse::ArgumentParser& parser) {
@@ -381,6 +199,10 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
       .default_value(std::string(""))
       .nargs(1)
       .help("canonical path id; for W-lines use sample|hap|seq_id|start|end");
+
+    parser.add_argument("--print_path_names").default_value(false)
+      .implicit_value(true)
+      .help("print indexed P path names and W walk coordinate identifiers, then exit");
 
     parser.add_argument("--sample")
       .default_value(std::string(""))
@@ -451,18 +273,21 @@ int run_get_path(const argparse::ArgumentParser& program) {
     const auto subgraph_gfa = program.get<std::string>("subgraph_gfa");
     const auto source_gfa = program.get<std::string>("source_gfa");
     const bool with_walk_coords = program.get<bool>("with_walk_coords");
+    const bool print_path_names = program.get<bool>("print_path_names");
 
     const bool has_node_query = !nodes_csv.empty() || !nodes_file.empty() || !subgraph_gfa.empty();
     const bool has_structured_walk_query = !sample_id.empty() || !hap_index_str.empty() ||
                                            !seq_id.empty() || !seq_start_str.empty() || !seq_end_str.empty();
+    const int query_mode_count = (print_path_names ? 1 : 0) +
+                                 (!path_name.empty() ? 1 : 0) +
+                                 (has_structured_walk_query ? 1 : 0) +
+                                 (has_node_query ? 1 : 0);
 
-    if (path_name.empty() && !has_structured_walk_query && !has_node_query) {
-        std::cerr << "Provide --path_id, a structured W lookup, or a node set via --nodes / --nodes_file / --subgraph_gfa" << std::endl;
+    if (query_mode_count == 0) {
+        std::cerr << "Provide --print_path_names, --path_id, a structured W lookup, or a node set via --nodes / --nodes_file / --subgraph_gfa" << std::endl;
         return 1;
     }
-    if ((!path_name.empty() && has_structured_walk_query) ||
-        (!path_name.empty() && has_node_query) ||
-        (has_structured_walk_query && has_node_query)) {
+    if (query_mode_count > 1) {
         std::cerr << "Use only one lookup mode at a time" << std::endl;
         return 1;
     }
@@ -493,6 +318,11 @@ int run_get_path(const argparse::ArgumentParser& program) {
 
     try {
         PathIndexReader index(input_index);
+
+        if (print_path_names) {
+            write_indexed_path_names(std::cout, index);
+            return 0;
+        }
 
         if (!path_name.empty()) {
             std::uint32_t path_id = 0;
@@ -558,7 +388,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
         WalkCoordState walk_coord_state;
         std::unordered_map<std::uint32_t, PathCoordCacheEntry> path_coord_cache;
         if (with_walk_coords) {
-            walk_coord_state = load_node_lengths_by_index(index, node_index, source_gfa);
+            walk_coord_state = load_node_lengths_by_index(index, node_index, source_gfa, warn_get_path);
         }
 
         for (const auto& run : runs) {
@@ -572,7 +402,8 @@ int run_get_path(const argparse::ArgumentParser& program) {
                 auto& coord_entry = get_or_build_path_coord_cache(index,
                                                                  run.path_id,
                                                                  walk_coord_state.node_lengths,
-                                                                 path_coord_cache);
+                                                                 path_coord_cache,
+                                                                 warn_get_path);
                 if (coord_entry.usable) {
                     write_w_subpath_with_coords(std::cout,
                                                 index,

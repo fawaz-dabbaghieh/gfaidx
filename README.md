@@ -12,6 +12,8 @@ The main CLI subcommands are:
 - `get_chunk`
 - `index_paths`
 - `get_path`
+- `index_coordinates`
+- `get_region`
 
 ## What The Indexes Are
 
@@ -27,9 +29,15 @@ The main CLI subcommands are:
   a sorted binary hash table mapping node string IDs to community IDs
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
+- `<graph>.gz.cdx`
+  an optional standalone reference-coordinate index built by `index_coordinates`
 
 `get_subgraph` uses `.idx`, `.ndx`, and optionally `.pdx` to extract a BFS
 neighborhood across communities.
+
+`get_region` additionally uses `.cdx` to resolve a 0-based reference interval
+to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
+The `.cdx` is separate from `.pdx`, so existing path indexes remain compatible.
 
 `get_chunk` remains available as the compatibility command for streaming a
 single community member back out without graph expansion.
@@ -174,6 +182,86 @@ gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa
 gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
 ```
 
+### `gfaidx index_coordinates`
+
+Build a standalone `.cdx` aligned to an existing `.ndx`. Reference W records
+are selected from the header `RS:Z` sample list. If the supplied GFA is an
+indexed gzip that no longer contains W records, `index_coordinates` can read the
+reference W metadata and steps from a companion `.pdx`. If no eligible reference
+W record exists, `SR:i:0` segments with `SN` and `SO` tags are indexed instead.
+Alternatively, provide a filtered `get_path --print_path_names` output file to
+index explicit P paths and W walks from the `.pdx`.
+
+```bash
+gfaidx index_coordinates <in_gfa> <out.cdx> [options]
+```
+
+Options:
+
+- `--ndx <path>`
+  node hash index; defaults to `<in_gfa>.ndx` when present
+- `--pdx <path>`
+  optional path index used as the source of reference W records when they are
+  absent from the supplied GFA; defaults to `<in_gfa>.pdx` when present
+- `--reference <sample>`
+  index only this sample from the header `RS:Z` list; by default all listed
+  reference samples are indexed
+- `--path_names_file <path>`
+  tab-separated file in the same format emitted by
+  `gfaidx get_path graph.pdx --print_path_names`; selected `W` rows keep their
+  W coordinates, while selected `P` rows are indexed as path-local coordinates
+  starting at 0 and advancing by segment length. P paths with non-`*` overlaps
+  are rejected because their coordinate lengths would be ambiguous.
+- `--progress_every <N>`
+  report input progress every `N` lines; `0` disables progress logging
+
+Example:
+
+```bash
+gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
+  --ndx chr22.gfa.gz.ndx --reference CHM13
+
+gfaidx index_coordinates chr22.gfa.gz chr22.gfa.gz.cdx --reference CHM13
+
+gfaidx get_path graph.gfa.gz.pdx --print_path_names > path_names.tsv
+# edit or filter path_names.tsv, then index exactly those P/W records
+gfaidx index_coordinates graph.gfa.gz graph.gfa.gz.cdx --path_names_file path_names.tsv
+```
+
+### `gfaidx get_region`
+
+Resolve a 0-based, half-open reference interval through `.cdx`, translate its
+node ranks through `.pdx`, and use all overlapping reference nodes as seeds for
+the existing subgraph and optional path-extraction pipeline.
+
+```bash
+gfaidx get_region <in_gz> <sequence:start-end> <out_gfa> [options]
+```
+
+Important options:
+
+- `--reference <sample>`
+  select the coordinate namespace when multiple reference samples contain the
+  requested sequence
+- `--cdx`, `--idx`, `--ndx`, `--pdx`
+  override companion indexes; each defaults to `<in_gz>.<suffix>`
+- `--max_nodes <N>`
+  cap the total seed plus BFS node count; it must be at least the seed count
+- `--no_paths`
+  omit P/W output; `.pdx` remains required for rank-to-node-name conversion
+- `--with_walk_coordinates` / `--with_walk_coords`
+  emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates. The
+  command uses the resolved `.pdx` for W metadata and scans the indexed GFA S
+  lines for node lengths; if validation fails, it falls back to `* *`
+  coordinates and logs a warning.
+
+Example:
+
+```bash
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
+  --reference CHM13 --max_nodes 100000
+```
+
 ### `gfaidx get_chunk`
 
 Stream one community member from the indexed gzip graph.
@@ -215,7 +303,7 @@ gfaidx get_chunk graph.gfa.gz --node_id s12345
 Build or rebuild a standalone `.pdx` index for `P` and `W` lines.
 
 ```bash
-gfaidx index_paths <in_gfa> <out_index.pdx> --ndx <graph.ndx> [options]
+gfaidx index_paths <in_gfa> <out_index.pdx> [options]
 ```
 
 Arguments:
@@ -228,7 +316,9 @@ Arguments:
 Options:
 
 - `--ndx <path>`
-  node hash index produced by `index_gfa`; required so `.pdx` node IDs match `.ndx` ranks
+  node hash index produced by `index_gfa`; defaults to `<in_gfa>.ndx` when
+  present. Provide this explicitly when the node index was renamed or stored
+  elsewhere.
 - `--tmp_dir <dir>`
   base directory for temporary files used by the external posting sort; defaults to the output directory
 - `--progress_every <N>`
@@ -255,16 +345,17 @@ Current behavior:
 Example:
 
 ```bash
-gfaidx index_paths graph.gfa graph.paths.pdx --ndx graph.gfa.gz.ndx
+gfaidx index_paths graph.indexed.gfa.gz graph.indexed.gfa.gz.pdx
 ```
 
 ### `gfaidx get_path`
 
-Query a `.pdx` index in one of three modes:
+Query a `.pdx` index in one of four modes:
 
-1. full path lookup by canonical path ID
-2. full `W` lookup by structured fields
-3. node-set or subgraph lookup returning subpaths/subwalks
+1. list indexed `P` path names and `W` walk coordinate identifiers
+2. full path lookup by canonical path ID
+3. full `W` lookup by structured fields
+4. node-set or subgraph lookup returning subpaths/subwalks
 
 ```bash
 gfaidx get_path <in_index.pdx> [query mode options]
@@ -282,7 +373,23 @@ General options:
   first tries the companion file obtained by replacing the input `.pdx` suffix
   with `.ndx`
 
-#### Mode 1: exact path ID lookup
+#### Mode 1: print path names
+
+```bash
+gfaidx get_path graph.pdx --print_path_names
+```
+
+Output is tab-separated:
+
+- `P <path_name>` for original `P` records
+- `W <sample> <hap_index> <seq_id> <seq_start|*> <seq_end|*>` for original
+  `W` records
+
+This output can be filtered and supplied to
+`gfaidx index_coordinates --path_names_file` to coordinate-index selected paths
+or walks.
+
+#### Mode 2: exact path ID lookup
 
 ```bash
 gfaidx get_path graph.pdx --path_id <id>
@@ -304,7 +411,7 @@ Example:
 gfaidx get_path graph.pdx --path_id loopbackP
 ```
 
-#### Mode 2: structured `W` lookup
+#### Mode 3: structured `W` lookup
 
 ```bash
 gfaidx get_path graph.pdx --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
@@ -331,7 +438,7 @@ Example:
 gfaidx get_path graph.pdx --sample HG002 --hap_index 1 --seq_id chr22
 ```
 
-#### Mode 3: node-set or subgraph lookup
+#### Mode 4: node-set or subgraph lookup
 
 Return all `P`/`W` runs that remain contiguous inside the requested node set.
 

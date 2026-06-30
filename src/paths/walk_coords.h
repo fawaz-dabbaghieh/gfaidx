@@ -1,0 +1,62 @@
+#ifndef GFAIDX_WALK_COORDS_H
+#define GFAIDX_WALK_COORDS_H
+
+#include <cstdint>
+#include <functional>
+#include <iosfwd>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+#include "indexer/node_hash_index.h"
+#include "paths/path_index.h"
+
+namespace gfaidx::paths {
+
+// Optional warning sink used by callers that want coordinate failures to degrade
+// to ordinary W subpaths instead of aborting the whole graph extraction.
+using WalkCoordWarning = std::function<void(const std::string&)>;
+
+struct WalkCoordState {
+    bool usable{false};
+    std::vector<std::uint64_t> node_lengths;
+};
+
+struct PathCoordCacheEntry {
+    bool ready{false};
+    bool usable{false};
+    PathInfo info;
+    std::vector<StepRecord> steps;
+    std::vector<std::uint64_t> prefix_lengths;
+};
+
+// Load rank-aligned node lengths from a GFA whose S lines match the .pdx/.ndx
+// node universe. The indexed multi-member GFA is valid input because it retains
+// all S lines even after P/W records move into the .pdx sidecar.
+WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
+                                          const indexer::NodeHashIndex& node_index,
+                                          const std::string& source_gfa,
+                                          const WalkCoordWarning& warn = WalkCoordWarning{});
+
+// Build and cache per-step prefix lengths for one W record so repeated subpath
+// runs from the same walk do not repeatedly read and scan the full step vector.
+PathCoordCacheEntry& get_or_build_path_coord_cache(
+    const PathIndexReader& index,
+    std::uint32_t path_id,
+    const std::vector<std::uint64_t>& node_lengths,
+    std::unordered_map<std::uint32_t, PathCoordCacheEntry>& cache,
+    const WalkCoordWarning& warn = WalkCoordWarning{});
+
+// Emit a W subpath with concrete SeqStart/SeqEnd coordinates derived from the
+// cached prefix lengths. Callers should only use this when entry.usable is true.
+void write_w_subpath_with_coords(std::ostream& out,
+                                 const PathIndexReader& index,
+                                 const PathCoordCacheEntry& entry,
+                                 std::uint64_t start_step,
+                                 std::uint64_t step_count,
+                                 std::string_view output_name);
+
+}  // namespace gfaidx::paths
+
+#endif  // GFAIDX_WALK_COORDS_H

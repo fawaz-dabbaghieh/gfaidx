@@ -20,6 +20,7 @@
 #include "fs/gfa_line_parsers.h"
 #include "indexer/node_hash_index.h"
 #include "paths/path_index.h"
+#include "paths/walk_coords.h"
 #include "utils/debug_trace.h"
 #include "utils/Timer.h"
 
@@ -175,13 +176,15 @@ std::uint32_t parse_required_u32(const std::string& value, const char* flag_name
     }
 }
 
-ResolvedIndexPaths resolve_index_paths(const argparse::ArgumentParser& program,
-                                       const std::string& input_gz,
+ResolvedIndexPaths resolve_index_paths(const std::string& input_gz,
+                                       const std::string& idx_override,
+                                       const std::string& ndx_override,
+                                       const std::string& pdx_override,
                                        bool include_paths) {
     ResolvedIndexPaths paths;
-    paths.idx_path = program.get<std::string>("idx");
-    paths.ndx_path = program.get<std::string>("ndx");
-    paths.pdx_path = program.get<std::string>("pdx");
+    paths.idx_path = idx_override;
+    paths.ndx_path = ndx_override;
+    paths.pdx_path = pdx_override;
     paths.pdx_explicit = !paths.pdx_path.empty();
 
     // inferred because it's usually just attached to the end of the input graph file
@@ -373,13 +376,18 @@ void load_community_adjacency(NeighborhoodState& state, std::uint32_t community_
 // Community loading occurs only when a queued node is actually expanded, so the
 // final node admitted at the cap cannot trigger an unnecessary chunk load.
 std::vector<std::string> bfs_collect_node_names(NeighborhoodState& state,
-                                                const std::string& start_node,
+                                                const std::vector<std::string>& start_nodes,
                                                 std::uint32_t max_nodes) {
     std::deque<std::string> queue;
     std::unordered_set<std::string> discovered;
     discovered.reserve(static_cast<std::size_t>(max_nodes) * 2);
-    queue.push_back(start_node);
-    discovered.insert(start_node);
+    // Preserve the caller's seed order while suppressing repeated path nodes.
+    for (const auto& start_node : start_nodes) {
+        if (discovered.insert(start_node).second) queue.push_back(start_node);
+    }
+    if (discovered.size() > max_nodes) {
+        throw std::runtime_error("The coordinate interval contains more seed nodes than --max_nodes");
+    }
 
     while (!queue.empty() && discovered.size() < max_nodes) {
         std::string current = std::move(queue.front());
@@ -496,12 +504,30 @@ std::vector<std::uint32_t> resolve_selected_node_ranks(
 // Append indexed P/W subpaths for the extracted node set when a companion
 // .pdx exists. This keeps graph extraction and path extraction in one command.
 std::uint64_t emit_subpaths_if_available(std::ostream& out,
-                                const std::string& pdx_path,
-                                const std::vector<std::uint32_t>& node_ids) {
+                                         const std::string& pdx_path,
+                                         const std::vector<std::uint32_t>& node_ids,
+                                         const indexer::NodeHashIndex& node_index,
+                                         const std::string& source_gfa,
+                                         bool with_walk_coordinates) {
     paths::PathIndexReader index(pdx_path);
     const auto runs = paths::find_subpaths_for_node_ids(index, node_ids);
     if (runs.empty()) {
         return 0;
+    }
+
+    paths::WalkCoordState walk_coord_state;
+    std::unordered_map<std::uint32_t, paths::PathCoordCacheEntry> path_coord_cache;
+    if (with_walk_coordinates) {
+        // The indexed graph is the length source for get_region: P/W records live
+        // in .pdx, but all S records needed to compute W subwalk spans remain in
+        // the readable multi-member gzip.
+        walk_coord_state = paths::load_node_lengths_by_index(
+            index,
+            node_index,
+            source_gfa,
+            [](const std::string& message) {
+                warn_get_subgraph(message);
+            });
     }
 
     std::uint64_t emitted = 0;
@@ -511,6 +537,28 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
         const std::string subpath_name = std::string(base_name) + "#subpath_" +
             std::to_string(run.start_step) + "_" +
             std::to_string(run.start_step + run.step_count - 1);
+
+        if (with_walk_coordinates && walk_coord_state.usable && info.record_type == 'W') {
+            auto& coord_entry = paths::get_or_build_path_coord_cache(
+                index,
+                run.path_id,
+                walk_coord_state.node_lengths,
+                path_coord_cache,
+                [](const std::string& message) {
+                    warn_get_subgraph(message);
+                });
+            if (coord_entry.usable) {
+                paths::write_w_subpath_with_coords(out,
+                                                   index,
+                                                   coord_entry,
+                                                   run.start_step,
+                                                   run.step_count,
+                                                   subpath_name);
+                ++emitted;
+                continue;
+            }
+        }
+
         paths::write_subpath_as_gfa_line(out,
                                          index,
                                          run.path_id,
@@ -563,149 +611,180 @@ void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
       .help("enable temporary cross-file tracing for get_subgraph debugging");
 }
 
-int run_get_subgraph(const argparse::ArgumentParser& program) {
-    const auto input_gz = program.get<std::string>("in_gz");
-    if (!file_exists(input_gz.c_str())) {
-        std::cerr << "Input file does not exist: " << input_gz << std::endl;
-        return 1;
+int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
+                                const std::vector<std::string>& seed_nodes) {
+    if (!file_exists(options.input_gz.c_str())) {
+        throw std::runtime_error("Input file does not exist: " + options.input_gz);
+    }
+    if (seed_nodes.empty()) {
+        throw std::runtime_error("At least one seed node is required for subgraph extraction");
+    }
+    if (options.max_nodes == 0) {
+        throw std::runtime_error("--max_nodes must be greater than zero");
     }
 
-    const auto start_node = program.get<std::string>("start_node");
-    const auto output_gfa = program.get<std::string>("out_gfa");
-    const auto max_nodes_str = program.get<std::string>("max_nodes");
-    const auto no_paths = program.get<bool>("no_paths");
-    const auto debug_trace = program.get<bool>("debug_trace");
+    // Export the trace flag before opening indexes so helper code in other
+    // translation units can participate in the same debug run.
+    if (options.debug_trace) {
+        ::setenv("GFAIDX_DEBUG_SUBGRAPH", "1", 1);
+        debug::log_subgraph_trace("Enabled temporary get_subgraph trace logging");
+    }
 
-    try {
-        // Export the trace flag before opening indexes so helper code in other
-        // translation units can participate in the same debug run.
-        if (debug_trace) {
-            ::setenv("GFAIDX_DEBUG_SUBGRAPH", "1", 1);
-            debug::log_subgraph_trace("Enabled temporary get_subgraph trace logging");
+    const auto index_paths = resolve_index_paths(options.input_gz,
+                                                 options.idx_path,
+                                                 options.ndx_path,
+                                                 options.pdx_path,
+                                                 options.include_paths);
+    const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
+    if (spans.empty()) {
+        throw std::runtime_error("The .idx file does not contain any community spans");
+    }
+
+    // Record the resolved companion files once so the external repro log
+    // confirms which index set was paired with the input gzip.
+    if (debug::subgraph_trace_enabled()) {
+        std::ostringstream oss;
+        oss << "Resolved index paths idx=" << index_paths.idx_path
+            << " ndx=" << index_paths.ndx_path
+            << " pdx=" << index_paths.pdx_path
+            << " has_pdx=" << index_paths.has_pdx
+            << " spans=" << spans.size();
+        gfaidx::debug::log_subgraph_trace(oss.str());
+    }
+
+    indexer::NodeHashIndex node_index(index_paths.ndx_path);
+    std::vector<std::string> unique_seeds = seed_nodes;
+    std::sort(unique_seeds.begin(), unique_seeds.end());
+    unique_seeds.erase(std::unique(unique_seeds.begin(), unique_seeds.end()), unique_seeds.end());
+    if (unique_seeds.size() > options.max_nodes) {
+        throw std::runtime_error("The query contains " + std::to_string(unique_seeds.size()) +
+                                 " seed nodes, exceeding --max_nodes=" +
+                                 std::to_string(options.max_nodes));
+    }
+
+    std::vector<std::uint32_t> seed_communities;
+    seed_communities.reserve(unique_seeds.size());
+    for (const auto& seed : unique_seeds) {
+        std::uint32_t community_id = 0;
+        if (!node_index.lookup(seed, community_id)) {
+            throw std::runtime_error("Seed node was not found in .ndx: " + seed);
         }
-        // Thread the explicit graph-only mode into index discovery so .pdx is
-        // neither required nor warned about when --no_paths is in effect.
-        const auto index_paths = resolve_index_paths(program, input_gz, !no_paths);
-        const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
-        if (spans.empty()) {
-            throw std::runtime_error("The .idx file does not contain any community spans");
+        seed_communities.push_back(community_id);
+    }
+
+    std::vector<std::string> node_names;
+    std::vector<std::uint32_t> materialization_communities;
+    std::size_t loaded_community_count = 0;
+    {
+        // Scope the potentially large string adjacency and shared-edge cache
+        // to BFS so they are released before materialization and path work.
+        const std::uint32_t shared_chunk_id =
+            spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
+                              : std::numeric_limits<std::uint32_t>::max();
+        NeighborhoodState state(options.input_gz, spans, node_index, shared_chunk_id);
+        for (std::size_t i = 0; i < unique_seeds.size(); ++i) {
+            state.node_community_cache.emplace(unique_seeds[i], seed_communities[i]);
         }
 
-        // Record the resolved companion files once so the external repro log
-        // confirms which index set was paired with the input gzip.
-        if (debug::subgraph_trace_enabled()) {
-            std::ostringstream oss;
-            oss << "Resolved index paths idx=" << index_paths.idx_path
-                << " ndx=" << index_paths.ndx_path
-                << " pdx=" << index_paths.pdx_path
-                << " has_pdx=" << index_paths.has_pdx
-                << " spans=" << spans.size();
-            gfaidx::debug::log_subgraph_trace(oss.str());
-        }
+        info_get_subgraph("Starting multi-source BFS from " +
+                          std::to_string(unique_seeds.size()) +
+                          " seed nodes with max_nodes=" +
+                          std::to_string(options.max_nodes));
+        node_names = bfs_collect_node_names(state, unique_seeds, options.max_nodes);
+        loaded_community_count = state.touched_communities.size();
 
-        indexer::NodeHashIndex node_index(index_paths.ndx_path);
-        const auto max_nodes = parse_required_u32(max_nodes_str, "--max_nodes");
-
-        // Only resolve the starting community up front. The rank is deliberately
-        // deferred unless optional path extraction later requires it.
-        std::uint32_t start_community_id = 0;
-        if (!node_index.lookup(start_node, start_community_id)) {
-            throw std::runtime_error("Start node was not found in .ndx: " + start_node);
-        }
-        if (debug::subgraph_trace_enabled()) {
-            std::ostringstream oss;
-            oss << "Start node '" << start_node << "' resolved to community "
-                << start_community_id << " with .ndx size " << node_index.size();
-            debug::log_subgraph_trace(oss.str());
-        }
-
-        std::vector<std::string> node_names;
-        std::vector<std::uint32_t> materialization_communities;
-        std::size_t loaded_community_count = 0;
-        {
-            // Scope the potentially large string adjacency and shared-edge cache
-            // to BFS so they are released before materialization and path work.
-            const std::uint32_t shared_chunk_id =
-                spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
-                                  : std::numeric_limits<std::uint32_t>::max();
-            NeighborhoodState state(input_gz, spans, node_index, shared_chunk_id);
-            state.node_community_cache.emplace(start_node, start_community_id);
-
-            info_get_subgraph("Starting BFS from node " + start_node +
-                              " with max_nodes=" + std::to_string(max_nodes));
-            node_names = bfs_collect_node_names(state, start_node, max_nodes);
-            loaded_community_count = state.touched_communities.size();
-
-            // The last admitted node may never be expanded, so independently
-            // collect every selected node's community for final S/L replay.
-            std::unordered_set<std::uint32_t> community_set;
-            community_set.reserve(node_names.size());
-            for (const auto& node_name : node_names) {
-                const std::uint32_t community_id =
-                    resolve_node_community(state, node_name, "selected node materialization");
-                if (community_id >= spans.size() || community_id == shared_chunk_id) {
-                    throw std::runtime_error("Selected node resolved to an invalid community: " +
-                                             node_name);
-                }
-                community_set.insert(community_id);
+        // The last admitted node may never be expanded, so independently
+        // collect every selected node's community for final S/L replay.
+        std::unordered_set<std::uint32_t> community_set;
+        community_set.reserve(node_names.size());
+        for (const auto& node_name : node_names) {
+            const std::uint32_t community_id =
+                resolve_node_community(state, node_name, "selected node materialization");
+            if (community_id >= spans.size() || community_id == shared_chunk_id) {
+                throw std::runtime_error("Selected node resolved to an invalid community: " +
+                                         node_name);
             }
-            materialization_communities.assign(community_set.begin(), community_set.end());
+            community_set.insert(community_id);
         }
+        materialization_communities.assign(community_set.begin(), community_set.end());
+    }
 
-        info_get_subgraph("BFS finished with " + std::to_string(node_names.size()) +
-                          " nodes across " + std::to_string(loaded_community_count) +
-                          " loaded communities");
+    info_get_subgraph("BFS finished with " + std::to_string(node_names.size()) +
+                      " nodes across " + std::to_string(loaded_community_count) +
+                      " loaded communities");
+    if (node_names.empty()) {
+        warn_get_subgraph("No nodes were selected for the requested subgraph");
+        return 0;
+    }
 
-        if (node_names.empty()) {
-            warn_get_subgraph("No nodes were selected for the requested subgraph");
-            return 0;
-        }
+    std::sort(materialization_communities.begin(), materialization_communities.end());
+    std::unordered_set<std::string> node_set(node_names.begin(), node_names.end());
+    std::ofstream out(options.output_gfa);
+    if (!out) {
+        throw std::runtime_error("Failed to open output GFA file for writing: " +
+                                 options.output_gfa);
+    }
 
-        std::sort(materialization_communities.begin(), materialization_communities.end());
-        std::unordered_set<std::string> node_set(node_names.begin(), node_names.end());
+    info_get_subgraph("Starting subgraph materialization into " + options.output_gfa);
+    emit_header_if_present(out, options.input_gz, spans);
+    EmissionStats total_stats{};
+    for (const auto community_id : materialization_communities) {
+        info_get_subgraph("Materializing community " + std::to_string(community_id));
+        const auto stats = emit_filtered_member(out, options.input_gz,
+                                                spans[community_id], node_set);
+        total_stats.s_lines += stats.s_lines;
+        total_stats.l_lines += stats.l_lines;
+    }
+    if (spans.size() >= 2) {
+        const auto shared_chunk_id = static_cast<std::uint32_t>(spans.size() - 1);
+        info_get_subgraph("Materializing shared-edge member " +
+                          std::to_string(shared_chunk_id));
+        const auto stats = emit_filtered_member(out, options.input_gz,
+                                                spans[shared_chunk_id], node_set);
+        total_stats.s_lines += stats.s_lines;
+        total_stats.l_lines += stats.l_lines;
+    }
+    info_get_subgraph("Finished subgraph materialization with " +
+                      std::to_string(total_stats.s_lines) + " S lines and " +
+                      std::to_string(total_stats.l_lines) + " L lines");
 
-        std::ofstream out(output_gfa);
-        if (!out) {
-            throw std::runtime_error("Failed to open output GFA file for writing: " + output_gfa);
-        }
+    if (index_paths.has_pdx) {
+        // Convert only the final subgraph node names to rank ids needed by the
+        // rank-aligned path index.
+        const auto node_ids = resolve_selected_node_ranks(node_index, node_names);
+        info_get_subgraph("Starting indexed subpath extraction from " + index_paths.pdx_path);
+        const auto subpath_count = emit_subpaths_if_available(out,
+                                                             index_paths.pdx_path,
+                                                             node_ids,
+                                                             node_index,
+                                                             options.input_gz,
+                                                             options.with_walk_coordinates);
+        info_get_subgraph("Finished indexed subpath extraction with " +
+                          std::to_string(subpath_count) + " P/W records");
+    }
+    info_get_subgraph("Finished writing extracted subgraph to " + options.output_gfa);
+    return 0;
+}
 
-        info_get_subgraph("Starting subgraph materialization into " + output_gfa);
-        emit_header_if_present(out, input_gz, spans);
-        EmissionStats total_stats{};
-        for (const auto community_id : materialization_communities) {
-            info_get_subgraph("Materializing community " + std::to_string(community_id));
-            const auto stats = emit_filtered_member(out, input_gz, spans[community_id], node_set);
-            total_stats.s_lines += stats.s_lines;
-            total_stats.l_lines += stats.l_lines;
-        }
-
-        if (spans.size() >= 2) {
-            const auto shared_chunk_id = static_cast<std::uint32_t>(spans.size() - 1);
-            info_get_subgraph("Materializing shared-edge member " + std::to_string(shared_chunk_id));
-            const auto stats = emit_filtered_member(out, input_gz, spans[shared_chunk_id], node_set);
-            total_stats.s_lines += stats.s_lines;
-            total_stats.l_lines += stats.l_lines;
-        }
-        info_get_subgraph("Finished subgraph materialization with " +
-                          std::to_string(total_stats.s_lines) + " S lines and " +
-                          std::to_string(total_stats.l_lines) + " L lines");
-
-        if (index_paths.has_pdx) {
-            // Convert only the final subgraph node names to rank ids needed by
-            // the rank-aligned path index.
-            const auto node_ids = resolve_selected_node_ranks(node_index, node_names);
-            info_get_subgraph("Starting indexed subpath extraction from " + index_paths.pdx_path);
-            const auto subpath_count = emit_subpaths_if_available(out, index_paths.pdx_path, node_ids);
-            info_get_subgraph("Finished indexed subpath extraction with " +
-                              std::to_string(subpath_count) + " P/W records");
-        }
-        info_get_subgraph("Finished writing extracted subgraph to " + output_gfa);
+int run_get_subgraph(const argparse::ArgumentParser& program) {
+    try {
+        SubgraphExtractionOptions options;
+        options.input_gz = program.get<std::string>("in_gz");
+        options.output_gfa = program.get<std::string>("out_gfa");
+        options.idx_path = program.get<std::string>("idx");
+        options.ndx_path = program.get<std::string>("ndx");
+        options.pdx_path = program.get<std::string>("pdx");
+        options.max_nodes = parse_required_u32(program.get<std::string>("max_nodes"),
+                                               "--max_nodes");
+        options.include_paths = !program.get<bool>("no_paths");
+        options.debug_trace = program.get<bool>("debug_trace");
+        return extract_subgraph_from_seeds(
+            options,
+            std::vector<std::string>{program.get<std::string>("start_node")});
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         return 1;
     }
-
-    return 0;
 }
 
 }  // namespace gfaidx::chunk

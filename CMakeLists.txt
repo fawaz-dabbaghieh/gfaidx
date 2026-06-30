@@ -27,6 +27,8 @@ add_executable(gfaidx
         src/chunk/chunk_reader.cpp
         src/chunk/text_handle_cache.cpp
         src/chunk/split_gfa_to_comms.cpp
+        src/coordinates/coordinate_commands.cpp
+        src/coordinates/coordinate_index.cpp
         src/indexer/community_coarsening.cpp
         src/indexer/community_refinement.cpp
         src/indexer/direct_binary_writer.cpp
@@ -36,6 +38,7 @@ add_executable(gfaidx
         src/paths/get_path_command.cpp
         src/paths/index_paths_command.cpp
         src/paths/path_index.cpp
+        src/paths/walk_coords.cpp
         src/utils/Memory.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
