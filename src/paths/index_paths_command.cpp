@@ -19,7 +19,7 @@ void configure_index_paths_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--ndx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("path to the node hash index (.ndx) built by index_gfa; required so .pdx node ids match .ndx ranks");
+      .help("path to the node hash index (.ndx) built by index_gfa; defaults to <in_gfa>.ndx when present");
 
     parser.add_argument("--tmp_dir").default_value(std::string(""))
       .nargs(1)
@@ -33,7 +33,7 @@ void configure_index_paths_parser(argparse::ArgumentParser& parser) {
 int run_index_paths(const argparse::ArgumentParser& program) {
     const auto input_gfa = program.get<std::string>("in_gfa");
     const auto out_index = program.get<std::string>("out_index");
-    const auto node_index = program.get<std::string>("ndx");
+    auto node_index = program.get<std::string>("ndx");
     const auto tmp_dir = program.get<std::string>("tmp_dir");
 
     if (!file_exists(input_gfa.c_str())) {
@@ -41,7 +41,13 @@ int run_index_paths(const argparse::ArgumentParser& program) {
         return 1;
     }
     if (node_index.empty()) {
-        std::cerr << "Provide --ndx to build a path index aligned to the graph's node hash index" << std::endl;
+        // Keep index_paths consistent with query commands: the normal companion
+        // path for an indexed graph is simply the graph path plus ".ndx".
+        const auto inferred = input_gfa + ".ndx";
+        if (file_exists(inferred.c_str())) node_index = inferred;
+    }
+    if (node_index.empty()) {
+        std::cerr << "Could not find companion node index <in_gfa>.ndx; provide --ndx to build a path index aligned to the graph's node hash index" << std::endl;
         return 1;
     }
     if (!file_exists(node_index.c_str())) {

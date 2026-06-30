@@ -303,7 +303,7 @@ gfaidx get_chunk graph.gfa.gz --node_id s12345
 Build or rebuild a standalone `.pdx` index for `P` and `W` lines.
 
 ```bash
-gfaidx index_paths <in_gfa> <out_index.pdx> --ndx <graph.ndx> [options]
+gfaidx index_paths <in_gfa> <out_index.pdx> [options]
 ```
 
 Arguments:
@@ -316,7 +316,9 @@ Arguments:
 Options:
 
 - `--ndx <path>`
-  node hash index produced by `index_gfa`; required so `.pdx` node IDs match `.ndx` ranks
+  node hash index produced by `index_gfa`; defaults to `<in_gfa>.ndx` when
+  present. Provide this explicitly when the node index was renamed or stored
+  elsewhere.
 - `--tmp_dir <dir>`
   base directory for temporary files used by the external posting sort; defaults to the output directory
 - `--progress_every <N>`
@@ -343,7 +345,7 @@ Current behavior:
 Example:
 
 ```bash
-gfaidx index_paths graph.gfa graph.paths.pdx --ndx graph.gfa.gz.ndx
+gfaidx index_paths graph.indexed.gfa.gz graph.indexed.gfa.gz.pdx
 ```
 
 ### `gfaidx get_path`
