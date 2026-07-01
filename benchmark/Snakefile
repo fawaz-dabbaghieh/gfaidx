@@ -55,6 +55,18 @@ def clean(value):
     return str(value or "").strip()
 
 
+def parse_bool(value, default=False):
+    """Parse simple yes/no TSV fields with a caller-provided default."""
+    text = clean(value).lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value in benchmark TSV: {value!r}")
+
+
 def extra(section, key):
     """Return one optional extra-argument string from config.yaml."""
     return clean(config.get(section, {}).get(key, ""))
@@ -110,6 +122,14 @@ def vg_prefix(graph):
 def odgi_prefix(graph):
     """Return the odgi index prefix directory for one graph."""
     return RESULTS / "indexes" / "odgi" / graph / graph
+
+
+def odgi_path_indexes_enabled(graph):
+    """Return whether ODGI .xp/.stpidx side indexes should be built."""
+    # Pathless graphs can make odgi pathindex abort in some ODGI builds. Keep
+    # these side indexes explicit per graph so query-ready size accounting stays
+    # fair when they are meaningful and skips them when they are impossible.
+    return parse_bool(GRAPHS[graph].get("odgi_path_indexes", ""), default=True)
 
 
 def source_node_native(graph, query, context, source):
@@ -177,8 +197,6 @@ for graph in GRAPHS:
         RESULTS / "metrics" / "index" / "vg" / graph / "convert.json",
         RESULTS / "metrics" / "index" / "vg" / graph / "xg.json",
         RESULTS / "metrics" / "index" / "odgi" / graph / "build.json",
-        RESULTS / "metrics" / "index" / "odgi" / graph / "pathindex.json",
-        RESULTS / "metrics" / "index" / "odgi" / graph / "stepindex.json",
         gp,
         Path(str(gp) + ".idx"),
         Path(str(gp) + ".ndx"),
@@ -187,9 +205,14 @@ for graph in GRAPHS:
         Path(str(vp) + ".vg"),
         Path(str(vp) + ".xg"),
         Path(str(op) + ".og"),
-        Path(str(op) + ".xp"),
-        Path(str(op) + ".stpidx"),
     ])
+    if odgi_path_indexes_enabled(graph):
+        INDEX_INPUTS.extend([
+            RESULTS / "metrics" / "index" / "odgi" / graph / "pathindex.json",
+            RESULTS / "metrics" / "index" / "odgi" / graph / "stepindex.json",
+            Path(str(op) + ".xp"),
+            Path(str(op) + ".stpidx"),
+        ])
 
 for row in NODE_QUERIES:
     graph = row["graph"]

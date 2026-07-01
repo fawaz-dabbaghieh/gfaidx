@@ -42,6 +42,18 @@ def read_json(path: Path) -> dict[str, object]:
         return json.load(handle)
 
 
+def parse_bool(value: str, default: bool = False) -> bool:
+    """Parse optional yes/no manifest fields with an explicit default."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value in benchmark TSV: {value!r}")
+
+
 def file_size(path: Path) -> int:
     """Return file size in bytes, or zero when the file is absent."""
     return path.stat().st_size if path.exists() else 0
@@ -80,6 +92,16 @@ def write_index_table(results: Path, graphs: list[dict[str, str]], out_path: Pat
 
         for row in graphs:
             graph = row["graph"]
+            odgi_phases = ["build"]
+            odgi_files = [results / "indexes" / "odgi" / graph / f"{graph}.og"]
+            if parse_bool(row.get("odgi_path_indexes", ""), default=True):
+                # ODGI path-side indexes are useful and included by default, but
+                # pathless graphs can make odgi pathindex abort in some builds.
+                odgi_phases.extend(["pathindex", "stepindex"])
+                odgi_files.extend([
+                    results / "indexes" / "odgi" / graph / f"{graph}.xp",
+                    results / "indexes" / "odgi" / graph / f"{graph}.stpidx",
+                ])
             specs = {
                 "gfaidx": {
                     "phases": ["index_gfa", "index_coordinates"],
@@ -99,12 +121,8 @@ def write_index_table(results: Path, graphs: list[dict[str, str]], out_path: Pat
                     ],
                 },
                 "odgi": {
-                    "phases": ["build", "pathindex", "stepindex"],
-                    "files": [
-                        results / "indexes" / "odgi" / graph / f"{graph}.og",
-                        results / "indexes" / "odgi" / graph / f"{graph}.xp",
-                        results / "indexes" / "odgi" / graph / f"{graph}.stpidx",
-                    ],
+                    "phases": odgi_phases,
+                    "files": odgi_files,
                 },
             }
 

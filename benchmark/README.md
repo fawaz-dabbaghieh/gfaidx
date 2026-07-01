@@ -14,14 +14,15 @@ Indexing:
 
 - `gfaidx`: `index_gfa`, then `index_coordinates`
 - `vg`: `vg convert -g -v` to `.vg`, then `vg index -x` to `.xg`
-- `odgi`: `odgi build` to `.og`, `odgi pathindex` to `.xp`, and
-  `odgi stepindex` to `.stpidx`
+- `odgi`: `odgi build` to `.og`, plus optional `odgi pathindex` to `.xp`
+  and `odgi stepindex` to `.stpidx`
 
 The main query-ready index size is:
 
 - `gfaidx`: `.gfa.gz + .idx + .ndx + .pdx + .cdx`
 - `vg`: `.vg + .xg`
-- `odgi`: `.og + .xp + .stpidx`
+- `odgi`: `.og + .xp + .stpidx` when path-side indexes are enabled, or only
+  `.og` for graphs marked as pathless
 
 Node-neighborhood extraction:
 
@@ -79,17 +80,24 @@ Optional columns:
 - `gfaidx_path_names_file`: filtered output from
   `gfaidx get_path <graph>.pdx --print_path_names`
 - `gfaidx_reference`: reference sample for `gfaidx index_coordinates`
+- `odgi_path_indexes`: defaults to `1`; set to `0` for graphs with no P/W
+  paths so the workflow skips `.xp` and `.stpidx`
 - `*_extra`: per-graph extra options for each indexing command
 
 Example:
 
 ```text
-graph	gfa	gfaidx_path_names_file	gfaidx_reference	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_index_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
-chr22	test_graphs/hprc_chr22/chr22.gfa	benchmark/path_names/chr22.paths.tsv	CHM13									
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_index_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
+chr22	test_graphs/hprc_chr22/chr22.gfa	benchmark/path_names/chr22.paths.tsv	CHM13	1
 ```
 
 If both `gfaidx_path_names_file` and `gfaidx_reference` are present, the path
 names file takes precedence for coordinate indexing.
+
+Some rGFA/minigraph inputs have segment coordinate tags but no P/W path records.
+For those graphs, set `odgi_path_indexes` to `0`. ODGI can still build the
+`.og`, but some ODGI builds abort when `odgi pathindex` is run on a pathless
+graph.
 
 ## Configure Node Queries
 
