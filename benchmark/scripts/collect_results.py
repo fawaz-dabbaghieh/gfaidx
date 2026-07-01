@@ -42,9 +42,21 @@ def read_json(path: Path) -> dict[str, object]:
         return json.load(handle)
 
 
+def clean(value: str) -> str:
+    """Normalize optional TSV cells."""
+    return str(value or "").strip()
+
+
+def is_available(value: str) -> bool:
+    """Return whether an optional manifest field describes runnable work."""
+    # Empty/NA region cells mean the source tool cannot express this coordinate
+    # query for the graph, but the final table should still report the gap.
+    return clean(value).lower() not in {"", "na", "n/a", "."}
+
+
 def parse_bool(value: str, default: bool = False) -> bool:
     """Parse optional yes/no manifest fields with an explicit default."""
-    text = str(value or "").strip().lower()
+    text = clean(value).lower()
     if not text:
         return default
     if text in {"1", "true", "yes", "y", "on"}:
@@ -211,6 +223,40 @@ def write_query_row(
     )
 
 
+def write_na_query_row(
+    writer: csv.DictWriter,
+    graph: str,
+    query_class: str,
+    query_id: str,
+    source_tool: str,
+    context_or_region: str,
+    measured_tool: str,
+    reason: str,
+) -> None:
+    """Write a not-applicable query row with NA metric fields."""
+    writer.writerow(
+        {
+            "graph": graph,
+            "query_class": query_class,
+            "query_id": query_id,
+            "source_tool": source_tool,
+            "context_or_region": context_or_region or "NA",
+            "measured_tool": measured_tool,
+            "wall_seconds": "NA",
+            "peak_rss_kb": "NA",
+            "exit_code": "NA",
+            "nodes": "NA",
+            "edges": "NA",
+            "paths": "NA",
+            "walks": "NA",
+            "source_nodes_for_gfaidx_cap": "NA",
+            "output_bytes": "NA",
+            "log_path": "NA",
+            "command": f"not_applicable: {reason}",
+        }
+    )
+
+
 def write_query_table(
     results: Path,
     node_queries: list[dict[str, str]],
@@ -265,8 +311,39 @@ def write_query_table(
         for query in region_queries:
             graph = query["graph"]
             query_id = query["query_id"]
+            direct_gfa = results / "queries" / "region" / "gfaidx_direct" / graph / query_id / "subgraph.gfa"
+            direct_stats = direct_gfa.with_suffix(".stats.json")
+            direct_metrics = results / "metrics" / "queries" / "region" / "gfaidx_direct" / graph / f"{query_id}.json"
+            direct_log = results / "logs" / "queries" / "region" / "gfaidx_direct" / graph / f"{query_id}.log"
+            write_query_row(writer, results, graph, "region", query_id, "gfaidx_direct",
+                            query["gfaidx_region"], "gfaidx", direct_gfa, direct_metrics,
+                            direct_stats, None, direct_log)
+
             for source in ("vg", "odgi"):
-                region_label = query[f"{source}_region"]
+                region_label = clean(query.get(f"{source}_region", ""))
+                if not is_available(region_label):
+                    write_na_query_row(
+                        writer,
+                        graph,
+                        "region",
+                        query_id,
+                        source,
+                        "NA",
+                        source,
+                        f"{source}_region is empty or NA for this graph",
+                    )
+                    write_na_query_row(
+                        writer,
+                        graph,
+                        "region",
+                        query_id,
+                        source,
+                        query["gfaidx_region"],
+                        "gfaidx",
+                        f"no {source} region output is available to define a matched --max_nodes cap",
+                    )
+                    continue
+
                 source_gfa = results / "queries" / "region" / source / graph / query_id / "subgraph.gfa"
                 source_stats = source_gfa.with_suffix(".stats.json")
                 source_metrics = results / "metrics" / "queries" / "region" / source / graph / f"{query_id}.json"

@@ -7,7 +7,10 @@
 # odgi_region is passed to:
 #   odgi extract -i <graph.og> -r <odgi_region>
 #
+# gfaidx_max_nodes is used only for the direct gfaidx coordinate benchmark.
+# Leave vg_region or odgi_region empty when that tool cannot express the query.
+#
 # gfaidx_reference is optional and overrides the graph-level reference for this
 # query. Leave it empty for P-path coordinate indexes or unambiguous W/S tracks.
-graph	query_id	gfaidx_region	gfaidx_reference	vg_region	odgi_region	notes
-hprc_minigraph_chm13	chr8_62408000_62409000	chr8:62408000-62409000		chr8:62408000-62409000	chr8:62408000-62409000	fits around node s100000; minigraph has rGFA tags but no P/W records
+graph	query_id	gfaidx_region	gfaidx_reference	gfaidx_max_nodes	vg_region	odgi_region	notes
+hprc_minigraph_chm13	chr8_62408000_62409000	chr8:62408000-62409000		10000			fits around node s100000; minigraph has rGFA tags but no P/W records

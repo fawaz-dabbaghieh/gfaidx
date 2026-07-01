@@ -55,6 +55,13 @@ def clean(value):
     return str(value or "").strip()
 
 
+def is_available(value):
+    """Return whether an optional manifest field describes runnable work."""
+    # Region cells marked empty/NA mean the tool cannot express that coordinate
+    # query for this graph; collect_results.py still reports an NA row.
+    return clean(value).lower() not in {"", "na", "n/a", "."}
+
+
 def parse_bool(value, default=False):
     """Parse simple yes/no TSV fields with a caller-provided default."""
     text = clean(value).lower()
@@ -109,6 +116,14 @@ def gfaidx_region_reference(wildcards):
     return ""
 
 
+def gfaidx_region_max_nodes(wildcards):
+    """Return the direct gfaidx region cap from the query manifest."""
+    # Direct gfaidx coordinate queries are not capped by a source-tool output, so
+    # the manifest owns this value. Keep the gfaidx command default explicit.
+    query = REGION_BY_ID[(wildcards.graph, wildcards.query)]
+    return clean(query.get("gfaidx_max_nodes", "")) or "10000"
+
+
 def gfaidx_prefix(graph):
     """Return the gfaidx indexed graph prefix for one graph."""
     return RESULTS / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz"
@@ -154,9 +169,19 @@ def source_region_gfa(graph, query, source):
     return RESULTS / "queries" / "region" / source / graph / query / "subgraph.gfa"
 
 
+def source_region_available(row, source):
+    """Return whether vg/odgi should run a path-based region query."""
+    return is_available(row.get(f"{source}_region", ""))
+
+
 def gfaidx_node_gfa(graph, query, context, source):
     """Return gfaidx output matched to one source-tool node query."""
     return RESULTS / "queries" / "node" / f"gfaidx_matched_{source}" / graph / query / f"context_{context}" / "subgraph.gfa"
+
+
+def gfaidx_region_direct_gfa(graph, query):
+    """Return direct gfaidx coordinate-query output."""
+    return RESULTS / "queries" / "region" / "gfaidx_direct" / graph / query / "subgraph.gfa"
 
 
 def gfaidx_region_gfa(graph, query, source):
@@ -231,7 +256,14 @@ for row in NODE_QUERIES:
 for row in REGION_QUERIES:
     graph = row["graph"]
     query = row["query_id"]
+    direct_gfa = gfaidx_region_direct_gfa(graph, query)
+    QUERY_INPUTS.extend([
+        direct_gfa.with_suffix(".stats.json"),
+        RESULTS / "metrics" / "queries" / "region" / "gfaidx_direct" / graph / f"{query}.json",
+    ])
     for source in ("vg", "odgi"):
+        if not source_region_available(row, source):
+            continue
         source_gfa = source_region_gfa(graph, query, source)
         gfaidx_gfa = gfaidx_region_gfa(graph, query, source)
         QUERY_INPUTS.extend([
@@ -587,6 +619,35 @@ rule odgi_region_to_gfa:
         gfa=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/subgraph.gfa"
     shell:
         "{ODGI} view -i {input.og} -g > {output.gfa}"
+
+
+rule gfaidx_region_direct:
+    input:
+        gz=lambda wildcards: gfaidx_prefix(wildcards.graph),
+        idx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".idx"),
+        ndx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".ndx"),
+        pdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".pdx"),
+        cdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".cdx")
+    output:
+        gfa=f"{RESULTS}/queries/region/gfaidx_direct/{{graph}}/{{query}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_direct/{{graph}}/{{query}}.json",
+        log=f"{RESULTS}/logs/queries/region/gfaidx_direct/{{graph}}/{{query}}.log"
+    threads: THREADS
+    params:
+        region=lambda wildcards: REGION_BY_ID[(wildcards.graph, wildcards.query)]["gfaidx_region"],
+        reference=gfaidx_region_reference,
+        max_nodes=gfaidx_region_max_nodes,
+        extra=lambda wildcards: extra("gfaidx", "get_region_extra")
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} \
+          --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {GFAIDX} get_region {input.gz} {params.region} {output.gfa} \
+             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
+             --max_nodes {params.max_nodes} {params.reference} {params.extra}
+        """
 
 
 rule gfaidx_region_matched:

@@ -43,8 +43,13 @@ Coordinate-region extraction:
 - `vg find -x graph.xg -p path:start-end`
 - `odgi extract -i graph.og -r path:start-end`
 - `gfaidx get_region graph.gfa.gz sequence:start-end --max_nodes N`
+- direct `gfaidx get_region` using the manifest-provided `gfaidx_max_nodes`
 
-For region queries, `N` is again taken from the source-tool output node count.
+For matched region queries, `N` is again taken from the source-tool output node
+count. The workflow also runs a direct `gfaidx` coordinate query for every
+region row. This keeps rGFA/minigraph coordinate extraction benchmarked even
+when `vg` or `odgi` cannot express the query because the graph has no P/W paths.
+Skipped source-tool region tasks are reported as `NA` in the final query table.
 The output node sets are not expected to be identical because `vg`/`odgi` path
 range extraction and `gfaidx` interval-seeded BFS are different operations. The
 benchmark is therefore about runtime, memory, disk footprint, and output scale.
@@ -122,11 +127,17 @@ runs `gfaidx` with the matched `--max_nodes` value.
 Edit `region_queries.tsv`:
 
 ```text
-graph	query_id	gfaidx_region	gfaidx_reference	vg_region	odgi_region	notes
-chr22	r1	chr22:0-1000000	CHM13	CHM13#0#chr22:0-1000000	CHM13#0#chr22:0-1000000	pilot interval
+graph	query_id	gfaidx_region	gfaidx_reference	gfaidx_max_nodes	vg_region	odgi_region	notes
+chr22	r1	chr22:0-1000000	CHM13	10000	CHM13#0#chr22:0-1000000	CHM13#0#chr22:0-1000000	pilot interval
 ```
 
-Use the path names as each tool sees them. Validate these before large runs:
+`gfaidx_max_nodes` controls the direct `gfaidx` coordinate run. For matched
+comparisons, `gfaidx` still uses the node count produced by the source tool.
+
+Use the path names as each tool sees them. Leave `vg_region` or `odgi_region`
+empty, `NA`, `N/A`, or `.` when that tool cannot run the coordinate query for
+the graph. Those rows are skipped in the DAG and reported as `NA` in
+`query_metrics.tsv`. Validate path names before large runs:
 
 ```bash
 gfaidx get_path graph.gfa.gz.pdx --print_path_names
