@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -94,6 +96,29 @@ def tree_rss_kb(root_pid: int) -> int:
     return sum(rss_by_pid.get(pid, 0) for pid in wanted)
 
 
+def maxrss_to_kb(value: int) -> int:
+    """Convert a platform ru_maxrss value to KiB.
+
+    Linux reports ru_maxrss in KiB, while macOS reports it in bytes.
+    """
+    if platform.system() == "Darwin":
+        return int(value) // 1024
+    return int(value)
+
+
+def wait4_nohang(pid: int) -> tuple[int | None, int]:
+    """Poll one child and return `(exit_code, maxrss_kb)`.
+
+    `subprocess.Popen.poll()` uses waitpid, which discards resource usage. Using
+    wait4 gives us OS accounting for the wrapped command itself, so very short
+    commands still report memory even when process-tree sampling misses them.
+    """
+    waited_pid, status, usage = os.wait4(pid, os.WNOHANG)
+    if waited_pid == 0:
+        return None, 0
+    return os.waitstatus_to_exitcode(status), maxrss_to_kb(int(usage.ru_maxrss))
+
+
 def write_metrics(path: Path, metrics: dict[str, object]) -> None:
     """Write benchmark metrics as stable, machine-readable JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +140,12 @@ def main() -> int:
 
     start = time.monotonic()
     peak_rss_kb = 0
+    wait4_peak_rss_kb = 0
     sample_count = 0
+    # Poll process exit frequently so fast commands do not inherit the full RSS
+    # sample interval as artificial wall-clock overhead.
+    sample_interval = max(float(args.sample_interval), 0.001)
+    exit_poll_interval = min(sample_interval, 0.01)
 
     with log_path.open("w", encoding="utf-8") as log_handle:
         if stdout_path is None:
@@ -132,26 +162,33 @@ def main() -> int:
                 stdout=stdout_handle,
                 stderr=log_handle,
             )
+            next_sample = time.monotonic()
             while True:
-                sample_count += 1
-                peak_rss_kb = max(peak_rss_kb, tree_rss_kb(proc.pid))
-                return_code = proc.poll()
-                if return_code is not None:
-                    break
-                time.sleep(args.sample_interval)
+                now = time.monotonic()
+                if now >= next_sample:
+                    sample_count += 1
+                    peak_rss_kb = max(peak_rss_kb, tree_rss_kb(proc.pid))
+                    next_sample = now + sample_interval
 
-            sample_count += 1
-            peak_rss_kb = max(peak_rss_kb, tree_rss_kb(proc.pid))
+                return_code, child_peak_rss_kb = wait4_nohang(proc.pid)
+                wait4_peak_rss_kb = max(wait4_peak_rss_kb, child_peak_rss_kb)
+                if return_code is not None:
+                    proc.returncode = return_code
+                    break
+                time.sleep(min(exit_poll_interval, max(0.0, next_sample - time.monotonic())))
         finally:
             if close_stdout:
                 stdout_handle.close()
 
     wall_seconds = time.monotonic() - start
+    combined_peak_rss_kb = max(peak_rss_kb, wait4_peak_rss_kb)
     metrics = {
         "command": " ".join(shlex.quote(part) for part in args.command),
         "exit_code": int(return_code),
-        "measurement_mode": "ps_tree",
-        "peak_rss_kb": int(peak_rss_kb),
+        "measurement_mode": "max_ps_tree_wait4",
+        "peak_rss_kb": int(combined_peak_rss_kb),
+        "peak_rss_kb_ps_tree": int(peak_rss_kb),
+        "peak_rss_kb_wait4": int(wait4_peak_rss_kb),
         "sample_count": int(sample_count),
         "sample_interval_seconds": float(args.sample_interval),
         "wall_seconds": round(wall_seconds, 6),
