@@ -1,0 +1,177 @@
+digraph snakemake_dag {
+    graph[bgcolor=white, margin=0];
+    node[shape=box, style=rounded, fontname=sans,                 fontsize=10, penwidth=2];
+    edge[penwidth=2, color=grey];
+	0[label = "all", color = "0.00 0.6 0.85", style="rounded"];
+	1[label = "tool_versions", color = "0.48 0.6 0.85", style="rounded"];
+	2[label = "collect_results", color = "0.03 0.6 0.85", style="rounded"];
+	3[label = "gfaidx_index\ngraph: hprc_minigraph_chm13", color = "0.13 0.6 0.85", style="rounded"];
+	4[label = "gfaidx_coordinates", color = "0.10 0.6 0.85", style="rounded"];
+	5[label = "vg_convert\ngraph: hprc_minigraph_chm13", color = "0.51 0.6 0.85", style="rounded"];
+	6[label = "odgi_build\ngraph: hprc_minigraph_chm13", color = "0.25 0.6 0.85", style="rounded"];
+	7[label = "gfa_stats\nprefix: benchmark/results/queries/node/vg/hprc_minigraph_chm13/s100000_chr8/context_0/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	8[label = "vg_node_to_gfa", color = "0.57 0.6 0.85", style="rounded"];
+	9[label = "vg_node_query\ncontext: 0\nquery: s100000_chr8", color = "0.54 0.6 0.85", style="rounded"];
+	10[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_vg/hprc_minigraph_chm13/s100000_chr8/context_0/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	11[label = "gfaidx_node_matched\ncontext: 0\nquery: s100000_chr8\nsource: vg", color = "0.16 0.6 0.85", style="rounded"];
+	12[label = "gfa_stats\nprefix: benchmark/results/queries/node/odgi/hprc_minigraph_chm13/s100000_chr8/context_0/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	13[label = "odgi_node_to_gfa", color = "0.32 0.6 0.85", style="rounded"];
+	14[label = "odgi_node_query\ncontext: 0\nquery: s100000_chr8", color = "0.29 0.6 0.85", style="rounded"];
+	15[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_odgi/hprc_minigraph_chm13/s100000_chr8/context_0/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	16[label = "gfaidx_node_matched\ncontext: 0\nquery: s100000_chr8\nsource: odgi", color = "0.16 0.6 0.85", style="rounded"];
+	17[label = "gfa_stats\nprefix: benchmark/results/queries/node/vg/hprc_minigraph_chm13/s100000_chr8/context_1/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	18[label = "vg_node_to_gfa", color = "0.57 0.6 0.85", style="rounded"];
+	19[label = "vg_node_query\ncontext: 1\nquery: s100000_chr8", color = "0.54 0.6 0.85", style="rounded"];
+	20[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_vg/hprc_minigraph_chm13/s100000_chr8/context_1/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	21[label = "gfaidx_node_matched\ncontext: 1\nquery: s100000_chr8\nsource: vg", color = "0.16 0.6 0.85", style="rounded"];
+	22[label = "gfa_stats\nprefix: benchmark/results/queries/node/odgi/hprc_minigraph_chm13/s100000_chr8/context_1/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	23[label = "odgi_node_to_gfa", color = "0.32 0.6 0.85", style="rounded"];
+	24[label = "odgi_node_query\ncontext: 1\nquery: s100000_chr8", color = "0.29 0.6 0.85", style="rounded"];
+	25[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_odgi/hprc_minigraph_chm13/s100000_chr8/context_1/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	26[label = "gfaidx_node_matched\ncontext: 1\nquery: s100000_chr8\nsource: odgi", color = "0.16 0.6 0.85", style="rounded"];
+	27[label = "gfa_stats\nprefix: benchmark/results/queries/node/vg/hprc_minigraph_chm13/s100000_chr8/context_2/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	28[label = "vg_node_to_gfa", color = "0.57 0.6 0.85", style="rounded"];
+	29[label = "vg_node_query\ncontext: 2\nquery: s100000_chr8", color = "0.54 0.6 0.85", style="rounded"];
+	30[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_vg/hprc_minigraph_chm13/s100000_chr8/context_2/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	31[label = "gfaidx_node_matched\ncontext: 2\nquery: s100000_chr8\nsource: vg", color = "0.16 0.6 0.85", style="rounded"];
+	32[label = "gfa_stats\nprefix: benchmark/results/queries/node/odgi/hprc_minigraph_chm13/s100000_chr8/context_2/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	33[label = "odgi_node_to_gfa", color = "0.32 0.6 0.85", style="rounded"];
+	34[label = "odgi_node_query\ncontext: 2\nquery: s100000_chr8", color = "0.29 0.6 0.85", style="rounded"];
+	35[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_odgi/hprc_minigraph_chm13/s100000_chr8/context_2/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	36[label = "gfaidx_node_matched\ncontext: 2\nquery: s100000_chr8\nsource: odgi", color = "0.16 0.6 0.85", style="rounded"];
+	37[label = "gfa_stats\nprefix: benchmark/results/queries/node/vg/hprc_minigraph_chm13/s100000_chr8/context_5/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	38[label = "vg_node_to_gfa", color = "0.57 0.6 0.85", style="rounded"];
+	39[label = "vg_node_query\ncontext: 5\nquery: s100000_chr8", color = "0.54 0.6 0.85", style="rounded"];
+	40[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_vg/hprc_minigraph_chm13/s100000_chr8/context_5/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	41[label = "gfaidx_node_matched\ncontext: 5\nquery: s100000_chr8\nsource: vg", color = "0.16 0.6 0.85", style="rounded"];
+	42[label = "gfa_stats\nprefix: benchmark/results/queries/node/odgi/hprc_minigraph_chm13/s100000_chr8/context_5/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	43[label = "odgi_node_to_gfa", color = "0.32 0.6 0.85", style="rounded"];
+	44[label = "odgi_node_query\ncontext: 5\nquery: s100000_chr8", color = "0.29 0.6 0.85", style="rounded"];
+	45[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_odgi/hprc_minigraph_chm13/s100000_chr8/context_5/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	46[label = "gfaidx_node_matched\ncontext: 5\nquery: s100000_chr8\nsource: odgi", color = "0.16 0.6 0.85", style="rounded"];
+	47[label = "gfa_stats\nprefix: benchmark/results/queries/node/vg/hprc_minigraph_chm13/s100000_chr8/context_10/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	48[label = "vg_node_to_gfa", color = "0.57 0.6 0.85", style="rounded"];
+	49[label = "vg_node_query\ncontext: 10\nquery: s100000_chr8", color = "0.54 0.6 0.85", style="rounded"];
+	50[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_vg/hprc_minigraph_chm13/s100000_chr8/context_10/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	51[label = "gfaidx_node_matched\ncontext: 10\nquery: s100000_chr8\nsource: vg", color = "0.16 0.6 0.85", style="rounded"];
+	52[label = "gfa_stats\nprefix: benchmark/results/queries/node/odgi/hprc_minigraph_chm13/s100000_chr8/context_10/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	53[label = "odgi_node_to_gfa", color = "0.32 0.6 0.85", style="rounded"];
+	54[label = "odgi_node_query\ncontext: 10\nquery: s100000_chr8", color = "0.29 0.6 0.85", style="rounded"];
+	55[label = "gfa_stats\nprefix: benchmark/results/queries/node/gfaidx_matched_odgi/hprc_minigraph_chm13/s100000_chr8/context_10/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	56[label = "gfaidx_node_matched\ncontext: 10\nquery: s100000_chr8\nsource: odgi", color = "0.16 0.6 0.85", style="rounded"];
+	57[label = "gfa_stats\nprefix: benchmark/results/queries/region/gfaidx_direct/hprc_minigraph_chm13/chr8_62000000_80000000/subgraph", color = "0.06 0.6 0.85", style="rounded"];
+	58[label = "gfaidx_region_direct\nquery: chr8_62000000_80000000", color = "0.19 0.6 0.85", style="rounded"];
+	1 -> 0
+	2 -> 0
+	3 -> 2
+	4 -> 2
+	5 -> 2
+	6 -> 2
+	7 -> 2
+	10 -> 2
+	9 -> 2
+	11 -> 2
+	12 -> 2
+	15 -> 2
+	14 -> 2
+	16 -> 2
+	17 -> 2
+	20 -> 2
+	19 -> 2
+	21 -> 2
+	22 -> 2
+	25 -> 2
+	24 -> 2
+	26 -> 2
+	27 -> 2
+	30 -> 2
+	29 -> 2
+	31 -> 2
+	32 -> 2
+	35 -> 2
+	34 -> 2
+	36 -> 2
+	37 -> 2
+	40 -> 2
+	39 -> 2
+	41 -> 2
+	42 -> 2
+	45 -> 2
+	44 -> 2
+	46 -> 2
+	47 -> 2
+	50 -> 2
+	49 -> 2
+	51 -> 2
+	52 -> 2
+	55 -> 2
+	54 -> 2
+	56 -> 2
+	57 -> 2
+	58 -> 2
+	3 -> 4
+	8 -> 7
+	9 -> 8
+	5 -> 9
+	11 -> 10
+	3 -> 11
+	7 -> 11
+	13 -> 12
+	14 -> 13
+	6 -> 14
+	16 -> 15
+	3 -> 16
+	12 -> 16
+	18 -> 17
+	19 -> 18
+	5 -> 19
+	21 -> 20
+	3 -> 21
+	17 -> 21
+	23 -> 22
+	24 -> 23
+	6 -> 24
+	26 -> 25
+	3 -> 26
+	22 -> 26
+	28 -> 27
+	29 -> 28
+	5 -> 29
+	31 -> 30
+	3 -> 31
+	27 -> 31
+	33 -> 32
+	34 -> 33
+	6 -> 34
+	36 -> 35
+	3 -> 36
+	32 -> 36
+	38 -> 37
+	39 -> 38
+	5 -> 39
+	41 -> 40
+	3 -> 41
+	37 -> 41
+	43 -> 42
+	44 -> 43
+	6 -> 44
+	46 -> 45
+	3 -> 46
+	42 -> 46
+	48 -> 47
+	49 -> 48
+	5 -> 49
+	51 -> 50
+	3 -> 51
+	47 -> 51
+	53 -> 52
+	54 -> 53
+	6 -> 54
+	56 -> 55
+	3 -> 56
+	52 -> 56
+	58 -> 57
+	3 -> 58
+	4 -> 58
+}            
+

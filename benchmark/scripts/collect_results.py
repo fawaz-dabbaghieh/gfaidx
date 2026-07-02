@@ -126,9 +126,8 @@ def write_index_table(results: Path, graphs: list[dict[str, str]], out_path: Pat
                     ],
                 },
                 "vg": {
-                    "phases": ["convert", "xg"],
+                    "phases": ["convert"],
                     "files": [
-                        results / "indexes" / "vg" / graph / f"{graph}.vg",
                         results / "indexes" / "vg" / graph / f"{graph}.xg",
                     ],
                 },

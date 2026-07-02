@@ -9,5 +9,5 @@
 #
 # odgi_path_indexes defaults to true. Set it to 0/false for graphs with no P/W
 # paths, because odgi pathindex can abort on pathless graphs.
-graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_index_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
 hprc_minigraph_chm13	test_graphs/hprc_minigraph/hprc-v1.0-minigraph-chm13.gfa			0

@@ -220,14 +220,12 @@ for graph in GRAPHS:
         RESULTS / "metrics" / "index" / "gfaidx" / graph / "index_gfa.json",
         RESULTS / "metrics" / "index" / "gfaidx" / graph / "index_coordinates.json",
         RESULTS / "metrics" / "index" / "vg" / graph / "convert.json",
-        RESULTS / "metrics" / "index" / "vg" / graph / "xg.json",
         RESULTS / "metrics" / "index" / "odgi" / graph / "build.json",
         gp,
         Path(str(gp) + ".idx"),
         Path(str(gp) + ".ndx"),
         Path(str(gp) + ".pdx"),
         Path(str(gp) + ".cdx"),
-        Path(str(vp) + ".vg"),
         Path(str(vp) + ".xg"),
         Path(str(op) + ".og"),
     ])
@@ -374,7 +372,7 @@ rule vg_convert:
     input:
         gfa=graph_gfa
     output:
-        vg=f"{RESULTS}/indexes/vg/{{graph}}/{{graph}}.vg",
+        xg=f"{RESULTS}/indexes/vg/{{graph}}/{{graph}}.xg",
         metrics=f"{RESULTS}/metrics/index/vg/{{graph}}/convert.json",
         log=f"{RESULTS}/logs/index/vg/{{graph}}/convert.log"
     threads: THREADS
@@ -385,29 +383,9 @@ rule vg_convert:
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} \
           --log {output.log} \
-          --stdout {output.vg} \
+          --stdout {output.xg} \
           --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} convert -g -v {input.gfa} {params.extra}
-        """
-
-
-rule vg_xg:
-    input:
-        vg=lambda wildcards: Path(str(vg_prefix(wildcards.graph)) + ".vg")
-    output:
-        xg=f"{RESULTS}/indexes/vg/{{graph}}/{{graph}}.xg",
-        metrics=f"{RESULTS}/metrics/index/vg/{{graph}}/xg.json",
-        log=f"{RESULTS}/logs/index/vg/{{graph}}/xg.log"
-    threads: THREADS
-    params:
-        extra=lambda wildcards: join_options(extra("vg", "index_extra"), graph_extra(wildcards, "vg_index_extra"))
-    shell:
-        """
-        {PYTHON} {SCRIPTS}/measure.py \
-          --metrics {output.metrics} \
-          --log {output.log} \
-          --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} index -t {threads} -x {output.xg} {input.vg} {params.extra}
+          -- {VG} convert -g -x {input.gfa} {params.extra}
         """
 
 

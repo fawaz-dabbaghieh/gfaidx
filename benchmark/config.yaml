@@ -35,7 +35,6 @@ gfaidx:
 
 vg:
   convert_extra: ""
-  index_extra: ""
   find_extra: ""
 
 odgi:

@@ -13,14 +13,14 @@ statistics and uses matched output node counts when comparing `gfaidx` against
 Indexing:
 
 - `gfaidx`: `index_gfa`, then `index_coordinates`
-- `vg`: `vg convert -g -v` to `.vg`, then `vg index -x` to `.xg`
+- `vg`: `vg convert -g -x` directly to `.xg`
 - `odgi`: `odgi build` to `.og`, plus optional `odgi pathindex` to `.xp`
   and `odgi stepindex` to `.stpidx`
 
 The main query-ready index size is:
 
 - `gfaidx`: `.gfa.gz + .idx + .ndx + .pdx + .cdx`
-- `vg`: `.vg + .xg`
+- `vg`: `.xg`
 - `odgi`: `.og + .xp + .stpidx` when path-side indexes are enabled, or only
   `.og` for graphs marked as pathless
 
@@ -92,7 +92,7 @@ Optional columns:
 Example:
 
 ```text
-graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_index_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
 chr22	test_graphs/hprc_chr22/chr22.gfa	benchmark/path_names/chr22.paths.tsv	CHM13	1
 ```
 
