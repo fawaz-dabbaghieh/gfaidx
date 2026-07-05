@@ -192,12 +192,12 @@ void write_w_subpath_with_coords(std::ostream& out,
                                  const PathCoordCacheEntry& entry,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count,
-                                 std::string_view output_name) {
+                                 std::string_view subpath_label) {
     const auto sub_start = static_cast<std::uint64_t>(entry.info.seq_start) + entry.prefix_lengths[start_step];
     const auto sub_end = static_cast<std::uint64_t>(entry.info.seq_start) + entry.prefix_lengths[start_step + step_count];
 
     out << "W\t" << entry.info.sample_id << '\t' << entry.info.hap_index << '\t'
-        << output_name << '\t' << sub_start << '\t' << sub_end << '\t';
+        << entry.info.seq_id << '\t' << sub_start << '\t' << sub_end << '\t';
     for (std::uint64_t i = start_step; i < start_step + step_count; ++i) {
         const auto& step = entry.steps[static_cast<std::size_t>(i)];
         out << (step.is_reverse ? '<' : '>');
@@ -205,6 +205,12 @@ void write_w_subpath_with_coords(std::ostream& out,
     }
     if (!entry.info.tags.empty()) {
         out << '\t' << entry.info.tags;
+    }
+    // Keep the W SeqId as the original coordinate namespace. The synthetic
+    // subpath label is useful for humans/debugging, but putting it in SeqId
+    // makes the concrete SeqStart/SeqEnd coordinates refer to a fake sequence.
+    if (!subpath_label.empty()) {
+        out << "\tsp:Z:" << subpath_label;
     }
     out << '\n';
 }

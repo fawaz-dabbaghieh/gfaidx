@@ -55,7 +55,7 @@ void write_w_subpath_with_coords(std::ostream& out,
                                  const PathCoordCacheEntry& entry,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count,
-                                 std::string_view output_name);
+                                 std::string_view subpath_label);
 
 }  // namespace gfaidx::paths
 
