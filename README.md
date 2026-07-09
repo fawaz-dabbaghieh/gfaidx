@@ -74,10 +74,25 @@ calls such as `open`, `fstat`, `mmap`, and `close`.
 ### C++ CLI
 
 ```bash
-mkdir build
-cd build
-cmake ..
-make -j 4
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 4
+```
+
+To install the executable into a prefix:
+
+```bash
+cmake --install build --prefix /usr/local
+```
+
+For a user-writable install, replace `/usr/local` with another prefix, for
+example `$HOME/.local`.
+
+### Bioconda
+
+A Bioconda package is planned. Once the recipe is merged, installation will be:
+
+```bash
+conda install -c bioconda -c conda-forge gfaidx
 ```
 
 ### Python helpers

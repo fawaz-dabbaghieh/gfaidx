@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 4.0)
 project(gfaidx LANGUAGES C CXX)
 
+include(GNUInstallDirs)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -47,3 +49,7 @@ add_executable(gfaidx
 # Keep warnings enabled for this target without forcing a specific optimization/debug profile.
 target_compile_options(gfaidx PRIVATE -Wall)
 target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
+
+# Install the CLI into the standard binary directory so package managers can use
+# `cmake --install` with their own CMAKE_INSTALL_PREFIX.
+install(TARGETS gfaidx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
