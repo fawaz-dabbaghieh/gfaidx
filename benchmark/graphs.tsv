@@ -2,7 +2,7 @@
 # graph IDs should be file-safe: letters, digits, dots, underscores, and dashes.
 #
 # gfaidx_path_names_file is optional. If present, it should be produced by:
-#   gfaidx get_path <graph>.pdx --print_path_names
+#   gfaidx get_path <indexed-graph.gfa.gz> --print_path_names
 # and filtered to the P/W records to coordinate-index.
 #
 # gfaidx_reference is optional and is used only when gfaidx_path_names_file is empty.

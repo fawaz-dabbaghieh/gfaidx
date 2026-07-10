@@ -13,7 +13,7 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.5.4";
+    constexpr const char* version = "1.5.5";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     program.add_subparser(index_paths);
 
     argparse::ArgumentParser get_path("get_path", version);
-    get_path.add_description("Print a full P/W record or node-restricted subpaths from a path index");
+    get_path.add_description("Print a full P/W record or node-restricted subpaths from an indexed graph's path index");
     gfaidx::paths::configure_get_path_parser(get_path);
     program.add_subparser(get_path);
 

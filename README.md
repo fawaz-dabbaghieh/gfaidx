@@ -223,7 +223,7 @@ Options:
   reference samples are indexed
 - `--path_names_file <path>`
   tab-separated file in the same format emitted by
-  `gfaidx get_path graph.pdx --print_path_names`; selected `W` rows keep their
+  `gfaidx get_path graph.gfa.gz --print_path_names`; selected `W` rows keep their
   W coordinates, while selected `P` rows are indexed as path-local coordinates
   starting at 0 and advancing by segment length. P paths with non-`*` overlaps
   are rejected because their coordinate lengths would be ambiguous.
@@ -238,7 +238,7 @@ gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
 
 gfaidx index_coordinates chr22.gfa.gz chr22.gfa.gz.cdx --reference CHM13
 
-gfaidx get_path graph.gfa.gz.pdx --print_path_names > path_names.tsv
+gfaidx get_path graph.gfa.gz --print_path_names > path_names.tsv
 # edit or filter path_names.tsv, then index exactly those P/W records
 gfaidx index_coordinates graph.gfa.gz graph.gfa.gz.cdx --path_names_file path_names.tsv
 ```
@@ -365,7 +365,7 @@ gfaidx index_paths graph.indexed.gfa.gz graph.indexed.gfa.gz.pdx
 
 ### `gfaidx get_path`
 
-Query a `.pdx` index in one of four modes:
+Query an indexed graph's companion `.pdx` index in one of four modes:
 
 1. list indexed `P` path names and `W` walk coordinate identifiers
 2. full path lookup by canonical path ID
@@ -373,25 +373,27 @@ Query a `.pdx` index in one of four modes:
 4. node-set or subgraph lookup returning subpaths/subwalks
 
 ```bash
-gfaidx get_path <in_index.pdx> [query mode options]
+gfaidx get_path <in_gfa> [query mode options]
 ```
 
 Arguments:
 
-- `in_index.pdx`
-  input path index
+- `in_gfa`
+  input indexed GFA graph; `get_path` looks for `<in_gfa>.pdx`
 
 General options:
 
 - `--ndx <path>`
   optional override for the node hash index; for node-set queries, `get_path`
-  first tries the companion file obtained by replacing the input `.pdx` suffix
-  with `.ndx`
+  first tries `<in_gfa>.ndx`
+- `--pdx <path>`
+  optional override for the path index if the companion `.pdx` was renamed or
+  stored elsewhere
 
 #### Mode 1: print path names
 
 ```bash
-gfaidx get_path graph.pdx --print_path_names
+gfaidx get_path graph.gfa.gz --print_path_names
 ```
 
 Output is tab-separated:
@@ -407,7 +409,7 @@ or walks.
 #### Mode 2: exact path ID lookup
 
 ```bash
-gfaidx get_path graph.pdx --path_id <id>
+gfaidx get_path graph.gfa.gz --path_id <id>
 ```
 
 Options:
@@ -423,13 +425,13 @@ Notes:
 Example:
 
 ```bash
-gfaidx get_path graph.pdx --path_id loopbackP
+gfaidx get_path graph.gfa.gz --path_id loopbackP
 ```
 
 #### Mode 3: structured `W` lookup
 
 ```bash
-gfaidx get_path graph.pdx --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
+gfaidx get_path graph.gfa.gz --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
 ```
 
 Options:
@@ -450,7 +452,7 @@ If multiple `W` lines match and start/end are omitted, the lookup is rejected as
 Example:
 
 ```bash
-gfaidx get_path graph.pdx --sample HG002 --hap_index 1 --seq_id chr22
+gfaidx get_path graph.gfa.gz --sample HG002 --hap_index 1 --seq_id chr22
 ```
 
 #### Mode 4: node-set or subgraph lookup
@@ -458,9 +460,9 @@ gfaidx get_path graph.pdx --sample HG002 --hap_index 1 --seq_id chr22
 Return all `P`/`W` runs that remain contiguous inside the requested node set.
 
 ```bash
-gfaidx get_path graph.gfa.gz.pdx --nodes 1,2,3
-gfaidx get_path graph.gfa.gz.pdx --nodes_file nodes.txt
-gfaidx get_path graph.gfa.gz.pdx --subgraph_gfa subgraph.gfa
+gfaidx get_path graph.gfa.gz --nodes 1,2,3
+gfaidx get_path graph.gfa.gz --nodes_file nodes.txt
+gfaidx get_path graph.gfa.gz --subgraph_gfa subgraph.gfa
 ```
 
 Node query options:
@@ -489,7 +491,7 @@ Coordinate rules:
 Example:
 
 ```bash
-gfaidx get_path graph.pdx \
+gfaidx get_path graph.gfa.gz \
   --subgraph_gfa extracted_subgraph.gfa \
   --with_walk_coords \
   --source_gfa graph.gfa

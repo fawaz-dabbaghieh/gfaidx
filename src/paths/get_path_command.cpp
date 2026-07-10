@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -43,21 +44,15 @@ void append_csv_tokens(std::vector<std::string>& out, const std::string& csv) {
     }
 }
 
-std::string infer_companion_ndx_path(const std::string& input_index) {
-    // index_gfa now writes companion files with the same base name:
-    //   <graph>.pdx
-    //   <graph>.ndx
-    // For node-based get_path queries, prefer that convention first so users
-    // do not have to repeat --ndx on the common path.
-    constexpr std::string_view pdx_suffix = ".pdx";
-    if (input_index.size() >= pdx_suffix.size() &&
-        input_index.compare(input_index.size() - pdx_suffix.size(),
-                            pdx_suffix.size(),
-                            pdx_suffix) == 0) {
-        return input_index.substr(0, input_index.size() - pdx_suffix.size()) + ".ndx";
-    }
+std::string infer_companion_path(const std::string& input_graph, std::string_view suffix) {
+    // index_gfa writes sidecars by appending their suffix to the indexed graph
+    // path, e.g. graph.gfa.gz.pdx and graph.gfa.gz.ndx.
+    return input_graph + std::string(suffix);
+}
 
-    return input_index + ".ndx";
+bool has_suffix(const std::string& value, std::string_view suffix) {
+    return value.size() >= suffix.size() &&
+           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 std::vector<std::string> load_node_names(const std::string& csv,
@@ -187,13 +182,18 @@ void write_indexed_path_names(std::ostream& out, const PathIndexReader& index) {
 }  // namespace
 
 void configure_get_path_parser(argparse::ArgumentParser& parser) {
-    parser.add_argument("in_index")
-      .help("input path index (.pdx)");
+    parser.add_argument("in_gfa")
+      .help("input indexed GFA graph; the path index defaults to <in_gfa>.pdx");
+
+    parser.add_argument("--pdx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("optional path to the path index (.pdx); defaults to <in_gfa>.pdx");
 
     parser.add_argument("--ndx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("optional path to the node hash index (.ndx); node-set queries first try the companion file next to the input .pdx");
+      .help("optional path to the node hash index (.ndx); node-set queries default to <in_gfa>.ndx");
 
     parser.add_argument("--path_id")
       .default_value(std::string(""))
@@ -255,10 +255,28 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
 }
 
 int run_get_path(const argparse::ArgumentParser& program) {
-    const auto input_index = program.get<std::string>("in_index");
+    const auto input_graph = program.get<std::string>("in_gfa");
+    std::string path_index_path = program.get<std::string>("pdx");
     std::string node_index_path = program.get<std::string>("ndx");
-    if (!file_exists(input_index.c_str())) {
-        std::cerr << "Path index file does not exist: " << input_index << std::endl;
+
+    if (path_index_path.empty() && has_suffix(input_graph, ".pdx")) {
+        std::cerr << "get_path expects the indexed graph path as its positional argument, not the .pdx file." << std::endl;
+        std::cerr << "Use: gfaidx get_path <indexed.gfa.gz> [query mode options]" << std::endl;
+        std::cerr << "If the path index was renamed, pass it with --pdx <path>." << std::endl;
+        return 1;
+    }
+
+    if (path_index_path.empty()) {
+        path_index_path = infer_companion_path(input_graph, ".pdx");
+    }
+    if (!file_exists(path_index_path.c_str())) {
+        if (program.get<std::string>("pdx").empty()) {
+            std::cerr << "Path index file does not exist: " << path_index_path << std::endl;
+            std::cerr << "Tried inferred companion index: " << path_index_path << std::endl;
+            std::cerr << "Use --pdx <path> if the .pdx file was renamed or stored elsewhere." << std::endl;
+        } else {
+            std::cerr << "Path index file does not exist: " << path_index_path << std::endl;
+        }
         return 1;
     }
 
@@ -303,7 +321,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
     // Only node-based queries need .ndx. When the user does not provide one,
     // try the companion file path that index_gfa now emits by default.
     if (has_node_query && node_index_path.empty()) {
-        node_index_path = infer_companion_ndx_path(input_index);
+        node_index_path = infer_companion_path(input_graph, ".ndx");
     }
     if (has_node_query && !file_exists(node_index_path.c_str())) {
         if (program.get<std::string>("ndx").empty()) {
@@ -317,7 +335,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
     }
 
     try {
-        PathIndexReader index(input_index);
+        PathIndexReader index(path_index_path);
 
         if (print_path_names) {
             write_indexed_path_names(std::cout, index);

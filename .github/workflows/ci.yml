@@ -80,5 +80,5 @@ jobs:
           ./install/bin/gfaidx get_subgraph smoke.indexed.gfa.gz 2 smoke.subgraph.gfa --max_nodes 3
           grep -q $'^S\t2\tCC' smoke.subgraph.gfa
 
-          ./install/bin/gfaidx get_path smoke.indexed.gfa.gz.pdx --print_path_names > smoke.paths.txt
+          ./install/bin/gfaidx get_path smoke.indexed.gfa.gz --print_path_names > smoke.paths.txt
           grep -q $'^W\tSAMPLE\t0\tchrT\t100\t109' smoke.paths.txt

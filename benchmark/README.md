@@ -83,7 +83,7 @@ Required columns:
 Optional columns:
 
 - `gfaidx_path_names_file`: filtered output from
-  `gfaidx get_path <graph>.pdx --print_path_names`
+  `gfaidx get_path <indexed-graph.gfa.gz> --print_path_names`
 - `gfaidx_reference`: reference sample for `gfaidx index_coordinates`
 - `odgi_path_indexes`: defaults to `1`; set to `0` for graphs with no P/W
   paths so the workflow skips `.xp` and `.stpidx`
@@ -140,7 +140,7 @@ the graph. Those rows are skipped in the DAG and reported as `NA` in
 `query_metrics.tsv`. Validate path names before large runs:
 
 ```bash
-gfaidx get_path graph.gfa.gz.pdx --print_path_names
+gfaidx get_path graph.gfa.gz --print_path_names
 vg find -x graph.xg -I
 odgi paths -i graph.og -L
 ```
