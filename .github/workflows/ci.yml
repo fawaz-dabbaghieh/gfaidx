@@ -16,14 +16,18 @@ on:
 
 jobs:
   build-and-smoke-test:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
+        include:
+          - label: Linux x64
+            os: ubuntu-latest
+          - label: macOS Intel
+            os: macos-15-intel
+          - label: macOS arm64
+            os: macos-15
 
     steps:
       - name: Check out repository
