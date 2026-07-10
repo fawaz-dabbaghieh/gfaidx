@@ -530,7 +530,6 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     }
 
     paths::WalkCoordState walk_coord_state;
-    std::unordered_map<std::uint32_t, paths::PathCoordCacheEntry> path_coord_cache;
     if (with_walk_coordinates && has_coordinate_run) {
         // Prefer .lnx for node lengths. If it is absent, the indexed graph
         // remains a valid fallback because all S records stay in the gzip.
@@ -554,29 +553,32 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
 
         if (with_walk_coordinates && walk_coord_state.usable &&
             (info.record_type == 'W' || info.record_type == 'P')) {
-            auto& coord_entry = paths::get_or_build_path_coord_cache(
-                index,
-                run.path_id,
-                walk_coord_state,
-                path_coord_cache,
-                [](const std::string& message) {
-                    warn_get_subgraph(message);
-                });
-            if (coord_entry.usable) {
-                if (info.record_type == 'W') {
-                    paths::write_w_subpath_with_coords(out,
-                                                       index,
-                                                       coord_entry,
-                                                       run.start_step,
-                                                       run.step_count,
-                                                       subpath_name);
-                } else {
-                    paths::write_p_subpath_with_coords(out,
-                                                       index,
-                                                       coord_entry,
-                                                       run.start_step,
-                                                       run.step_count);
-                }
+            bool wrote_coordinates = false;
+            if (info.record_type == 'W') {
+                wrote_coordinates = paths::write_w_subpath_with_coords_bounded(
+                    out,
+                    index,
+                    run.path_id,
+                    walk_coord_state,
+                    run.start_step,
+                    run.step_count,
+                    subpath_name,
+                    [](const std::string& message) {
+                        warn_get_subgraph(message);
+                    });
+            } else {
+                wrote_coordinates = paths::write_p_subpath_with_coords_bounded(
+                    out,
+                    index,
+                    run.path_id,
+                    walk_coord_state,
+                    run.start_step,
+                    run.step_count,
+                    [](const std::string& message) {
+                        warn_get_subgraph(message);
+                    });
+            }
+            if (wrote_coordinates) {
                 ++emitted;
                 continue;
             }

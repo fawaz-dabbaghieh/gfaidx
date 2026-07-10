@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include "fs/Reader.h"
@@ -439,7 +438,6 @@ int run_get_path(const argparse::ArgumentParser& program) {
         }
 
         WalkCoordState walk_coord_state;
-        std::unordered_map<std::uint32_t, PathCoordCacheEntry> path_coord_cache;
         const bool have_length_source = !length_index_path.empty() || !source_gfa.empty();
         if (with_walk_coords && (has_walk_run || (has_p_run && have_length_source))) {
             walk_coord_state = load_node_lengths_by_index(index,
@@ -458,26 +456,26 @@ int run_get_path(const argparse::ArgumentParser& program) {
 
             if (with_walk_coords && walk_coord_state.usable &&
                 (info.record_type == 'W' || info.record_type == 'P')) {
-                auto& coord_entry = get_or_build_path_coord_cache(index,
-                                                                 run.path_id,
-                                                                 walk_coord_state,
-                                                                 path_coord_cache,
-                                                                 warn_get_path);
-                if (coord_entry.usable) {
-                    if (info.record_type == 'W') {
-                        write_w_subpath_with_coords(std::cout,
-                                                    index,
-                                                    coord_entry,
-                                                    run.start_step,
-                                                    run.step_count,
-                                                    subpath_name);
-                    } else {
-                        write_p_subpath_with_coords(std::cout,
-                                                    index,
-                                                    coord_entry,
-                                                    run.start_step,
-                                                    run.step_count);
-                    }
+                bool wrote_coordinates = false;
+                if (info.record_type == 'W') {
+                    wrote_coordinates = write_w_subpath_with_coords_bounded(std::cout,
+                                                                            index,
+                                                                            run.path_id,
+                                                                            walk_coord_state,
+                                                                            run.start_step,
+                                                                            run.step_count,
+                                                                            subpath_name,
+                                                                            warn_get_path);
+                } else {
+                    wrote_coordinates = write_p_subpath_with_coords_bounded(std::cout,
+                                                                            index,
+                                                                            run.path_id,
+                                                                            walk_coord_state,
+                                                                            run.start_step,
+                                                                            run.step_count,
+                                                                            warn_get_path);
+                }
+                if (wrote_coordinates) {
                     continue;
                 }
             }

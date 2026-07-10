@@ -72,6 +72,26 @@ void write_p_subpath_with_coords(std::ostream& out,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count);
 
+// Bounded-memory coordinate emitters used by query commands. They stream only
+// the path prefix needed to compute this subpath's coordinate range and keep
+// just the emitted slice in memory.
+bool write_w_subpath_with_coords_bounded(std::ostream& out,
+                                         const PathIndexReader& index,
+                                         std::uint32_t path_id,
+                                         const WalkCoordState& walk_coord_state,
+                                         std::uint64_t start_step,
+                                         std::uint64_t step_count,
+                                         std::string_view subpath_label,
+                                         const WalkCoordWarning& warn = WalkCoordWarning{});
+
+bool write_p_subpath_with_coords_bounded(std::ostream& out,
+                                         const PathIndexReader& index,
+                                         std::uint32_t path_id,
+                                         const WalkCoordState& walk_coord_state,
+                                         std::uint64_t start_step,
+                                         std::uint64_t step_count,
+                                         const WalkCoordWarning& warn = WalkCoordWarning{});
+
 }  // namespace gfaidx::paths
 
 #endif  // GFAIDX_WALK_COORDS_H

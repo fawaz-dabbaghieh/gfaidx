@@ -86,6 +86,106 @@ std::string p_coordinate_subpath_name(std::string_view path_name,
            std::to_string(end);
 }
 
+struct CoordinateSlice {
+    std::uint64_t start{};
+    std::uint64_t end{};
+    std::vector<StepRecord> steps;
+};
+
+bool build_coordinate_slice(const PathIndexReader& index,
+                            const PathInfo& info,
+                            const WalkCoordState& walk_coord_state,
+                            std::uint64_t start_step,
+                            std::uint64_t step_count,
+                            CoordinateSlice& out,
+                            const WalkCoordWarning& warn) {
+    // Query commands only need the coordinates and steps for one emitted
+    // subpath. Stream the path prefix up to the subpath end instead of
+    // materializing the complete chromosome-scale path in memory.
+    if (step_count == 0 || start_step > info.step_count ||
+        step_count > info.step_count - start_step) {
+        warn_if_requested(warn, "requested subpath range is outside path '" +
+                                std::string(info.name) + "'");
+        return false;
+    }
+    if (info.record_type == 'P' && !p_path_has_no_overlaps(info.overlap_field)) {
+        warn_if_requested(warn, "P-line '" + std::string(info.name) +
+                                "' has overlaps, falling back to subpath output without coordinates");
+        return false;
+    }
+    if (info.record_type == 'W' && (info.seq_start < 0 || info.seq_end < 0)) {
+        warn_if_requested(warn, "W-line '" + std::string(info.name) +
+                                "' is missing SeqStart/SeqEnd, falling back to subwalk output without coordinates");
+        return false;
+    }
+    if (info.record_type == 'W' && info.seq_end < info.seq_start) {
+        warn_if_requested(warn, "W-line '" + std::string(info.name) +
+                                "' has SeqEnd < SeqStart, falling back to subwalk output without coordinates");
+        return false;
+    }
+
+    out = CoordinateSlice{};
+    out.steps.reserve(static_cast<std::size_t>(step_count));
+    const std::uint64_t end_step = start_step + step_count;
+    std::uint64_t cumulative = 0;
+
+    try {
+        index.for_each_step(info.path_id, 0, end_step,
+            [&](const StepRecord& step, std::uint64_t step_rank) {
+                if (step.node_id >= walk_coord_state.length_count()) {
+                    throw std::runtime_error("path references a node outside the length table");
+                }
+                if (step_rank == start_step) {
+                    out.start = cumulative;
+                }
+                if (step_rank >= start_step && step_rank < end_step) {
+                    out.steps.push_back(step);
+                }
+                cumulative += walk_coord_state.node_length(step.node_id);
+                if (step_rank + 1 == end_step) {
+                    out.end = cumulative;
+                }
+            });
+    } catch (const std::exception& err) {
+        warn_if_requested(warn, "could not compute coordinates for path '" +
+                                std::string(info.name) + "': " + err.what());
+        out = CoordinateSlice{};
+        return false;
+    }
+
+    if (info.record_type == 'W') {
+        out.start += static_cast<std::uint64_t>(info.seq_start);
+        out.end += static_cast<std::uint64_t>(info.seq_start);
+        if (out.end > static_cast<std::uint64_t>(info.seq_end)) {
+            warn_if_requested(warn, "W-line '" + std::string(info.name) +
+                                    "' has segment lengths beyond SeqEnd, falling back to subwalk output without coordinates");
+            out = CoordinateSlice{};
+            return false;
+        }
+    }
+    return true;
+}
+
+void write_w_segments_from_steps(std::ostream& out,
+                                 const PathIndexReader& index,
+                                 const std::vector<StepRecord>& steps) {
+    for (const auto& step : steps) {
+        out << (step.is_reverse ? '<' : '>');
+        out << index.get_node_name(step.node_id);
+    }
+}
+
+void write_p_segments_from_steps(std::ostream& out,
+                                 const PathIndexReader& index,
+                                 const std::vector<StepRecord>& steps) {
+    for (std::size_t i = 0; i < steps.size(); ++i) {
+        const auto& step = steps[i];
+        out << index.get_node_name(step.node_id);
+        out << (step.is_reverse ? '-' : '+');
+        if (i + 1 < steps.size()) out << ',';
+    }
+}
+
 }  // namespace
 
 std::uint64_t WalkCoordState::length_count() const {
@@ -293,6 +393,58 @@ void write_p_subpath_with_coords(std::ostream& out,
         out << '\t' << entry.info.tags;
     }
     out << '\n';
+}
+
+bool write_w_subpath_with_coords_bounded(std::ostream& out,
+                                         const PathIndexReader& index,
+                                         std::uint32_t path_id,
+                                         const WalkCoordState& walk_coord_state,
+                                         std::uint64_t start_step,
+                                         std::uint64_t step_count,
+                                         std::string_view subpath_label,
+                                         const WalkCoordWarning& warn) {
+    const auto info = index.get_path_info(path_id);
+    CoordinateSlice slice;
+    if (!build_coordinate_slice(index, info, walk_coord_state, start_step,
+                                step_count, slice, warn)) {
+        return false;
+    }
+
+    out << "W\t" << info.sample_id << '\t' << info.hap_index << '\t'
+        << info.seq_id << '\t' << slice.start << '\t' << slice.end << '\t';
+    write_w_segments_from_steps(out, index, slice.steps);
+    if (!info.tags.empty()) {
+        out << '\t' << info.tags;
+    }
+    if (!subpath_label.empty()) {
+        out << "\tsp:Z:" << subpath_label;
+    }
+    out << '\n';
+    return true;
+}
+
+bool write_p_subpath_with_coords_bounded(std::ostream& out,
+                                         const PathIndexReader& index,
+                                         std::uint32_t path_id,
+                                         const WalkCoordState& walk_coord_state,
+                                         std::uint64_t start_step,
+                                         std::uint64_t step_count,
+                                         const WalkCoordWarning& warn) {
+    const auto info = index.get_path_info(path_id);
+    CoordinateSlice slice;
+    if (!build_coordinate_slice(index, info, walk_coord_state, start_step,
+                                step_count, slice, warn)) {
+        return false;
+    }
+
+    out << "P\t" << p_coordinate_subpath_name(info.name, slice.start, slice.end) << '\t';
+    write_p_segments_from_steps(out, index, slice.steps);
+    out << "\t*";
+    if (!info.tags.empty()) {
+        out << '\t' << info.tags;
+    }
+    out << '\n';
+    return true;
 }
 
 }  // namespace gfaidx::paths

@@ -1241,6 +1241,48 @@ std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
     return out;
 }
 
+void PathIndexReader::for_each_step(
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t max_steps,
+    const std::function<void(const StepRecord& step, std::uint64_t step_rank)>& callback) const {
+    const auto info = get_path_info(path_id);
+    if (start_step > info.step_count) {
+        throw std::runtime_error("Requested start step beyond path length");
+    }
+
+    const std::uint64_t available = info.step_count - start_step;
+    std::uint64_t remaining = std::min(available, max_steps);
+    if (remaining == 0) return;
+
+    // Coordinate emission may need cumulative length up to a high step in a
+    // chromosome-scale path. Read the flat step table in bounded chunks so
+    // query memory is independent of full path length.
+    constexpr std::uint64_t kStepReadChunkRecords = 1ULL << 20;
+    std::vector<StepRecordDisk> raw;
+    raw.resize(static_cast<std::size_t>(std::min(remaining, kStepReadChunkRecords)));
+
+    std::uint64_t consumed = 0;
+    while (remaining > 0) {
+        const std::uint64_t take = std::min<std::uint64_t>(remaining, kStepReadChunkRecords);
+        if (raw.size() != static_cast<std::size_t>(take)) {
+            raw.resize(static_cast<std::size_t>(take));
+        }
+
+        const std::uint64_t byte_offset = step_table_offset_ +
+            (info.step_begin + start_step + consumed) * sizeof(StepRecordDisk);
+        read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
+
+        for (std::uint64_t i = 0; i < take; ++i) {
+            const auto step = unpack_step_record(raw[static_cast<std::size_t>(i)]);
+            callback(step, start_step + consumed + i);
+        }
+
+        consumed += take;
+        remaining -= take;
+    }
+}
+
 void PathIndexReader::for_each_node_posting(
     std::uint32_t node_id,
     const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const {

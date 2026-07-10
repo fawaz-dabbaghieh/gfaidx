@@ -137,6 +137,12 @@ public:
         std::uint64_t start_step = 0,
         std::uint64_t max_steps = std::numeric_limits<std::uint64_t>::max()) const;
 
+    void for_each_step(
+        std::uint32_t path_id,
+        std::uint64_t start_step,
+        std::uint64_t max_steps,
+        const std::function<void(const StepRecord& step, std::uint64_t step_rank)>& callback) const;
+
     void for_each_node_posting(
         std::uint32_t node_id,
         const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const;
