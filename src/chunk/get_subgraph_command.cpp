@@ -516,12 +516,24 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
         return 0;
     }
 
+    // W records use SeqStart/SeqEnd fields, and coordinate-indexed P records
+    // use path-local offsets in their output name. Both need node lengths.
+    bool has_coordinate_run = false;
+    if (with_walk_coordinates) {
+        for (const auto& run : runs) {
+            const auto record_type = index.get_path_info(run.path_id).record_type;
+            if (record_type == 'W' || record_type == 'P') {
+                has_coordinate_run = true;
+                break;
+            }
+        }
+    }
+
     paths::WalkCoordState walk_coord_state;
     std::unordered_map<std::uint32_t, paths::PathCoordCacheEntry> path_coord_cache;
-    if (with_walk_coordinates) {
-        // The indexed graph is the length source for get_region: P/W records live
-        // in .pdx, but all S records needed to compute W subwalk spans remain in
-        // the readable multi-member gzip.
+    if (with_walk_coordinates && has_coordinate_run) {
+        // Prefer .lnx for node lengths. If it is absent, the indexed graph
+        // remains a valid fallback because all S records stay in the gzip.
         walk_coord_state = paths::load_node_lengths_by_index(
             index,
             node_index,
@@ -540,7 +552,8 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
             std::to_string(run.start_step) + "_" +
             std::to_string(run.start_step + run.step_count - 1);
 
-        if (with_walk_coordinates && walk_coord_state.usable && info.record_type == 'W') {
+        if (with_walk_coordinates && walk_coord_state.usable &&
+            (info.record_type == 'W' || info.record_type == 'P')) {
             auto& coord_entry = paths::get_or_build_path_coord_cache(
                 index,
                 run.path_id,
@@ -550,12 +563,20 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
                     warn_get_subgraph(message);
                 });
             if (coord_entry.usable) {
-                paths::write_w_subpath_with_coords(out,
-                                                   index,
-                                                   coord_entry,
-                                                   run.start_step,
-                                                   run.step_count,
-                                                   subpath_name);
+                if (info.record_type == 'W') {
+                    paths::write_w_subpath_with_coords(out,
+                                                       index,
+                                                       coord_entry,
+                                                       run.start_step,
+                                                       run.step_count,
+                                                       subpath_name);
+                } else {
+                    paths::write_p_subpath_with_coords(out,
+                                                       index,
+                                                       coord_entry,
+                                                       run.start_step,
+                                                       run.step_count);
+                }
                 ++emitted;
                 continue;
             }

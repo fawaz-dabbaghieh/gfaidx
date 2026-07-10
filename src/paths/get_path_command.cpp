@@ -198,7 +198,7 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--lnx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("optional node length index (.lnx) for --with_walk_coords; defaults to <in_gfa>.lnx when present");
+      .help("optional node length index (.lnx) for coordinate-bearing path output; defaults to <in_gfa>.lnx when present");
 
     parser.add_argument("--path_id")
       .default_value(std::string(""))
@@ -256,7 +256,7 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--with_walk_coords").default_value(false)
       .implicit_value(true)
-      .help("for W subwalk output, recompute exact SeqStart/SeqEnd from --source_gfa when possible");
+      .help("emit W subwalks with exact SeqStart/SeqEnd and P subpaths with path-local coordinate names");
 }
 
 int run_get_path(const argparse::ArgumentParser& program) {
@@ -330,10 +330,6 @@ int run_get_path(const argparse::ArgumentParser& program) {
         }
         if (!file_exists(length_index_path.c_str())) {
             length_index_path.clear();
-        }
-        if (length_index_path.empty() && source_gfa.empty()) {
-            std::cerr << "--with_walk_coords requires a companion .lnx, --lnx <path>, or --source_gfa for the fallback S-line scan" << std::endl;
-            return 1;
         }
     }
 
@@ -422,9 +418,30 @@ int run_get_path(const argparse::ArgumentParser& program) {
             return 1;
         }
 
+        // W records have SeqStart/SeqEnd fields. P records can use path-local
+        // coordinates in their output names when a length source is available.
+        bool has_walk_run = false;
+        bool has_p_run = false;
+        if (with_walk_coords) {
+            for (const auto& run : runs) {
+                const auto record_type = index.get_path_info(run.path_id).record_type;
+                if (record_type == 'W') {
+                    has_walk_run = true;
+                } else if (record_type == 'P') {
+                    has_p_run = true;
+                }
+                if (has_walk_run && has_p_run) break;
+            }
+        }
+        if (with_walk_coords && has_walk_run && length_index_path.empty() && source_gfa.empty()) {
+            std::cerr << "--with_walk_coords requires a companion .lnx, --lnx <path>, or --source_gfa for W subwalk coordinates" << std::endl;
+            return 1;
+        }
+
         WalkCoordState walk_coord_state;
         std::unordered_map<std::uint32_t, PathCoordCacheEntry> path_coord_cache;
-        if (with_walk_coords) {
+        const bool have_length_source = !length_index_path.empty() || !source_gfa.empty();
+        if (with_walk_coords && (has_walk_run || (has_p_run && have_length_source))) {
             walk_coord_state = load_node_lengths_by_index(index,
                                                           node_index,
                                                           source_gfa,
@@ -439,19 +456,28 @@ int run_get_path(const argparse::ArgumentParser& program) {
                 std::to_string(run.start_step) + "_" +
                 std::to_string(run.start_step + run.step_count - 1);
 
-            if (with_walk_coords && walk_coord_state.usable && info.record_type == 'W') {
+            if (with_walk_coords && walk_coord_state.usable &&
+                (info.record_type == 'W' || info.record_type == 'P')) {
                 auto& coord_entry = get_or_build_path_coord_cache(index,
                                                                  run.path_id,
                                                                  walk_coord_state,
                                                                  path_coord_cache,
                                                                  warn_get_path);
                 if (coord_entry.usable) {
-                    write_w_subpath_with_coords(std::cout,
-                                                index,
-                                                coord_entry,
-                                                run.start_step,
-                                                run.step_count,
-                                                subpath_name);
+                    if (info.record_type == 'W') {
+                        write_w_subpath_with_coords(std::cout,
+                                                    index,
+                                                    coord_entry,
+                                                    run.start_step,
+                                                    run.step_count,
+                                                    subpath_name);
+                    } else {
+                        write_p_subpath_with_coords(std::cout,
+                                                    index,
+                                                    coord_entry,
+                                                    run.start_step,
+                                                    run.step_count);
+                    }
                     continue;
                 }
             }

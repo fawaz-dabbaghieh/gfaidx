@@ -4,6 +4,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "fs/Reader.h"
 #include "fs/fs_helpers.h"
@@ -68,6 +69,21 @@ bool parse_s_line_name_and_length(std::string_view line,
     }
 
     return false;
+}
+
+bool p_path_has_no_overlaps(std::string_view overlap_field) {
+    return overlap_field.empty() || overlap_field == "*";
+}
+
+std::string p_coordinate_subpath_name(std::string_view path_name,
+                                      std::uint64_t start,
+                                      std::uint64_t end) {
+    // P paths selected for coordinate indexing are path-local by default. When
+    // the common pangenome name shape sample#hap#seq is present, appending
+    // :start-end makes the resulting path name coordinate-addressable.
+    return std::string(path_name) + ":" +
+           std::to_string(start) + "-" +
+           std::to_string(end);
 }
 
 }  // namespace
@@ -182,15 +198,20 @@ PathCoordCacheEntry& get_or_build_path_coord_cache(
     entry.info = index.get_path_info(path_id);
     entry.steps = index.read_steps(path_id);
 
-    if (entry.info.record_type != 'W') {
+    if (entry.info.record_type != 'W' && entry.info.record_type != 'P') {
         return entry;
     }
-    if (entry.info.seq_start < 0 || entry.info.seq_end < 0) {
+    if (entry.info.record_type == 'P' && !p_path_has_no_overlaps(entry.info.overlap_field)) {
+        warn_if_requested(warn, "P-line '" + std::string(entry.info.name) +
+                                "' has overlaps, falling back to subpath output without coordinates");
+        return entry;
+    }
+    if (entry.info.record_type == 'W' && (entry.info.seq_start < 0 || entry.info.seq_end < 0)) {
         warn_if_requested(warn, "W-line '" + std::string(entry.info.name) +
                                 "' is missing SeqStart/SeqEnd, falling back to subwalk output without coordinates");
         return entry;
     }
-    if (entry.info.seq_end < entry.info.seq_start) {
+    if (entry.info.record_type == 'W' && entry.info.seq_end < entry.info.seq_start) {
         warn_if_requested(warn, "W-line '" + std::string(entry.info.name) +
                                 "' has SeqEnd < SeqStart, falling back to subwalk output without coordinates");
         return entry;
@@ -200,7 +221,7 @@ PathCoordCacheEntry& get_or_build_path_coord_cache(
     for (std::size_t i = 0; i < entry.steps.size(); ++i) {
         const auto node_id = entry.steps[i].node_id;
         if (node_id >= walk_coord_state.length_count()) {
-            warn_if_requested(warn, "W-line '" + std::string(entry.info.name) +
+            warn_if_requested(warn, "Path '" + std::string(entry.info.name) +
                                     "' references a node outside the length table, falling back to subwalk output without coordinates");
             entry.prefix_lengths.clear();
             return entry;
@@ -209,12 +230,14 @@ PathCoordCacheEntry& get_or_build_path_coord_cache(
                                       walk_coord_state.node_length(node_id);
     }
 
-    const auto expected_span = static_cast<std::uint64_t>(entry.info.seq_end - entry.info.seq_start);
-    if (entry.prefix_lengths.back() != expected_span) {
-        warn_if_requested(warn, "W-line '" + std::string(entry.info.name) +
-                                "' has inconsistent SeqStart/SeqEnd versus segment lengths, falling back to subwalk output without coordinates");
-        entry.prefix_lengths.clear();
-        return entry;
+    if (entry.info.record_type == 'W') {
+        const auto expected_span = static_cast<std::uint64_t>(entry.info.seq_end - entry.info.seq_start);
+        if (entry.prefix_lengths.back() != expected_span) {
+            warn_if_requested(warn, "W-line '" + std::string(entry.info.name) +
+                                    "' has inconsistent SeqStart/SeqEnd versus segment lengths, falling back to subwalk output without coordinates");
+            entry.prefix_lengths.clear();
+            return entry;
+        }
     }
 
     entry.usable = true;
@@ -245,6 +268,29 @@ void write_w_subpath_with_coords(std::ostream& out,
     // makes the concrete SeqStart/SeqEnd coordinates refer to a fake sequence.
     if (!subpath_label.empty()) {
         out << "\tsp:Z:" << subpath_label;
+    }
+    out << '\n';
+}
+
+void write_p_subpath_with_coords(std::ostream& out,
+                                 const PathIndexReader& index,
+                                 const PathCoordCacheEntry& entry,
+                                 std::uint64_t start_step,
+                                 std::uint64_t step_count) {
+    const auto sub_start = entry.prefix_lengths[start_step];
+    const auto sub_end = entry.prefix_lengths[start_step + step_count];
+    const auto output_name = p_coordinate_subpath_name(entry.info.name, sub_start, sub_end);
+
+    out << "P\t" << output_name << '\t';
+    for (std::uint64_t i = start_step; i < start_step + step_count; ++i) {
+        const auto& step = entry.steps[static_cast<std::size_t>(i)];
+        out << index.get_node_name(step.node_id);
+        out << (step.is_reverse ? '-' : '+');
+        if (i + 1 < start_step + step_count) out << ',';
+    }
+    out << "\t*";
+    if (!entry.info.tags.empty()) {
+        out << '\t' << entry.info.tags;
     }
     out << '\n';
 }

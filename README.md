@@ -270,11 +270,12 @@ Important options:
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_walk_coordinates` / `--with_walk_coords`
-  emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates. The
-  command uses the resolved `.pdx` for W metadata and the resolved `.lnx` for
-  node lengths. If `.lnx` is absent, it falls back to scanning indexed GFA `S`
-  lines; if validation fails, it falls back to `* *`
-  coordinates and logs a warning.
+  emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates and
+  returned no-overlap `P` subpaths with path-local coordinate names such as
+  `CHM13#0#chr1:1830045-1840123`. The command uses the resolved `.pdx` for path
+  metadata and the resolved `.lnx` for node lengths. If `.lnx` is absent, it
+  falls back to scanning indexed GFA `S` lines; if validation fails, it falls
+  back to ordinary subpath output and logs a warning.
 
 Example:
 
@@ -483,10 +484,11 @@ Node query options:
 - `--subgraph_gfa <path>`
   GFA whose `S` lines define the node set
 
-Coordinate options for `W` output:
+Coordinate options for path output:
 
 - `--with_walk_coords`
-  try to emit exact `SeqStart`/`SeqEnd` for returned `W` subwalks
+  try to emit exact `SeqStart`/`SeqEnd` for returned `W` subwalks and
+  coordinate-bearing names for no-overlap `P` subpaths
 - `--lnx <path>`
   node-length sidecar used to avoid scanning all `S` lines; defaults to
   `<in_gfa>.lnx` when present
@@ -496,10 +498,11 @@ Coordinate options for `W` output:
 Coordinate rules:
 
 - only applies to node-set queries
-- only affects `W` output
+- affects `W` output coordinates and `P` output names
 - `.lnx` stores rank-aligned `uint32` segment lengths; fallback scanning takes
   length from the sequence field first, then `LN:i:`
-- if anything is missing or inconsistent, `get_path` falls back to `* *` coordinates and logs a warning
+- if anything is missing or inconsistent, `get_path` falls back to ordinary
+  subpath output and logs a warning
 
 Example:
 

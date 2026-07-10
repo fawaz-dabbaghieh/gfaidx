@@ -233,7 +233,7 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--lnx")
       .default_value(std::string(""))
       .nargs(1)
-      .help("node length index for --with_walk_coordinates; defaults to <in_gz>.lnx when present");
+      .help("node length index for coordinate-bearing path output; defaults to <in_gz>.lnx when present");
 
     parser.add_argument("--max_nodes")
       .default_value(std::string("10000"))
@@ -246,7 +246,7 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--with_walk_coordinates", "--with_walk_coords").default_value(false)
       .implicit_value(true)
-      .help("emit W subpaths with SeqStart/SeqEnd coordinates using the resolved .pdx and indexed GFA S-line lengths");
+      .help("emit W subpaths with SeqStart/SeqEnd and P subpaths with path-local coordinate names");
 
     parser.add_argument("--debug_trace").default_value(false)
       .implicit_value(true)

@@ -45,8 +45,8 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
                                           const std::string& length_index_path = std::string{},
                                           const WalkCoordWarning& warn = WalkCoordWarning{});
 
-// Build and cache per-step prefix lengths for one W record so repeated subpath
-// runs from the same walk do not repeatedly read and scan the full step vector.
+// Build and cache per-step prefix lengths for one path so repeated subpath runs
+// from the same path do not repeatedly read and scan the full step vector.
 PathCoordCacheEntry& get_or_build_path_coord_cache(
     const PathIndexReader& index,
     std::uint32_t path_id,
@@ -62,6 +62,15 @@ void write_w_subpath_with_coords(std::ostream& out,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count,
                                  std::string_view subpath_label);
+
+// Emit a P subpath whose path name carries path-local coordinates, e.g.
+// CHM13#0#chr1:1830045-1840123. This assumes the original P path has no
+// overlap/CIGAR field, matching coordinate-indexing rules for P records.
+void write_p_subpath_with_coords(std::ostream& out,
+                                 const PathIndexReader& index,
+                                 const PathCoordCacheEntry& entry,
+                                 std::uint64_t start_step,
+                                 std::uint64_t step_count);
 
 }  // namespace gfaidx::paths
 
