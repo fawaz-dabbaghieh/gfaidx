@@ -224,6 +224,7 @@ for graph in GRAPHS:
         gp,
         Path(str(gp) + ".idx"),
         Path(str(gp) + ".ndx"),
+        Path(str(gp) + ".lnx"),
         Path(str(gp) + ".pdx"),
         Path(str(gp) + ".cdx"),
         Path(str(vp) + ".xg"),
@@ -327,6 +328,7 @@ rule gfaidx_index:
         gz=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz",
         idx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.idx",
         ndx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.ndx",
+        lnx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.lnx",
         pdx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.pdx",
         metrics=f"{RESULTS}/metrics/index/gfaidx/{{graph}}/index_gfa.json",
         log=f"{RESULTS}/logs/index/gfaidx/{{graph}}/index_gfa.log"
@@ -604,6 +606,7 @@ rule gfaidx_region_direct:
         gz=lambda wildcards: gfaidx_prefix(wildcards.graph),
         idx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".idx"),
         ndx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".ndx"),
+        lnx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".lnx"),
         pdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".pdx"),
         cdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".cdx")
     output:
@@ -623,7 +626,7 @@ rule gfaidx_region_direct:
           --log {output.log} \
           --sample-interval {SAMPLE_INTERVAL} \
           -- {GFAIDX} get_region {input.gz} {params.region} {output.gfa} \
-             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
+             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} --lnx {input.lnx} \
              --max_nodes {params.max_nodes} {params.reference} {params.extra}
         """
 
@@ -633,6 +636,7 @@ rule gfaidx_region_matched:
         gz=lambda wildcards: gfaidx_prefix(wildcards.graph),
         idx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".idx"),
         ndx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".ndx"),
+        lnx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".lnx"),
         pdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".pdx"),
         cdx=lambda wildcards: Path(str(gfaidx_prefix(wildcards.graph)) + ".cdx"),
         source_stats=lambda wildcards: source_region_gfa(wildcards.graph, wildcards.query, wildcards.source).with_suffix(".stats.json")
@@ -653,7 +657,7 @@ rule gfaidx_region_matched:
           --log {output.log} \
           --sample-interval {SAMPLE_INTERVAL} \
           -- {GFAIDX} get_region {input.gz} {params.region} {output.gfa} \
-             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
+             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} --lnx {input.lnx} \
              --max_nodes "$max_nodes" {params.reference} {params.extra}
         """
 

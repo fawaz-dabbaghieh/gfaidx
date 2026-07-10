@@ -37,6 +37,7 @@ add_executable(gfaidx
         src/indexer/index_gfa_main.cpp
         src/indexer/index_gfa_helpers.cpp
         src/indexer/node_hash_index.cpp
+        src/indexer/node_length_index.cpp
         src/paths/get_path_command.cpp
         src/paths/index_paths_command.cpp
         src/paths/path_index.cpp

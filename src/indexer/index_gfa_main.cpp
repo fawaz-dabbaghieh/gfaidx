@@ -14,6 +14,7 @@
 #include "indexer/direct_binary_writer.h"
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/node_hash_index.h"
+#include "indexer/node_length_index.h"
 #include "chunk/split_gfa_to_comms.h"
 #include "paths/path_index.h"
 #include "utils/Memory.h"
@@ -50,6 +51,14 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::string node_index_path = out_gzip + ".ndx";
     if (file_exists(node_index_path.c_str())) {
         std::cerr << "Node index file already exists: " << node_index_path << std::endl;
+        return 1;
+    }
+
+    // Node lengths are stored as a separate rank-aligned sidecar so coordinate
+    // subwalk queries do not have to scan every S line at query time.
+    std::string node_length_index_path = out_gzip + ".lnx";
+    if (file_exists(node_length_index_path.c_str())) {
+        std::cerr << "Node length index file already exists: " << node_length_index_path << std::endl;
         return 1;
     }
 
@@ -162,12 +171,14 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     const std::string staged_out_gzip = make_temp_output_path(out_gzip);
     const std::string staged_chunk_index_path = staged_out_gzip + ".idx";
     const std::string staged_node_index_path = staged_out_gzip + ".ndx";
+    const std::string staged_node_length_index_path = staged_out_gzip + ".lnx";
     const std::string staged_path_index_path = staged_out_gzip + ".pdx";
     auto cleanup_staged_outputs = [&]() {
         // Remove any staged final artifacts that were not successfully published.
         remove_path_if_exists(staged_out_gzip);
         remove_path_if_exists(staged_chunk_index_path);
         remove_path_if_exists(staged_node_index_path);
+        remove_path_if_exists(staged_node_length_index_path);
         remove_path_if_exists(staged_path_index_path);
     };
 
@@ -344,6 +355,17 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
         log_memory("After node hash index");
 
+        timer.reset();
+        std::cout << get_time() << ": Building node length index " << node_length_index_path << std::endl;
+        // The .lnx rank order follows the staged .ndx exactly, so path and
+        // coordinate indexes can all address node lengths by the same rank.
+        build_node_length_index(input_gfa,
+                                staged_node_index_path,
+                                staged_node_length_index_path,
+                                reader_options);
+        std::cout << get_time() << ": Finished node length index in " << timer.elapsed() << " seconds" << std::endl;
+        log_memory("After node length index");
+
         if (no_paths) {
             std::cout << get_time() << ": Skipping path indexing because --no_paths was provided" << std::endl;
         } else {
@@ -367,6 +389,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         // Publish the companion indexes first so the final .gz only appears once its sidecars are ready too.
         rename_path_or_throw(staged_chunk_index_path, chunk_index_path);
         rename_path_or_throw(staged_node_index_path, node_index_path);
+        rename_path_or_throw(staged_node_length_index_path, node_length_index_path);
         if (!no_paths) {
             rename_path_or_throw(staged_path_index_path, path_index_path);
         }

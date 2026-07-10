@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include "indexer/node_hash_index.h"
+#include "indexer/node_length_index.h"
 #include "paths/path_index.h"
 
 namespace gfaidx::paths {
@@ -21,6 +23,10 @@ using WalkCoordWarning = std::function<void(const std::string&)>;
 struct WalkCoordState {
     bool usable{false};
     std::vector<std::uint64_t> node_lengths;
+    std::unique_ptr<indexer::NodeLengthIndexReader> length_index;
+
+    [[nodiscard]] std::uint64_t length_count() const;
+    [[nodiscard]] std::uint64_t node_length(std::uint32_t node_id) const;
 };
 
 struct PathCoordCacheEntry {
@@ -31,12 +37,12 @@ struct PathCoordCacheEntry {
     std::vector<std::uint64_t> prefix_lengths;
 };
 
-// Load rank-aligned node lengths from a GFA whose S lines match the .pdx/.ndx
-// node universe. The indexed multi-member GFA is valid input because it retains
-// all S lines even after P/W records move into the .pdx sidecar.
+// Load rank-aligned node lengths, preferring a mmap-backed .lnx sidecar and
+// falling back to scanning S lines from a GFA whose node set matches .pdx/.ndx.
 WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
                                           const indexer::NodeHashIndex& node_index,
                                           const std::string& source_gfa,
+                                          const std::string& length_index_path = std::string{},
                                           const WalkCoordWarning& warn = WalkCoordWarning{});
 
 // Build and cache per-step prefix lengths for one W record so repeated subpath
@@ -44,7 +50,7 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
 PathCoordCacheEntry& get_or_build_path_coord_cache(
     const PathIndexReader& index,
     std::uint32_t path_id,
-    const std::vector<std::uint64_t>& node_lengths,
+    const WalkCoordState& walk_coord_state,
     std::unordered_map<std::uint32_t, PathCoordCacheEntry>& cache,
     const WalkCoordWarning& warn = WalkCoordWarning{});
 

@@ -19,7 +19,7 @@ The main CLI subcommands are:
 
 ### Chunk index
 
-`index_gfa` writes four artifacts by default:
+`index_gfa` writes the query-ready graph plus sidecar indexes by default:
 
 - `<graph>.gz`
   the multi-member gzip file containing one member per community plus a final shared-edge member
@@ -27,6 +27,8 @@ The main CLI subcommands are:
   a community-to-gzip-offset index
 - `<graph>.gz.ndx`
   a sorted binary hash table mapping node string IDs to community IDs
+- `<graph>.gz.lnx`
+  a rank-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
 - `<graph>.gz.cdx`
@@ -37,7 +39,9 @@ neighborhood across communities.
 
 `get_region` additionally uses `.cdx` to resolve a 0-based reference interval
 to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
-The `.cdx` is separate from `.pdx`, so existing path indexes remain compatible.
+When `--with_walk_coordinates` is requested, `.lnx` supplies node lengths
+without re-scanning all `S` lines. The `.cdx` and `.lnx` files are separate
+sidecars, so existing path indexes remain compatible.
 
 `get_chunk` remains available as the compatibility command for streaming a
 single community member back out without graph expansion.
@@ -105,7 +109,7 @@ pip install -e .
 
 ### `gfaidx index_gfa`
 
-Build the chunked gzip graph plus `.idx`, `.ndx`, and by default `.pdx`.
+Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`.
 
 ```bash
 gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
@@ -138,13 +142,14 @@ Options:
   merge communities smaller than `N` nodes into the neighboring community with
   the most connecting edges; `0` disables small-community merging
 - `--no_paths`
-  skip building `<out_gfa.gz>.pdx`; only write the graph chunk index artifacts
+  skip building `<out_gfa.gz>.pdx`; still write `.gz`, `.idx`, `.ndx`, and `.lnx`
 
 Outputs:
 
 - `<out_gfa.gz>`
 - `<out_gfa.gz>.idx`
 - `<out_gfa.gz>.ndx`
+- `<out_gfa.gz>.lnx`
 - `<out_gfa.gz>.pdx` unless `--no_paths` is used
 
 Example:
@@ -258,7 +263,7 @@ Important options:
 - `--reference <sample>`
   select the coordinate namespace when multiple reference samples contain the
   requested sequence
-- `--cdx`, `--idx`, `--ndx`, `--pdx`
+- `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`
   override companion indexes; each defaults to `<in_gz>.<suffix>`
 - `--max_nodes <N>`
   cap the total seed plus BFS node count; it must be at least the seed count
@@ -266,8 +271,9 @@ Important options:
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_walk_coordinates` / `--with_walk_coords`
   emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates. The
-  command uses the resolved `.pdx` for W metadata and scans the indexed GFA S
-  lines for node lengths; if validation fails, it falls back to `* *`
+  command uses the resolved `.pdx` for W metadata and the resolved `.lnx` for
+  node lengths. If `.lnx` is absent, it falls back to scanning indexed GFA `S`
+  lines; if validation fails, it falls back to `* *`
   coordinates and logs a warning.
 
 Example:
@@ -389,6 +395,9 @@ General options:
 - `--pdx <path>`
   optional override for the path index if the companion `.pdx` was renamed or
   stored elsewhere
+- `--lnx <path>`
+  optional override for the node-length index used by `--with_walk_coords`;
+  defaults to `<in_gfa>.lnx` when present
 
 #### Mode 1: print path names
 
@@ -478,14 +487,18 @@ Coordinate options for `W` output:
 
 - `--with_walk_coords`
   try to emit exact `SeqStart`/`SeqEnd` for returned `W` subwalks
+- `--lnx <path>`
+  node-length sidecar used to avoid scanning all `S` lines; defaults to
+  `<in_gfa>.lnx` when present
 - `--source_gfa <path>`
-  original source GFA used to derive segment lengths
+  original source GFA used as a fallback length source when `.lnx` is absent
 
 Coordinate rules:
 
 - only applies to node-set queries
 - only affects `W` output
-- segment length is taken from the sequence field first, then `LN:i:`
+- `.lnx` stores rank-aligned `uint32` segment lengths; fallback scanning takes
+  length from the sequence field first, then `LN:i:`
 - if anything is missing or inconsistent, `get_path` falls back to `* *` coordinates and logs a warning
 
 Example:
@@ -498,6 +511,24 @@ gfaidx get_path graph.gfa.gz \
 ```
 
 If the companion `.ndx` file was renamed or moved, provide it explicitly with `--ndx`.
+
+### Build `.lnx` For Existing Indexes
+
+Existing indexed graphs do not need to be fully re-indexed to get node lengths.
+Build the sidecar directly from the indexed graph and matching `.ndx`:
+
+```bash
+python3 scripts/build_lnx.py graph.gfa.gz
+```
+
+Defaults:
+
+- input graph: `graph.gfa.gz`
+- node index: `graph.gfa.gz.ndx`
+- output: `graph.gfa.gz.lnx`
+
+Use `--ndx`, `--out`, or `--force` if the files were renamed or the output
+should be replaced.
 
 ## How The Path Index Works
 

@@ -195,6 +195,11 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("optional path to the node hash index (.ndx); node-set queries default to <in_gfa>.ndx");
 
+    parser.add_argument("--lnx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("optional node length index (.lnx) for --with_walk_coords; defaults to <in_gfa>.lnx when present");
+
     parser.add_argument("--path_id")
       .default_value(std::string(""))
       .nargs(1)
@@ -290,6 +295,8 @@ int run_get_path(const argparse::ArgumentParser& program) {
     const auto nodes_file = program.get<std::string>("nodes_file");
     const auto subgraph_gfa = program.get<std::string>("subgraph_gfa");
     const auto source_gfa = program.get<std::string>("source_gfa");
+    std::string length_index_path = program.get<std::string>("lnx");
+    const bool lnx_explicit = !length_index_path.empty();
     const bool with_walk_coords = program.get<bool>("with_walk_coords");
     const bool print_path_names = program.get<bool>("print_path_names");
 
@@ -313,9 +320,21 @@ int run_get_path(const argparse::ArgumentParser& program) {
         std::cerr << "--with_walk_coords is only supported with node-set queries" << std::endl;
         return 1;
     }
-    if (with_walk_coords && source_gfa.empty()) {
-        std::cerr << "--with_walk_coords requires --source_gfa" << std::endl;
-        return 1;
+    if (with_walk_coords) {
+        if (length_index_path.empty()) {
+            length_index_path = infer_companion_path(input_graph, ".lnx");
+        }
+        if (lnx_explicit && !file_exists(length_index_path.c_str())) {
+            std::cerr << "Node length index does not exist: " << length_index_path << std::endl;
+            return 1;
+        }
+        if (!file_exists(length_index_path.c_str())) {
+            length_index_path.clear();
+        }
+        if (length_index_path.empty() && source_gfa.empty()) {
+            std::cerr << "--with_walk_coords requires a companion .lnx, --lnx <path>, or --source_gfa for the fallback S-line scan" << std::endl;
+            return 1;
+        }
     }
 
     // Only node-based queries need .ndx. When the user does not provide one,
@@ -406,7 +425,11 @@ int run_get_path(const argparse::ArgumentParser& program) {
         WalkCoordState walk_coord_state;
         std::unordered_map<std::uint32_t, PathCoordCacheEntry> path_coord_cache;
         if (with_walk_coords) {
-            walk_coord_state = load_node_lengths_by_index(index, node_index, source_gfa, warn_get_path);
+            walk_coord_state = load_node_lengths_by_index(index,
+                                                          node_index,
+                                                          source_gfa,
+                                                          length_index_path,
+                                                          warn_get_path);
         }
 
         for (const auto& run : runs) {
@@ -419,7 +442,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
             if (with_walk_coords && walk_coord_state.usable && info.record_type == 'W') {
                 auto& coord_entry = get_or_build_path_coord_cache(index,
                                                                  run.path_id,
-                                                                 walk_coord_state.node_lengths,
+                                                                 walk_coord_state,
                                                                  path_coord_cache,
                                                                  warn_get_path);
                 if (coord_entry.usable) {

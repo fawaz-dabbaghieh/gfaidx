@@ -230,6 +230,11 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("path index used for rank-to-name conversion; defaults to <in_gz>.pdx");
 
+    parser.add_argument("--lnx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("node length index for --with_walk_coordinates; defaults to <in_gz>.lnx when present");
+
     parser.add_argument("--max_nodes")
       .default_value(std::string("10000"))
       .nargs(1)
@@ -261,14 +266,20 @@ int run_get_region(const argparse::ArgumentParser& program) {
 
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
+        auto lnx_path = program.get<std::string>("lnx");
+        const bool lnx_explicit = !lnx_path.empty();
         if (cdx_path.empty()) cdx_path = infer_companion_path(input_gz, ".cdx");
         if (pdx_path.empty()) pdx_path = infer_companion_path(input_gz, ".pdx");
+        if (lnx_path.empty()) lnx_path = infer_companion_path(input_gz, ".lnx");
         if (!file_exists(cdx_path.c_str())) {
             throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
         }
         if (!file_exists(pdx_path.c_str())) {
             throw std::runtime_error("Path index required for coordinate rank lookup does not exist: " +
                                      pdx_path);
+        }
+        if (with_walk_coordinates && lnx_explicit && !file_exists(lnx_path.c_str())) {
+            throw std::runtime_error("Node length index does not exist: " + lnx_path);
         }
 
         CoordinateIndexReader coordinate_index(cdx_path);
@@ -301,6 +312,9 @@ int run_get_region(const argparse::ArgumentParser& program) {
         options.idx_path = program.get<std::string>("idx");
         options.ndx_path = program.get<std::string>("ndx");
         options.pdx_path = pdx_path;
+        // Empty means "fall back to the old S-line scan" inside the shared
+        // subgraph extractor. Explicit missing --lnx is rejected above.
+        options.lnx_path = file_exists(lnx_path.c_str()) ? lnx_path : std::string{};
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_walk_coordinates;

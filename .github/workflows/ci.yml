@@ -75,6 +75,7 @@ jobs:
           test -s smoke.indexed.gfa.gz
           test -s smoke.indexed.gfa.gz.idx
           test -s smoke.indexed.gfa.gz.ndx
+          test -s smoke.indexed.gfa.gz.lnx
           test -s smoke.indexed.gfa.gz.pdx
 
           ./install/bin/gfaidx get_subgraph smoke.indexed.gfa.gz 2 smoke.subgraph.gfa --max_nodes 3

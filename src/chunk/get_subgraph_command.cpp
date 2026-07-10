@@ -508,6 +508,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
                                          const std::vector<std::uint32_t>& node_ids,
                                          const indexer::NodeHashIndex& node_index,
                                          const std::string& source_gfa,
+                                         const std::string& length_index_path,
                                          bool with_walk_coordinates) {
     paths::PathIndexReader index(pdx_path);
     const auto runs = paths::find_subpaths_for_node_ids(index, node_ids);
@@ -525,6 +526,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
             index,
             node_index,
             source_gfa,
+            length_index_path,
             [](const std::string& message) {
                 warn_get_subgraph(message);
             });
@@ -542,7 +544,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
             auto& coord_entry = paths::get_or_build_path_coord_cache(
                 index,
                 run.path_id,
-                walk_coord_state.node_lengths,
+                walk_coord_state,
                 path_coord_cache,
                 [](const std::string& message) {
                     warn_get_subgraph(message);
@@ -758,6 +760,7 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
                                                              node_ids,
                                                              node_index,
                                                              options.input_gz,
+                                                             options.lnx_path,
                                                              options.with_walk_coordinates);
         info_get_subgraph("Finished indexed subpath extraction with " +
                           std::to_string(subpath_count) + " P/W records");

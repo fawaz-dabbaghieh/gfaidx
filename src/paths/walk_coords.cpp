@@ -1,10 +1,12 @@
 #include "paths/walk_coords.h"
 
+#include <memory>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 
 #include "fs/Reader.h"
+#include "fs/fs_helpers.h"
 
 namespace gfaidx::paths {
 namespace {
@@ -70,11 +72,42 @@ bool parse_s_line_name_and_length(std::string_view line,
 
 }  // namespace
 
+std::uint64_t WalkCoordState::length_count() const {
+    if (length_index) return length_index->node_count();
+    return node_lengths.size();
+}
+
+std::uint64_t WalkCoordState::node_length(std::uint32_t node_id) const {
+    if (length_index) return length_index->length(node_id);
+    return node_lengths[static_cast<std::size_t>(node_id)];
+}
+
 WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
                                           const indexer::NodeHashIndex& node_index,
                                           const std::string& source_gfa,
+                                          const std::string& length_index_path,
                                           const WalkCoordWarning& warn) {
     WalkCoordState state;
+
+    if (!length_index_path.empty() && file_exists(length_index_path.c_str())) {
+        try {
+            auto length_index = std::make_unique<indexer::NodeLengthIndexReader>(length_index_path);
+            if (length_index->node_count() != index.node_count()) {
+                warn_if_requested(warn, ".lnx node count does not match .pdx, falling back to S-line length scan");
+            } else {
+                state.length_index = std::move(length_index);
+                state.usable = true;
+                return state;
+            }
+        } catch (const std::exception& err) {
+            warn_if_requested(warn, "could not use node length index '" + length_index_path +
+                                    "' (" + err.what() + "), falling back to S-line length scan");
+        }
+    } else if (!length_index_path.empty()) {
+        warn_if_requested(warn, "node length index not found at '" + length_index_path +
+                                "', falling back to S-line length scan");
+    }
+
     state.node_lengths.resize(index.node_count());
     std::vector<std::uint64_t> seen_nodes((static_cast<std::size_t>(index.node_count()) + 63) / 64, 0);
     std::uint64_t seen_node_count = 0;
@@ -134,7 +167,7 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
 PathCoordCacheEntry& get_or_build_path_coord_cache(
     const PathIndexReader& index,
     std::uint32_t path_id,
-    const std::vector<std::uint64_t>& node_lengths,
+    const WalkCoordState& walk_coord_state,
     std::unordered_map<std::uint32_t, PathCoordCacheEntry>& cache,
     const WalkCoordWarning& warn) {
 
@@ -166,13 +199,14 @@ PathCoordCacheEntry& get_or_build_path_coord_cache(
     entry.prefix_lengths.resize(entry.steps.size() + 1, 0);
     for (std::size_t i = 0; i < entry.steps.size(); ++i) {
         const auto node_id = entry.steps[i].node_id;
-        if (node_id >= node_lengths.size()) {
+        if (node_id >= walk_coord_state.length_count()) {
             warn_if_requested(warn, "W-line '" + std::string(entry.info.name) +
                                     "' references a node outside the length table, falling back to subwalk output without coordinates");
             entry.prefix_lengths.clear();
             return entry;
         }
-        entry.prefix_lengths[i + 1] = entry.prefix_lengths[i] + node_lengths[node_id];
+        entry.prefix_lengths[i + 1] = entry.prefix_lengths[i] +
+                                      walk_coord_state.node_length(node_id);
     }
 
     const auto expected_span = static_cast<std::uint64_t>(entry.info.seq_end - entry.info.seq_start);

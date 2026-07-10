@@ -87,7 +87,7 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
-      .help("skip building the .pdx path index; only write .gz, .idx, and .ndx");
+      .help("skip building the .pdx path index; still write .gz, .idx, .ndx, and .lnx");
 
     parser.add_argument("--max_chunk_nodes").default_value(std::string("0"))
       .nargs(1)

@@ -19,7 +19,7 @@ Indexing:
 
 The main query-ready index size is:
 
-- `gfaidx`: `.gfa.gz + .idx + .ndx + .pdx + .cdx`
+- `gfaidx`: `.gfa.gz + .idx + .ndx + .lnx + .pdx + .cdx`
 - `vg`: `.xg`
 - `odgi`: `.og + .xp + .stpidx` when path-side indexes are enabled, or only
   `.og` for graphs marked as pathless

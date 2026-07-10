@@ -16,6 +16,7 @@ struct SubgraphExtractionOptions {
     std::string idx_path;
     std::string ndx_path;
     std::string pdx_path;
+    std::string lnx_path;
     std::uint32_t max_nodes{};
     bool include_paths{true};
     bool with_walk_coordinates{false};
