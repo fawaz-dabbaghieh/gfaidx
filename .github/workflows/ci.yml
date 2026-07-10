@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke-test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Install
+        run: cmake --install build --prefix "$PWD/install"
+
+      - name: CLI smoke test
+        run: |
+          set -euo pipefail
+
+          ./install/bin/gfaidx --version
+          ./install/bin/gfaidx --help
+
+          cat > smoke.gfa <<'EOF'
+          H	VN:Z:1.1
+          S	1	AAAA
+          S	2	CC
+          S	3	GGG
+          L	1	+	2	+	0M
+          L	2	+	3	+	0M
+          W	SAMPLE	0	chrT	100	109	>1>2>3
+          EOF
+
+          ./install/bin/gfaidx index_gfa smoke.gfa smoke.indexed.gfa.gz --progress_every 0
+          test -s smoke.indexed.gfa.gz
+          test -s smoke.indexed.gfa.gz.idx
+          test -s smoke.indexed.gfa.gz.ndx
+          test -s smoke.indexed.gfa.gz.pdx
+
+          ./install/bin/gfaidx get_subgraph smoke.indexed.gfa.gz 2 smoke.subgraph.gfa --max_nodes 3
+          grep -q $'^S\t2\tCC' smoke.subgraph.gfa
+
+          ./install/bin/gfaidx get_path smoke.indexed.gfa.gz.pdx --print_path_names > smoke.paths.txt
+          grep -q $'^W\tSAMPLE\t0\tchrT\t100\t109' smoke.paths.txt
