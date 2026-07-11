@@ -6,6 +6,7 @@
 
 #include "fs/fs_helpers.h"
 #include "paths/path_index.h"
+#include "utils/cli_helpers.h"
 
 namespace gfaidx::paths {
 
@@ -43,7 +44,7 @@ int run_index_paths(const argparse::ArgumentParser& program) {
     if (node_index.empty()) {
         // Keep index_paths consistent with query commands: the normal companion
         // path for an indexed graph is simply the graph path plus ".ndx".
-        const auto inferred = input_gfa + ".ndx";
+        const auto inferred = utils::companion_path(input_gfa, ".ndx");
         if (file_exists(inferred.c_str())) node_index = inferred;
     }
     if (node_index.empty()) {
@@ -63,11 +64,7 @@ int run_index_paths(const argparse::ArgumentParser& program) {
     Reader::Options reader_options;
     const auto progress_str = program.get<std::string>("progress_every");
     try {
-        long long parsed = std::stoll(progress_str);
-        if (parsed < 0) {
-            throw std::invalid_argument("progress must be >= 0");
-        }
-        reader_options.progress_every = static_cast<std::uint64_t>(parsed);
+        reader_options.progress_every = utils::parse_u64_strict(progress_str, "--progress_every");
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --progress_every value '" << progress_str
                   << "', using default 1000000 (" << err.what() << ")" << std::endl;

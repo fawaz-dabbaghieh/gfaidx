@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
-#include <limits>
 #include <optional>
 
 #include <argparse/argparse.hpp>
@@ -19,6 +18,7 @@
 #include "paths/path_index.h"
 #include "utils/Memory.h"
 #include "utils/Timer.h"
+#include "utils/cli_helpers.h"
 
 #define WEIGHTED     0
 #define UNWEIGHTED   1
@@ -41,14 +41,14 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
 
     // The gzip companion index must not already exist before we start work.
-    const std::string chunk_index_path = out_gzip + ".idx";
+    const std::string chunk_index_path = utils::companion_path(out_gzip, ".idx");
     if (file_exists(chunk_index_path.c_str())) {
         std::cerr << "Chunk index file already exists: " << chunk_index_path << std::endl;
         return 1;
     }
 
     // Write node hash index alongside the gzip output.
-    std::string node_index_path = out_gzip + ".ndx";
+    std::string node_index_path = utils::companion_path(out_gzip, ".ndx");
     if (file_exists(node_index_path.c_str())) {
         std::cerr << "Node index file already exists: " << node_index_path << std::endl;
         return 1;
@@ -56,7 +56,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     // Node lengths are stored as a separate rank-aligned sidecar so coordinate
     // subwalk queries do not have to scan every S line at query time.
-    std::string node_length_index_path = out_gzip + ".lnx";
+    std::string node_length_index_path = utils::companion_path(out_gzip, ".lnx");
     if (file_exists(node_length_index_path.c_str())) {
         std::cerr << "Node length index file already exists: " << node_length_index_path << std::endl;
         return 1;
@@ -65,7 +65,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     // Path indexing depends on .ndx rank order, so index_gfa can now produce
     // a matching .pdx as part of the default indexing workflow.
     const bool no_paths = program.get<bool>("no_paths");
-    const std::string path_index_path = out_gzip + ".pdx";
+    const std::string path_index_path = utils::companion_path(out_gzip, ".pdx");
     if (!no_paths && file_exists(path_index_path.c_str())) {
         std::cerr << "Path index file already exists: " << path_index_path << std::endl;
         return 1;
@@ -78,12 +78,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::uint64_t progress_every;
     const auto progress_str = program.get<std::string>("progress_every");
     try {
-        long long parsed = std::stoll(progress_str);
         // Keep index_gfa consistent with index_paths: 0 disables progress logging cleanly.
-        if (parsed < 0) {
-            throw std::invalid_argument("progress must be >= 0");
-        }
-        progress_every = static_cast<std::uint64_t>(parsed);
+        progress_every = utils::parse_u64_strict(progress_str, "--progress_every");
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --progress_every value '" << progress_str
                   << "', using default 1000000 (" << err.what() << ")" << std::endl;
@@ -96,12 +92,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::uint32_t max_chunk_nodes;
     const auto max_chunk_nodes_str = program.get<std::string>("max_chunk_nodes");
     try {
-        const long long parsed = std::stoll(max_chunk_nodes_str);
         // A value of 0 keeps the current one-pass behavior with no local community refinement.
-        if (parsed < 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::invalid_argument("max chunk nodes must be in the uint32 range");
-        }
-        max_chunk_nodes = static_cast<std::uint32_t>(parsed);
+        max_chunk_nodes = utils::parse_u32_strict(max_chunk_nodes_str, "--max_chunk_nodes");
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --max_chunk_nodes value '" << max_chunk_nodes_str
                   << "', disabling refinement (" << err.what() << ")" << std::endl;
@@ -113,11 +105,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::uint32_t min_chunk_nodes;
     const auto min_chunk_nodes_str = program.get<std::string>("min_chunk_nodes");
     try {
-        const long long parsed = std::stoll(min_chunk_nodes_str);
-        if (parsed < 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::invalid_argument("min chunk nodes must be in the uint32 range");
-        }
-        min_chunk_nodes = static_cast<std::uint32_t>(parsed);
+        min_chunk_nodes = utils::parse_u32_strict(min_chunk_nodes_str, "--min_chunk_nodes");
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --min_chunk_nodes value '" << min_chunk_nodes_str
                   << "', disabling small-community merging (" << err.what() << ")" << std::endl;
@@ -135,11 +123,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     int gzip_level;
     const auto gzip_level_str = program.get<std::string>("gzip_level");
     try {
-        long long parsed = std::stoll(gzip_level_str);
-        if (parsed < 1 || parsed > 9) {
-            throw std::invalid_argument("gzip level must be 1-9");
-        }
-        gzip_level = static_cast<int>(parsed);
+        gzip_level = static_cast<int>(utils::parse_u32_strict(gzip_level_str, "--gzip_level", 1, 9));
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --gzip_level value '" << gzip_level_str
                   << "', using default 6 (" << err.what() << ")" << std::endl;
@@ -150,11 +134,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     int gzip_mem_level;
     const auto gzip_mem_level_str = program.get<std::string>("gzip_mem_level");
     try {
-        long long parsed = std::stoll(gzip_mem_level_str);
-        if (parsed < 1 || parsed > 9) {
-            throw std::invalid_argument("gzip mem level must be 1-9");
-        }
-        gzip_mem_level = static_cast<int>(parsed);
+        gzip_mem_level = static_cast<int>(utils::parse_u32_strict(gzip_mem_level_str, "--gzip_mem_level", 1, 9));
     } catch (const std::exception& err) {
         std::cerr << "Warning: invalid --gzip_mem_level value '" << gzip_mem_level_str
                   << "', using default 8 (" << err.what() << ")" << std::endl;
@@ -169,10 +149,10 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
 
     // Stage every final artifact on hidden sibling paths so validation and failures stay side-effect free.
     const std::string staged_out_gzip = make_temp_output_path(out_gzip);
-    const std::string staged_chunk_index_path = staged_out_gzip + ".idx";
-    const std::string staged_node_index_path = staged_out_gzip + ".ndx";
-    const std::string staged_node_length_index_path = staged_out_gzip + ".lnx";
-    const std::string staged_path_index_path = staged_out_gzip + ".pdx";
+    const std::string staged_chunk_index_path = utils::companion_path(staged_out_gzip, ".idx");
+    const std::string staged_node_index_path = utils::companion_path(staged_out_gzip, ".ndx");
+    const std::string staged_node_length_index_path = utils::companion_path(staged_out_gzip, ".lnx");
+    const std::string staged_path_index_path = utils::companion_path(staged_out_gzip, ".pdx");
     auto cleanup_staged_outputs = [&]() {
         // Remove any staged final artifacts that were not successfully published.
         remove_path_if_exists(staged_out_gzip);

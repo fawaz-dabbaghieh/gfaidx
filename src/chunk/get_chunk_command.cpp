@@ -7,6 +7,7 @@
 #include "chunk/chunk_reader.h"
 #include "fs/fs_helpers.h"
 #include "indexer/node_hash_index.h"
+#include "utils/cli_helpers.h"
 
 namespace gfaidx::chunk {
 
@@ -62,7 +63,7 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
         index_path = program.get<std::string>("index");
     }
     if (index_path.empty()) {
-        index_path = input_gz + ".idx";
+        index_path = utils::companion_path(input_gz, ".idx");
     }
 
     if (!file_exists(index_path.c_str())) {
@@ -81,7 +82,7 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
             node_index_path = program.get<std::string>("node_index");
         }
         if (node_index_path.empty()) {
-            node_index_path = input_gz + ".ndx";
+            node_index_path = utils::companion_path(input_gz, ".ndx");
         }
         if (!file_exists(node_index_path.c_str())) {
             std::cerr << "Node index file does not exist: " << node_index_path << std::endl;
@@ -102,9 +103,9 @@ int run_get_chunk(const argparse::ArgumentParser& program) {
     } else if (!community_id_str.empty()) {
         // Fall back to a direct community id when provided.
         try {
-            community_id = static_cast<std::uint32_t>(std::stoul(community_id_str));
+            community_id = utils::parse_u32_strict(community_id_str, "--community_id");
         } catch (const std::exception& err) {
-            std::cerr << "Invalid community id: " << err.what() << std::endl;
+            std::cerr << err.what() << std::endl;
             return 1;
         }
     } else {

@@ -1,12 +1,10 @@
 #include "coordinates/coordinate_commands.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "chunk/get_subgraph_command.h"
@@ -14,6 +12,7 @@
 #include "fs/fs_helpers.h"
 #include "paths/path_index.h"
 #include "utils/Timer.h"
+#include "utils/cli_helpers.h"
 
 namespace gfaidx::coordinates {
 namespace {
@@ -23,22 +22,6 @@ struct ParsedRegion {
     std::uint64_t begin{};
     std::uint64_t end{};
 };
-
-std::string infer_companion_path(const std::string& graph_path, std::string_view suffix) {
-    return graph_path + std::string(suffix);
-}
-
-bool has_suffix(std::string_view value, std::string_view suffix) {
-    return value.size() >= suffix.size() &&
-           value.substr(value.size() - suffix.size()) == suffix;
-}
-
-std::string resolve_coordinate_index_path(const std::string& input_path,
-                                          const std::string& explicit_cdx) {
-    if (!explicit_cdx.empty()) return explicit_cdx;
-    if (has_suffix(input_path, ".cdx")) return input_path;
-    return infer_companion_path(input_path, ".cdx");
-}
 
 void write_coordinate_tracks(std::ostream& out,
                              const CoordinateIndexReader& index,
@@ -61,30 +44,12 @@ void write_coordinate_tracks(std::ostream& out,
     }
 }
 
-std::uint64_t parse_u64_arg(const std::string& value, std::string_view field_name) {
-    // Permit visual comma separators in CLI regions such as chr22:1,000-2,000.
-    std::string normalized = value;
-    normalized.erase(std::remove(normalized.begin(), normalized.end(), ','), normalized.end());
-    try {
-        if (normalized.empty() || normalized.front() == '-') {
-            throw std::invalid_argument("value must be non-negative");
-        }
-        std::size_t consumed = 0;
-        const auto parsed = std::stoull(normalized, &consumed);
-        if (consumed != normalized.size()) throw std::invalid_argument("trailing characters");
-        return parsed;
-    } catch (const std::exception& err) {
-        throw std::runtime_error("Invalid " + std::string(field_name) +
-                                 " value '" + value + "': " + err.what());
-    }
-}
-
 std::uint32_t parse_max_nodes(const std::string& value) {
-    const auto parsed = parse_u64_arg(value, "--max_nodes");
-    if (parsed == 0 || parsed > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::runtime_error("--max_nodes must be in the uint32 range and greater than zero");
-    }
-    return static_cast<std::uint32_t>(parsed);
+    return utils::parse_u32_strict(value,
+                                   "--max_nodes",
+                                   1,
+                                   std::numeric_limits<std::uint32_t>::max(),
+                                   true);
 }
 
 ParsedRegion parse_region(const std::string& region) {
@@ -101,9 +66,10 @@ ParsedRegion parse_region(const std::string& region) {
 
     ParsedRegion out;
     out.sequence = region.substr(0, colon);
-    out.begin = parse_u64_arg(region.substr(colon + 1, dash - (colon + 1)),
-                              "region start");
-    out.end = parse_u64_arg(region.substr(dash + 1), "region end");
+    out.begin = utils::parse_u64_strict(region.substr(colon + 1, dash - (colon + 1)),
+                                        "region start",
+                                        true);
+    out.end = utils::parse_u64_strict(region.substr(dash + 1), "region end", true);
     if (out.end <= out.begin) {
         throw std::runtime_error("Region end must be greater than region start");
     }
@@ -114,7 +80,7 @@ Reader::Options parse_reader_options(const argparse::ArgumentParser& program) {
     Reader::Options options;
     const auto value = program.get<std::string>("progress_every");
     try {
-        options.progress_every = parse_u64_arg(value, "--progress_every");
+        options.progress_every = utils::parse_u64_strict(value, "--progress_every");
     } catch (const std::exception& err) {
         std::cerr << "Warning: " << err.what()
                   << "; using default 1000000" << std::endl;
@@ -171,11 +137,11 @@ int run_index_coordinates(const argparse::ArgumentParser& program) {
         return 1;
     }
     if (node_index.empty()) {
-        const auto inferred = infer_companion_path(input_gfa, ".ndx");
+        const auto inferred = utils::companion_path(input_gfa, ".ndx");
         if (file_exists(inferred.c_str())) node_index = inferred;
     }
     if (path_index.empty()) {
-        const auto inferred = infer_companion_path(input_gfa, ".pdx");
+        const auto inferred = utils::companion_path(input_gfa, ".pdx");
         if (file_exists(inferred.c_str())) path_index = inferred;
     }
     if (node_index.empty() || !file_exists(node_index.c_str())) {
@@ -311,9 +277,11 @@ int run_get_region(const argparse::ArgumentParser& program) {
         auto pdx_path = program.get<std::string>("pdx");
         auto lnx_path = program.get<std::string>("lnx");
         const bool lnx_explicit = !lnx_path.empty();
-        if (cdx_path.empty()) cdx_path = resolve_coordinate_index_path(input_gz, cdx_path);
-        if (pdx_path.empty()) pdx_path = infer_companion_path(input_gz, ".pdx");
-        if (lnx_path.empty()) lnx_path = infer_companion_path(input_gz, ".lnx");
+        if (cdx_path.empty()) {
+            cdx_path = utils::resolve_sidecar_path(input_gz, cdx_path, ".cdx", true);
+        }
+        if (pdx_path.empty()) pdx_path = utils::companion_path(input_gz, ".pdx");
+        if (lnx_path.empty()) lnx_path = utils::companion_path(input_gz, ".lnx");
         if (!file_exists(cdx_path.c_str())) {
             throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
         }

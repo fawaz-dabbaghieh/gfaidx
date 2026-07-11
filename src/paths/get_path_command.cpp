@@ -14,6 +14,7 @@
 #include "paths/path_index.h"
 #include "paths/walk_coords.h"
 #include "utils/Timer.h"
+#include "utils/cli_helpers.h"
 
 namespace gfaidx::paths {
 namespace {
@@ -24,11 +25,7 @@ void warn_get_path(std::string_view message) {
 
 std::int64_t parse_optional_int_arg(const std::string& value, const char* flag_name) {
     if (value.empty() || value == "*") return -1;
-    try {
-        return std::stoll(value);
-    } catch (const std::exception& err) {
-        throw std::runtime_error(std::string("Invalid value for ") + flag_name + ": " + err.what());
-    }
+    return utils::parse_i64_strict(value, flag_name);
 }
 
 void append_csv_tokens(std::vector<std::string>& out, const std::string& csv) {
@@ -41,17 +38,6 @@ void append_csv_tokens(std::vector<std::string>& out, const std::string& csv) {
         if (comma == std::string::npos) break;
         pos = comma + 1;
     }
-}
-
-std::string infer_companion_path(const std::string& input_graph, std::string_view suffix) {
-    // index_gfa writes sidecars by appending their suffix to the indexed graph
-    // path, e.g. graph.gfa.gz.pdx and graph.gfa.gz.ndx.
-    return input_graph + std::string(suffix);
-}
-
-bool has_suffix(const std::string& value, std::string_view suffix) {
-    return value.size() >= suffix.size() &&
-           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 std::vector<std::string> load_node_names(const std::string& csv,
@@ -263,7 +249,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
     std::string path_index_path = program.get<std::string>("pdx");
     std::string node_index_path = program.get<std::string>("ndx");
 
-    if (path_index_path.empty() && has_suffix(input_graph, ".pdx")) {
+    if (path_index_path.empty() && utils::has_suffix(input_graph, ".pdx")) {
         std::cerr << "get_path expects the indexed graph path as its positional argument, not the .pdx file." << std::endl;
         std::cerr << "Use: gfaidx get_path <indexed.gfa.gz> [query mode options]" << std::endl;
         std::cerr << "If the path index was renamed, pass it with --pdx <path>." << std::endl;
@@ -271,7 +257,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
     }
 
     if (path_index_path.empty()) {
-        path_index_path = infer_companion_path(input_graph, ".pdx");
+        path_index_path = utils::companion_path(input_graph, ".pdx");
     }
     if (!file_exists(path_index_path.c_str())) {
         if (program.get<std::string>("pdx").empty()) {
@@ -321,7 +307,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
     }
     if (with_walk_coords) {
         if (length_index_path.empty()) {
-            length_index_path = infer_companion_path(input_graph, ".lnx");
+            length_index_path = utils::companion_path(input_graph, ".lnx");
         }
         if (lnx_explicit && !file_exists(length_index_path.c_str())) {
             std::cerr << "Node length index does not exist: " << length_index_path << std::endl;
@@ -335,7 +321,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
     // Only node-based queries need .ndx. When the user does not provide one,
     // try the companion file path that index_gfa now emits by default.
     if (has_node_query && node_index_path.empty()) {
-        node_index_path = infer_companion_path(input_graph, ".ndx");
+        node_index_path = utils::companion_path(input_graph, ".ndx");
     }
     if (has_node_query && !file_exists(node_index_path.c_str())) {
         if (program.get<std::string>("ndx").empty()) {
@@ -374,9 +360,9 @@ int run_get_path(const argparse::ArgumentParser& program) {
 
             std::uint64_t hap_index = 0;
             try {
-                hap_index = static_cast<std::uint64_t>(std::stoull(hap_index_str));
+                hap_index = utils::parse_u64_strict(hap_index_str, "--hap_index");
             } catch (const std::exception& err) {
-                std::cerr << "Invalid --hap_index value: " << err.what() << std::endl;
+                std::cerr << err.what() << std::endl;
                 return 1;
             }
 

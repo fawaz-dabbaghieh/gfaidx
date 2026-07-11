@@ -23,6 +23,7 @@
 #include "paths/walk_coords.h"
 #include "utils/debug_trace.h"
 #include "utils/Timer.h"
+#include "utils/cli_helpers.h"
 
 namespace gfaidx::chunk {
 namespace {
@@ -92,10 +93,6 @@ std::runtime_error annotate_get_subgraph_error(std::string_view context,
     return std::runtime_error(std::string(context) + ": " + err.what());
 }
 
-std::string infer_companion_path(const std::string& input_gz, std::string_view suffix) {
-    return input_gz + std::string(suffix);
-}
-
 std::string extract_s_node_id_only(std::string_view line) {
     const auto t1 = line.find('\t');
     if (t1 == std::string_view::npos) offending_line(line);
@@ -161,21 +158,6 @@ void add_undirected_edge(NeighborhoodState& state,
     }
 }
 
-std::uint32_t parse_required_u32(const std::string& value, const char* flag_name) {
-    try {
-        const auto parsed = std::stoull(value);
-        if (parsed > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::out_of_range("value does not fit in uint32_t");
-        }
-        if (parsed == 0) {
-            throw std::runtime_error("--max_nodes must be greater than zero");
-        }
-        return static_cast<std::uint32_t>(parsed);
-    } catch (const std::exception& err) {
-        throw std::runtime_error(std::string("Invalid value for ") + flag_name + ": " + err.what());
-    }
-}
-
 ResolvedIndexPaths resolve_index_paths(const std::string& input_gz,
                                        const std::string& idx_override,
                                        const std::string& ndx_override,
@@ -189,13 +171,13 @@ ResolvedIndexPaths resolve_index_paths(const std::string& input_gz,
 
     // inferred because it's usually just attached to the end of the input graph file
     if (paths.idx_path.empty()) {
-        paths.idx_path = infer_companion_path(input_gz, ".idx");
+        paths.idx_path = utils::companion_path(input_gz, ".idx");
     }
     if (paths.ndx_path.empty()) {
-        paths.ndx_path = infer_companion_path(input_gz, ".ndx");
+        paths.ndx_path = utils::companion_path(input_gz, ".ndx");
     }
     if (paths.pdx_path.empty()) {
-        paths.pdx_path = infer_companion_path(input_gz, ".pdx");
+        paths.pdx_path = utils::companion_path(input_gz, ".pdx");
     }
 
     if (!file_exists(paths.idx_path.c_str())) {
@@ -800,8 +782,11 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         options.idx_path = program.get<std::string>("idx");
         options.ndx_path = program.get<std::string>("ndx");
         options.pdx_path = program.get<std::string>("pdx");
-        options.max_nodes = parse_required_u32(program.get<std::string>("max_nodes"),
-                                               "--max_nodes");
+        options.max_nodes = utils::parse_u32_strict(
+            program.get<std::string>("max_nodes"),
+            "--max_nodes",
+            1,
+            std::numeric_limits<std::uint32_t>::max());
         options.include_paths = !program.get<bool>("no_paths");
         options.debug_trace = program.get<bool>("debug_trace");
         return extract_subgraph_from_seeds(

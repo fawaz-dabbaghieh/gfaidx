@@ -43,6 +43,7 @@ add_executable(gfaidx
         src/paths/path_index.cpp
         src/paths/walk_coords.cpp
         src/utils/Memory.cpp
+        src/utils/cli_helpers.cpp
         src/fs/Reader.cpp
         src/fs/fs_helpers.cpp
         src/fs/gfa_line_parsers.cpp

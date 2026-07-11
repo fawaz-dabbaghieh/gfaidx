@@ -24,6 +24,7 @@
 #include "chunk/text_handle_cache.h"
 #include "fs/gfa_line_parsers.h"
 #include "utils/Timer.h"
+#include "utils/cli_helpers.h"
 
 namespace fs = std::filesystem;
 
@@ -197,7 +198,7 @@ static void compress_parts_to_gzip(const std::string& out_gz,
                                    int gzip_mem_level) {
     std::ofstream out(out_gz, std::ios::binary);
     if (!out) throw std::runtime_error("Failed to open " + out_gz);
-    std::string out_idx = out_gz + ".idx";
+    std::string out_idx = gfaidx::utils::companion_path(out_gz, ".idx");
 
     std::ofstream idx(out_idx);
     if (!idx) throw std::runtime_error("Failed to open " + out_idx);
