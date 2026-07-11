@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "chunk/get_subgraph_command.h"
@@ -25,6 +26,39 @@ struct ParsedRegion {
 
 std::string infer_companion_path(const std::string& graph_path, std::string_view suffix) {
     return graph_path + std::string(suffix);
+}
+
+bool has_suffix(std::string_view value, std::string_view suffix) {
+    return value.size() >= suffix.size() &&
+           value.substr(value.size() - suffix.size()) == suffix;
+}
+
+std::string resolve_coordinate_index_path(const std::string& input_path,
+                                          const std::string& explicit_cdx) {
+    if (!explicit_cdx.empty()) return explicit_cdx;
+    if (has_suffix(input_path, ".cdx")) return input_path;
+    return infer_companion_path(input_path, ".cdx");
+}
+
+void write_coordinate_tracks(std::ostream& out,
+                             const CoordinateIndexReader& index,
+                             bool with_header) {
+    if (with_header) {
+        out << "source\treference\thaplotype\tsequence\tstart\tend\tentries\n";
+    }
+
+    // The .cdx stores one row per continuous coordinate track fragment. W rows
+    // use the original walk sample/haplotype/sequence namespace, P rows use the
+    // path name as the sequence, and S rows come from rGFA SN/SO/SR tags.
+    for (const auto& track : index.tracks()) {
+        out << track.source_type << '\t'
+            << track.reference_name << '\t'
+            << track.haplotype << '\t'
+            << track.sequence_name << '\t'
+            << track.sequence_start << '\t'
+            << track.sequence_end << '\t'
+            << track.entry_count << '\n';
+    }
 }
 
 std::uint64_t parse_u64_arg(const std::string& value, std::string_view field_name) {
@@ -200,9 +234,13 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .help("input indexed multi-member GFA gzip");
 
     parser.add_argument("region")
+      .default_value(std::string(""))
+      .nargs(argparse::nargs_pattern::optional)
       .help("0-based half-open reference interval in sequence:start-end form");
 
     parser.add_argument("out_gfa")
+      .default_value(std::string(""))
+      .nargs(argparse::nargs_pattern::optional)
       .help("output extracted GFA subgraph");
 
     parser.add_argument("--reference")
@@ -244,9 +282,17 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .implicit_value(true)
       .help("skip P/W subpath output; .pdx is still required to resolve coordinate ranks");
 
-    parser.add_argument("--with_walk_coordinates", "--with_walk_coords").default_value(false)
+    parser.add_argument("--with_coords").default_value(false)
       .implicit_value(true)
-      .help("emit W subpaths with SeqStart/SeqEnd and P subpaths with path-local coordinate names");
+      .help("emit coordinate-bearing W/P subpaths");
+
+    parser.add_argument("--print_path_names").default_value(false)
+      .implicit_value(true)
+      .help("print coordinate tracks available in the .cdx, then exit");
+
+    parser.add_argument("--no_header").default_value(false)
+      .implicit_value(true)
+      .help("omit the TSV header when used with --print_path_names");
 
     parser.add_argument("--debug_trace").default_value(false)
       .implicit_value(true)
@@ -256,29 +302,43 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
 int run_get_region(const argparse::ArgumentParser& program) {
     try {
         const auto input_gz = program.get<std::string>("in_gz");
-        const auto region = parse_region(program.get<std::string>("region"));
         const auto reference = program.get<std::string>("reference");
+        const bool print_path_names = program.get<bool>("print_path_names");
         const bool no_paths = program.get<bool>("no_paths");
-        const bool with_walk_coordinates = program.get<bool>("with_walk_coordinates");
-        if (no_paths && with_walk_coordinates) {
-            throw std::runtime_error("--with_walk_coordinates requires path output; remove --no_paths");
-        }
+        const bool with_coords = program.get<bool>("with_coords");
 
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
         auto lnx_path = program.get<std::string>("lnx");
         const bool lnx_explicit = !lnx_path.empty();
-        if (cdx_path.empty()) cdx_path = infer_companion_path(input_gz, ".cdx");
+        if (cdx_path.empty()) cdx_path = resolve_coordinate_index_path(input_gz, cdx_path);
         if (pdx_path.empty()) pdx_path = infer_companion_path(input_gz, ".pdx");
         if (lnx_path.empty()) lnx_path = infer_companion_path(input_gz, ".lnx");
         if (!file_exists(cdx_path.c_str())) {
             throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
         }
+        if (print_path_names) {
+            CoordinateIndexReader coordinate_index(cdx_path);
+            write_coordinate_tracks(std::cout, coordinate_index, !program.get<bool>("no_header"));
+            return 0;
+        }
+
+        if (no_paths && with_coords) {
+            throw std::runtime_error("--with_coords requires path output; remove --no_paths");
+        }
+
+        const auto region_arg = program.get<std::string>("region");
+        const auto output_gfa = program.get<std::string>("out_gfa");
+        if (region_arg.empty() || output_gfa.empty()) {
+            throw std::runtime_error("get_region requires <sequence:start-end> and <out_gfa> unless --print_path_names is used");
+        }
+
+        const auto region = parse_region(region_arg);
         if (!file_exists(pdx_path.c_str())) {
             throw std::runtime_error("Path index required for coordinate rank lookup does not exist: " +
                                      pdx_path);
         }
-        if (with_walk_coordinates && lnx_explicit && !file_exists(lnx_path.c_str())) {
+        if (with_coords && lnx_explicit && !file_exists(lnx_path.c_str())) {
             throw std::runtime_error("Node length index does not exist: " + lnx_path);
         }
 
@@ -308,7 +368,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
 
         chunk::SubgraphExtractionOptions options;
         options.input_gz = input_gz;
-        options.output_gfa = program.get<std::string>("out_gfa");
+        options.output_gfa = output_gfa;
         options.idx_path = program.get<std::string>("idx");
         options.ndx_path = program.get<std::string>("ndx");
         options.pdx_path = pdx_path;
@@ -317,7 +377,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
         options.lnx_path = file_exists(lnx_path.c_str()) ? lnx_path : std::string{};
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
         options.include_paths = !no_paths;
-        options.with_walk_coordinates = with_walk_coordinates;
+        options.with_walk_coordinates = with_coords;
         options.debug_trace = program.get<bool>("debug_trace");
         return chunk::extract_subgraph_from_seeds(options, seed_nodes);
     } catch (const std::exception& err) {

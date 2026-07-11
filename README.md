@@ -39,7 +39,7 @@ neighborhood across communities.
 
 `get_region` additionally uses `.cdx` to resolve a 0-based reference interval
 to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
-When `--with_walk_coordinates` is requested, `.lnx` supplies node lengths
+When `--with_coords` is requested, `.lnx` supplies node lengths
 without re-scanning all `S` lines. The `.cdx` and `.lnx` files are separate
 sidecars, so existing path indexes remain compatible.
 
@@ -269,19 +269,28 @@ Important options:
   cap the total seed plus BFS node count; it must be at least the seed count
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
-- `--with_walk_coordinates` / `--with_walk_coords`
+- `--with_coords`
   emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates and
   returned no-overlap `P` subpaths with path-local coordinate names such as
   `CHM13#0#chr1:1830045-1840123`. The command uses the resolved `.pdx` for path
   metadata and the resolved `.lnx` for node lengths. If `.lnx` is absent, it
   falls back to scanning indexed GFA `S` lines; if validation fails, it falls
   back to ordinary subpath output and logs a warning.
+- `--print_path_names`
+  print the coordinate tracks available in the resolved `.cdx`, then exit. The
+  output is TSV with columns `source`, `reference`, `haplotype`, `sequence`,
+  `start`, `end`, and `entries`. `source` is `W` for walks, `P` for paths with
+  path-local coordinates, or `S` for rGFA segment-derived tracks.
+- `--no_header`
+  omit the TSV header when used with `--print_path_names`
 
 Example:
 
 ```bash
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
   --reference CHM13 --max_nodes 100000
+
+gfaidx get_region chr22.gfa.gz --print_path_names
 ```
 
 ### `gfaidx get_chunk`
