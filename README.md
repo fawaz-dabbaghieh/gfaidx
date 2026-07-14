@@ -252,7 +252,10 @@ gfaidx index_coordinates graph.gfa.gz graph.gfa.gz.cdx --path_names_file path_na
 
 Resolve a 0-based, half-open reference interval through `.cdx`, translate its
 node ranks through `.pdx`, and use all overlapping reference nodes as seeds for
-the existing subgraph and optional path-extraction pipeline.
+the existing subgraph and optional path-extraction pipeline. If `.cdx` is absent
+or does not contain the requested coordinate track, `get_region` can fall back to
+the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any indexed
+`P` path or concrete-coordinate `W` walk.
 
 ```bash
 gfaidx get_region <in_gz> <sequence:start-end> <out_gfa> [options]
@@ -276,6 +279,11 @@ Important options:
   metadata and the resolved `.lnx` for node lengths. If `.lnx` is absent, it
   falls back to scanning indexed GFA `S` lines; if validation fails, it falls
   back to ordinary subpath output and logs a warning.
+- On-the-fly `.pdx` coordinate lookup
+  handles `P` paths as path-local coordinates starting at 0 and handles `W`
+  walks from their stored `SeqStart`. This fallback requires `.lnx`, because the
+  path steps in `.pdx` need rank-aligned node lengths to derive cumulative
+  coordinates.
 - `--print_path_names`
   print the coordinate tracks available in the resolved `.cdx`, then exit. The
   output is TSV with columns `source`, `reference`, `haplotype`, `sequence`,

@@ -9,6 +9,7 @@
 
 #include "chunk/get_subgraph_command.h"
 #include "coordinates/coordinate_index.h"
+#include "coordinates/path_coordinate_query.h"
 #include "fs/fs_helpers.h"
 #include "paths/path_index.h"
 #include "utils/Timer.h"
@@ -282,10 +283,10 @@ int run_get_region(const argparse::ArgumentParser& program) {
         }
         if (pdx_path.empty()) pdx_path = utils::companion_path(input_gz, ".pdx");
         if (lnx_path.empty()) lnx_path = utils::companion_path(input_gz, ".lnx");
-        if (!file_exists(cdx_path.c_str())) {
-            throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
-        }
         if (print_path_names) {
+            if (!file_exists(cdx_path.c_str())) {
+                throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
+            }
             CoordinateIndexReader coordinate_index(cdx_path);
             write_coordinate_tracks(std::cout, coordinate_index, !program.get<bool>("no_header"));
             return 0;
@@ -310,18 +311,52 @@ int run_get_region(const argparse::ArgumentParser& program) {
             throw std::runtime_error("Node length index does not exist: " + lnx_path);
         }
 
-        CoordinateIndexReader coordinate_index(cdx_path);
         paths::PathIndexReader path_index(pdx_path);
-        if (coordinate_index.node_count() != path_index.node_count()) {
-            throw std::runtime_error(".cdx and .pdx node counts differ; rebuild them against the same .ndx");
+
+        std::vector<std::uint32_t> ranks;
+        bool used_coordinate_index = false;
+        bool coordinate_index_returned_empty = false;
+        std::string coordinate_index_error;
+        if (file_exists(cdx_path.c_str())) {
+            CoordinateIndexReader coordinate_index(cdx_path);
+            if (coordinate_index.node_count() != path_index.node_count()) {
+                throw std::runtime_error(".cdx and .pdx node counts differ; rebuild them against the same .ndx");
+            }
+            try {
+                ranks = coordinate_index.query_node_ranks(reference,
+                                                          region.sequence,
+                                                          region.begin,
+                                                          region.end);
+                used_coordinate_index = !ranks.empty();
+                coordinate_index_returned_empty = ranks.empty();
+            } catch (const std::exception& err) {
+                coordinate_index_error = err.what();
+            }
         }
 
-        const auto ranks = coordinate_index.query_node_ranks(reference,
-                                                              region.sequence,
-                                                              region.begin,
-                                                              region.end);
         if (ranks.empty()) {
-            throw std::runtime_error("No reference nodes overlap the requested coordinate interval");
+            try {
+                const auto fallback = query_path_coordinates_on_the_fly(path_index,
+                                                                        file_exists(lnx_path.c_str()) ? lnx_path : std::string{},
+                                                                        reference,
+                                                                        region.sequence,
+                                                                        region.begin,
+                                                                        region.end);
+                ranks = fallback.node_ranks;
+                std::cout << "On-the-fly path coordinate query selected "
+                          << ranks.size() << " seed nodes from "
+                          << fallback.matched_path_count << " indexed P/W records" << std::endl;
+            } catch (const std::exception& err) {
+                if (coordinate_index_returned_empty) {
+                    throw std::runtime_error("No reference nodes overlap the requested coordinate interval");
+                }
+                if (!coordinate_index_error.empty()) {
+                    throw std::runtime_error(std::string(err.what()) +
+                                             "; .cdx lookup also failed: " +
+                                             coordinate_index_error);
+                }
+                throw;
+            }
         }
 
         // PathIndexReader owns the rank-aligned node names already present in
@@ -331,8 +366,10 @@ int run_get_region(const argparse::ArgumentParser& program) {
         for (const auto rank : ranks) {
             seed_nodes.emplace_back(path_index.get_node_name(rank));
         }
-        std::cout << "Coordinate query selected " << seed_nodes.size()
-                  << " reference seed nodes" << std::endl;
+        if (used_coordinate_index) {
+            std::cout << "Coordinate query selected " << seed_nodes.size()
+                      << " reference seed nodes" << std::endl;
+        }
 
         chunk::SubgraphExtractionOptions options;
         options.input_gz = input_gz;

@@ -31,6 +31,7 @@ add_executable(gfaidx
         src/chunk/split_gfa_to_comms.cpp
         src/coordinates/coordinate_commands.cpp
         src/coordinates/coordinate_index.cpp
+        src/coordinates/path_coordinate_query.cpp
         src/indexer/community_coarsening.cpp
         src/indexer/community_refinement.cpp
         src/indexer/direct_binary_writer.cpp
