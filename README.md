@@ -1,21 +1,45 @@
 # gfaidx
 
-`gfaidx` is a CLI toolkit for two related GFA indexing tasks:
+`gfaidx` is a command-line tool for indexing genome graphs stored in GFA.
+It writes a multi-member gzip version of the graph and several sidecar indexes.
+The goal is to give random and fast access to GFA graphs, including large
+graphs, without keeping the full graph in RAM. The main indexes live on disk and
+are read only for the part of the graph or path being queried.
 
-- chunking a graph into community-based gzip members for fast subgraph streaming
-- indexing `P` and `W` lines into a binary path index for fast full-path and subpath retrieval
+Main tasks:
 
-The main CLI subcommands are:
+- split a graph into community-based gzip chunks
+- look up a node's community and stream one chunk
+- extract a BFS subgraph around a node or coordinate interval
+- index `P` and `W` lines for full-path and subpath queries
+- index reference coordinates, or derive coordinates from indexed paths when possible
 
-- `index_gfa`
-- `get_subgraph`
-- `get_chunk`
-- `index_paths`
-- `get_path`
-- `index_coordinates`
-- `get_region`
+## Contents
 
-## What The Indexes Are
+- [What the indexes are](#what-the-indexes-are)
+  - [Chunk index](#chunk-index)
+  - [Path index](#path-index)
+- [Build and install](#build-and-install)
+  - [Supported platforms](#supported-platforms)
+  - [C++ CLI](#c-cli)
+  - [Bioconda](#bioconda)
+  - [Python helper install](#python-helper-install)
+- [CLI](#cli)
+  - [`gfaidx index_gfa`](#gfaidx-index_gfa)
+  - [`gfaidx get_subgraph`](#gfaidx-get_subgraph)
+  - [`gfaidx index_coordinates`](#gfaidx-index_coordinates)
+  - [`gfaidx get_region`](#gfaidx-get_region)
+  - [`gfaidx get_chunk`](#gfaidx-get_chunk)
+  - [`gfaidx index_paths`](#gfaidx-index_paths)
+  - [`gfaidx get_path`](#gfaidx-get_path)
+  - [Build `.lnx` for existing indexes](#build-lnx-for-existing-indexes)
+- [How the path index works](#how-the-path-index-works)
+- [Utility scripts](#utility-scripts)
+- [Python helpers](#python-helpers)
+- [Notes](#notes)
+- [TODO](#todo)
+
+## What the indexes are
 
 ### Chunk index
 
@@ -63,9 +87,9 @@ The `.pdx` stores:
 
 Important: `.pdx` node IDs are aligned to the sorted entry rank in the `.ndx` file used during `index_paths`. That lets `get_path` resolve node names through `.ndx` without loading a giant global node-name map into memory.
 
-## Build
+## Build and install
 
-## Supported platforms
+### Supported platforms
 
 `gfaidx` targets Unix-like systems only:
 
@@ -99,7 +123,7 @@ A Bioconda package is planned. Once the recipe is merged, installation will be:
 conda install -c bioconda -c conda-forge gfaidx
 ```
 
-### Python helpers
+### Python helper install
 
 ```bash
 pip install -e .
@@ -532,7 +556,7 @@ gfaidx get_path graph.gfa.gz \
 
 If the companion `.ndx` file was renamed or moved, provide it explicitly with `--ndx`.
 
-### Build `.lnx` For Existing Indexes
+### Build `.lnx` for existing indexes
 
 Existing indexed graphs do not need to be fully re-indexed to get node lengths.
 Build the sidecar directly from the indexed graph and matching `.ndx`:
@@ -550,7 +574,7 @@ Defaults:
 Use `--ndx`, `--out`, or `--force` if the files were renamed or the output
 should be replaced.
 
-## How The Path Index Works
+## How the path index works
 
 `.pdx` stores two linked views of the same path data:
 
