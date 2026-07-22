@@ -120,7 +120,7 @@ example `$HOME/.local`.
 A Bioconda package is planned. Once the recipe is merged, installation will be:
 
 ```bash
-conda install -c bioconda -c conda-forge gfaidx
+conda install -c bioconda gfaidx
 ```
 
 ### Python helper install
@@ -179,7 +179,7 @@ Outputs:
 Example:
 
 ```bash
-gfaidx index_gfa graph.gfa graph.gfa.gz --tmp_dir /scratch/tmp
+gfaidx index_gfa graph.gfa graph.indexed.gfa.gz --tmp_dir /scratch/tmp
 ```
 
 ### `gfaidx get_subgraph`
@@ -188,7 +188,7 @@ Extract a BFS neighborhood subgraph from the indexed graph, optionally followed
 by the matching `P/W` subpaths if a companion `.pdx` is available.
 
 ```bash
-gfaidx get_subgraph <in_gz> <start_node> <out_gfa> [options]
+gfaidx get_subgraph <in_indexed_gz> <start_node> <out_gfa> [options]
 ```
 
 Arguments:
@@ -222,8 +222,8 @@ Behavior:
 Examples:
 
 ```bash
-gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa
-gfaidx get_subgraph graph.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
+gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa
+gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
 ```
 
 ### `gfaidx index_coordinates`
@@ -265,11 +265,12 @@ Example:
 gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
   --ndx chr22.gfa.gz.ndx --reference CHM13
 
-gfaidx index_coordinates chr22.gfa.gz chr22.gfa.gz.cdx --reference CHM13
+gfaidx index_coordinates chr22.indexed.gfa.gz chr22.gfa.gz.cdx --reference CHM13
 
-gfaidx get_path graph.gfa.gz --print_path_names > path_names.tsv
+# print_path_names prints all available paths in the indexed graph
+gfaidx get_path graph.indexed.gfa.gz --print_path_names > path_names.tsv
 # edit or filter path_names.tsv, then index exactly those P/W records
-gfaidx index_coordinates graph.gfa.gz graph.gfa.gz.cdx --path_names_file path_names.tsv
+gfaidx index_coordinates graph.indexed.gfa.gz graph.gfa.gz.cdx --path_names_file path_names.tsv
 ```
 
 ### `gfaidx get_region`
@@ -444,7 +445,7 @@ General options:
 #### Mode 1: print path names
 
 ```bash
-gfaidx get_path graph.gfa.gz --print_path_names
+gfaidx get_path graph.indexed.gfa.gz --print_path_names
 ```
 
 Output is tab-separated:
@@ -460,7 +461,7 @@ or walks.
 #### Mode 2: exact path ID lookup
 
 ```bash
-gfaidx get_path graph.gfa.gz --path_id <id>
+gfaidx get_path graph.indexed.gfa.gz --path_id <id>
 ```
 
 Options:
@@ -476,13 +477,13 @@ Notes:
 Example:
 
 ```bash
-gfaidx get_path graph.gfa.gz --path_id loopbackP
+gfaidx get_path graph.indexed.gfa.gz --path_id loopbackP
 ```
 
 #### Mode 3: structured `W` lookup
 
 ```bash
-gfaidx get_path graph.gfa.gz --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
+gfaidx get_path graph.indexed.gfa.gz --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
 ```
 
 Options:
@@ -503,7 +504,7 @@ If multiple `W` lines match and start/end are omitted, the lookup is rejected as
 Example:
 
 ```bash
-gfaidx get_path graph.gfa.gz --sample HG002 --hap_index 1 --seq_id chr22
+gfaidx get_path graph.indexed.gfa.gz --sample HG002 --hap_index 1 --seq_id chr22
 ```
 
 #### Mode 4: node-set or subgraph lookup
@@ -511,9 +512,9 @@ gfaidx get_path graph.gfa.gz --sample HG002 --hap_index 1 --seq_id chr22
 Return all `P`/`W` runs that remain contiguous inside the requested node set.
 
 ```bash
-gfaidx get_path graph.gfa.gz --nodes 1,2,3
-gfaidx get_path graph.gfa.gz --nodes_file nodes.txt
-gfaidx get_path graph.gfa.gz --subgraph_gfa subgraph.gfa
+gfaidx get_path graph.indexed.gfa.gz --nodes 1,2,3
+gfaidx get_path graph.indexed.gfa.gz --nodes_file nodes.txt
+gfaidx get_path graph.indexed.gfa.gz --subgraph_gfa subgraph.gfa
 ```
 
 Node query options:
@@ -548,7 +549,7 @@ Coordinate rules:
 Example:
 
 ```bash
-gfaidx get_path graph.gfa.gz \
+gfaidx get_path graph.indexed.gfa.gz \
   --subgraph_gfa extracted_subgraph.gfa \
   --with_walk_coords \
   --source_gfa graph.gfa
@@ -562,7 +563,7 @@ Existing indexed graphs do not need to be fully re-indexed to get node lengths.
 Build the sidecar directly from the indexed graph and matching `.ndx`:
 
 ```bash
-python3 scripts/build_lnx.py graph.gfa.gz
+python3 scripts/build_lnx.py graph.indexed.gfa.gz
 ```
 
 Defaults:
