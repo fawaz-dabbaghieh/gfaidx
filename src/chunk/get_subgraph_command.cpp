@@ -577,6 +577,109 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     return emitted;
 }
 
+// Write an already selected node set by replaying only its communities and the
+// shared-edge member. BFS and posting-based coordinate selection both finish
+// here, keeping graph/path output behavior identical between selection modes.
+int materialize_selected_subgraph(
+    const SubgraphExtractionOptions& options,
+    const std::vector<CommunitySpan>& spans,
+    const ResolvedIndexPaths& index_paths,
+    const indexer::NodeHashIndex& node_index,
+    std::vector<std::string> node_names,
+    std::vector<std::uint32_t> materialization_communities,
+    const std::vector<std::uint32_t>* selected_node_ranks) {
+
+    if (node_names.empty()) {
+        warn_get_subgraph("No nodes were selected for the requested subgraph");
+        return 0;
+    }
+
+    // Community order is made deterministic before gzip members are replayed.
+    std::sort(materialization_communities.begin(),
+              materialization_communities.end());
+    materialization_communities.erase(
+        std::unique(materialization_communities.begin(),
+                    materialization_communities.end()),
+        materialization_communities.end());
+
+    // Resolve BFS names before moving them into the membership table. Exact
+    // posting selection already supplies the rank vector and skips this pass.
+    std::vector<std::uint32_t> resolved_node_ranks;
+    const std::vector<std::uint32_t>* path_node_ranks =
+        selected_node_ranks;
+    if (options.include_paths && index_paths.has_pdx &&
+        path_node_ranks == nullptr) {
+        resolved_node_ranks =
+            resolve_selected_node_ranks(node_index, node_names);
+        path_node_ranks = &resolved_node_ranks;
+    }
+
+    // Move names into the lookup table instead of keeping a second full string
+    // copy during chunk replay. Releasing the moved-from vector also drops its
+    // per-string object array before the potentially large shared-edge scan.
+    std::unordered_set<std::string> node_set;
+    node_set.reserve(node_names.size());
+    for (auto& node_name : node_names) {
+        node_set.emplace(std::move(node_name));
+    }
+    std::vector<std::string>().swap(node_names);
+
+    std::ofstream out(options.output_gfa);
+    if (!out) {
+        throw std::runtime_error("Failed to open output GFA file for writing: " +
+                                 options.output_gfa);
+    }
+
+    info_get_subgraph("Starting subgraph materialization into " +
+                      options.output_gfa);
+    emit_header_if_present(out, options.input_gz, spans);
+    EmissionStats total_stats{};
+    for (const auto community_id : materialization_communities) {
+        info_get_subgraph("Materializing community " +
+                          std::to_string(community_id));
+        const auto stats = emit_filtered_member(out,
+                                                options.input_gz,
+                                                spans[community_id],
+                                                node_set);
+        total_stats.s_lines += stats.s_lines;
+        total_stats.l_lines += stats.l_lines;
+    }
+    if (spans.size() >= 2) {
+        const auto shared_chunk_id =
+            static_cast<std::uint32_t>(spans.size() - 1);
+        info_get_subgraph("Materializing shared-edge member " +
+                          std::to_string(shared_chunk_id));
+        const auto stats = emit_filtered_member(out,
+                                                options.input_gz,
+                                                spans[shared_chunk_id],
+                                                node_set);
+        total_stats.s_lines += stats.s_lines;
+        total_stats.l_lines += stats.l_lines;
+    }
+    info_get_subgraph("Finished subgraph materialization with " +
+                      std::to_string(total_stats.s_lines) + " S lines and " +
+                      std::to_string(total_stats.l_lines) + " L lines");
+
+    if (options.include_paths && index_paths.has_pdx) {
+        info_get_subgraph("Starting indexed subpath extraction from " +
+                          index_paths.pdx_path);
+        const auto subpath_count = emit_subpaths_if_available(
+            out,
+            index_paths.pdx_path,
+            *path_node_ranks,
+            node_index,
+            options.input_gz,
+            options.lnx_path,
+            options.with_walk_coordinates);
+        info_get_subgraph("Finished indexed subpath extraction with " +
+                          std::to_string(subpath_count) + " P/W records");
+    }
+
+    info_get_subgraph("Finished writing extracted subgraph to " +
+                      options.output_gfa);
+    return 0;
+}
+
 }  // namespace
 
 void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
@@ -719,59 +822,111 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
     info_get_subgraph("BFS finished with " + std::to_string(node_names.size()) +
                       " nodes across " + std::to_string(loaded_community_count) +
                       " loaded communities");
-    if (node_names.empty()) {
-        warn_get_subgraph("No nodes were selected for the requested subgraph");
-        return 0;
+    return materialize_selected_subgraph(options,
+                                         spans,
+                                         index_paths,
+                                         node_index,
+                                         std::move(node_names),
+                                         std::move(materialization_communities),
+                                         nullptr);
+}
+
+int extract_subgraph_from_node_ranks(
+    const SubgraphExtractionOptions& options,
+    const std::vector<std::uint32_t>& node_ranks) {
+
+    if (!file_exists(options.input_gz.c_str())) {
+        throw std::runtime_error("Input file does not exist: " +
+                                 options.input_gz);
+    }
+    if (node_ranks.empty()) {
+        throw std::runtime_error(
+            "At least one node rank is required for exact subgraph extraction");
     }
 
-    std::sort(materialization_communities.begin(), materialization_communities.end());
-    std::unordered_set<std::string> node_set(node_names.begin(), node_names.end());
-    std::ofstream out(options.output_gfa);
-    if (!out) {
-        throw std::runtime_error("Failed to open output GFA file for writing: " +
-                                 options.output_gfa);
+    // Export the same trace flag used by BFS so cross-index diagnostics remain
+    // available for exact path-supported materialization.
+    if (options.debug_trace) {
+        ::setenv("GFAIDX_DEBUG_SUBGRAPH", "1", 1);
+        debug::log_subgraph_trace(
+            "Enabled temporary exact-subgraph trace logging");
     }
 
-    info_get_subgraph("Starting subgraph materialization into " + options.output_gfa);
-    emit_header_if_present(out, options.input_gz, spans);
-    EmissionStats total_stats{};
-    for (const auto community_id : materialization_communities) {
-        info_get_subgraph("Materializing community " + std::to_string(community_id));
-        const auto stats = emit_filtered_member(out, options.input_gz,
-                                                spans[community_id], node_set);
-        total_stats.s_lines += stats.s_lines;
-        total_stats.l_lines += stats.l_lines;
+    // Exact rank materialization always needs .pdx for rank-to-name conversion,
+    // even when --no_paths suppresses P/W records in the output.
+    const auto index_paths = resolve_index_paths(options.input_gz,
+                                                 options.idx_path,
+                                                 options.ndx_path,
+                                                 options.pdx_path,
+                                                 true);
+    if (!index_paths.has_pdx) {
+        throw std::runtime_error(
+            "Exact rank-based subgraph extraction requires a companion .pdx");
     }
-    if (spans.size() >= 2) {
-        const auto shared_chunk_id = static_cast<std::uint32_t>(spans.size() - 1);
-        info_get_subgraph("Materializing shared-edge member " +
-                          std::to_string(shared_chunk_id));
-        const auto stats = emit_filtered_member(out, options.input_gz,
-                                                spans[shared_chunk_id], node_set);
-        total_stats.s_lines += stats.s_lines;
-        total_stats.l_lines += stats.l_lines;
-    }
-    info_get_subgraph("Finished subgraph materialization with " +
-                      std::to_string(total_stats.s_lines) + " S lines and " +
-                      std::to_string(total_stats.l_lines) + " L lines");
 
-    if (index_paths.has_pdx) {
-        // Convert only the final subgraph node names to rank ids needed by the
-        // rank-aligned path index.
-        const auto node_ids = resolve_selected_node_ranks(node_index, node_names);
-        info_get_subgraph("Starting indexed subpath extraction from " + index_paths.pdx_path);
-        const auto subpath_count = emit_subpaths_if_available(out,
-                                                             index_paths.pdx_path,
-                                                             node_ids,
-                                                             node_index,
-                                                             options.input_gz,
-                                                             options.lnx_path,
-                                                             options.with_walk_coordinates);
-        info_get_subgraph("Finished indexed subpath extraction with " +
-                          std::to_string(subpath_count) + " P/W records");
+    const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
+    if (spans.empty()) {
+        throw std::runtime_error(
+            "The .idx file does not contain any community spans");
     }
-    info_get_subgraph("Finished writing extracted subgraph to " + options.output_gfa);
-    return 0;
+
+    indexer::NodeHashIndex node_index(index_paths.ndx_path);
+    std::vector<std::uint32_t> unique_node_ranks = node_ranks;
+    std::sort(unique_node_ranks.begin(), unique_node_ranks.end());
+    unique_node_ranks.erase(
+        std::unique(unique_node_ranks.begin(), unique_node_ranks.end()),
+        unique_node_ranks.end());
+
+    std::vector<std::string> node_names;
+    node_names.reserve(unique_node_ranks.size());
+    std::vector<std::uint32_t> materialization_communities;
+    std::vector<std::uint8_t> seen_communities(spans.size(), 0);
+    const std::uint32_t shared_chunk_id =
+        spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
+                          : std::numeric_limits<std::uint32_t>::max();
+
+    {
+        // Scope the reader so its path metadata and file handle are released
+        // before selected names move into the graph materialization hash set.
+        paths::PathIndexReader path_index(index_paths.pdx_path);
+        if (path_index.node_count() != node_index.size()) {
+            throw std::runtime_error(
+                ".pdx and .ndx node counts differ; rebuild aligned indexes");
+        }
+
+        for (const auto node_rank : unique_node_ranks) {
+            if (node_rank >= path_index.node_count()) {
+                throw std::runtime_error(
+                    "Selected node rank is outside the .pdx node table");
+            }
+
+            const auto community_id =
+                node_index.community_id_by_rank(node_rank);
+            if (community_id >= spans.size() ||
+                community_id == shared_chunk_id) {
+                throw std::runtime_error(
+                    "Selected node rank resolved to an invalid community");
+            }
+            if (seen_communities[community_id] == 0) {
+                seen_communities[community_id] = 1;
+                materialization_communities.push_back(community_id);
+            }
+            node_names.emplace_back(path_index.copy_node_name(node_rank));
+        }
+    }
+
+    info_get_subgraph("Exact path-supported selection contains " +
+                      std::to_string(unique_node_ranks.size()) +
+                      " nodes across " +
+                      std::to_string(materialization_communities.size()) +
+                      " communities; BFS was not run");
+    return materialize_selected_subgraph(options,
+                                         spans,
+                                         index_paths,
+                                         node_index,
+                                         std::move(node_names),
+                                         std::move(materialization_communities),
+                                         &unique_node_ranks);
 }
 
 int run_get_subgraph(const argparse::ArgumentParser& program) {

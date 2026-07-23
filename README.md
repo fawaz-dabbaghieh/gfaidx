@@ -276,11 +276,11 @@ gfaidx index_coordinates graph.indexed.gfa.gz graph.gfa.gz.cdx --path_names_file
 ### `gfaidx get_region`
 
 Resolve a 0-based, half-open reference interval through `.cdx`, translate its
-node ranks through `.pdx`, and use all overlapping reference nodes as seeds for
-the existing subgraph and optional path-extraction pipeline. If `.cdx` is absent
-or does not contain the requested coordinate track, `get_region` can fall back to
-the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any indexed
-`P` path or concrete-coordinate `W` walk.
+node ranks through `.pdx`, and either use all overlapping reference nodes as BFS
+seeds or select the P/W path spans supported by those nodes. If `.cdx` is absent
+or does not contain the requested coordinate track, `get_region` can fall back
+to the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any
+indexed `P` path or concrete-coordinate `W` walk.
 
 ```bash
 gfaidx get_region <in_gz> <sequence:start-end> <out_gfa> [options]
@@ -294,7 +294,16 @@ Important options:
 - `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`
   override companion indexes; each defaults to `<in_gz>.<suffix>`
 - `--max_nodes <N>`
-  cap the total seed plus BFS node count; it must be at least the seed count
+  cap the total seed plus BFS node count; it must be at least the seed count.
+  This limit is not used with `--all_haplotypes`
+- `--all_haplotypes`
+  avoid BFS and use the `.pdx` posting table to find every indexed P/W record
+  containing a reference interval node. For each matching record, include every
+  step between its minimum and maximum matching step, then materialize the exact
+  union of those nodes and edges whose endpoints are both in the union. This
+  mode assumes the graph nodes of interest are covered by indexed P/W records;
+  graph-only nodes are not discovered. A path with only one matching reference
+  node contributes that node only
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
@@ -322,6 +331,9 @@ Example:
 ```bash
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
   --reference CHM13 --max_nodes 100000
+
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
+  --reference CHM13 --all_haplotypes
 
 gfaidx get_region chr22.gfa.gz --print_path_names
 ```

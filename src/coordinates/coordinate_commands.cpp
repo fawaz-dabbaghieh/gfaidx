@@ -9,6 +9,7 @@
 
 #include "chunk/get_subgraph_command.h"
 #include "coordinates/coordinate_index.h"
+#include "coordinates/path_haplotype_query.h"
 #include "coordinates/path_coordinate_query.h"
 #include "fs/fs_helpers.h"
 #include "paths/path_index.h"
@@ -243,7 +244,11 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--max_nodes")
       .default_value(std::string("10000"))
       .nargs(1)
-      .help("maximum total seeds plus BFS neighborhood nodes; defaults to 10000");
+      .help("maximum total seeds plus BFS nodes; not used with --all_haplotypes");
+
+    parser.add_argument("--all_haplotypes").default_value(false)
+      .implicit_value(true)
+      .help("select exact P/W path spans between first and last reference-node hits instead of BFS");
 
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
@@ -273,6 +278,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
         const bool print_path_names = program.get<bool>("print_path_names");
         const bool no_paths = program.get<bool>("no_paths");
         const bool with_coords = program.get<bool>("with_coords");
+        const bool all_haplotypes = program.get<bool>("all_haplotypes");
 
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
@@ -359,18 +365,13 @@ int run_get_region(const argparse::ArgumentParser& program) {
             }
         }
 
-        // PathIndexReader owns the rank-aligned node names already present in
-        // .pdx, so the coordinate sidecar never duplicates those strings.
-        std::vector<std::string> seed_nodes;
-        seed_nodes.reserve(ranks.size());
-        for (const auto rank : ranks) {
-            seed_nodes.emplace_back(path_index.get_node_name(rank));
-        }
         if (used_coordinate_index) {
-            std::cout << "Coordinate query selected " << seed_nodes.size()
+            std::cout << "Coordinate query selected " << ranks.size()
                       << " reference seed nodes" << std::endl;
         }
 
+        // Both selection modes share the same index overrides and output
+        // controls. Only the node-selection strategy changes below.
         chunk::SubgraphExtractionOptions options;
         options.input_gz = input_gz;
         options.output_gfa = output_gfa;
@@ -384,6 +385,31 @@ int run_get_region(const argparse::ArgumentParser& program) {
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_coords;
         options.debug_trace = program.get<bool>("debug_trace");
+
+        if (all_haplotypes) {
+            // Use the .pdx posting table as an inverted index from every
+            // reference interval node to its path occurrences. Per path, the
+            // selector includes the complete min/max step span without BFS.
+            const auto selection =
+                query_path_haplotype_nodes(path_index, ranks);
+            std::cout << "All-haplotype path selection read "
+                      << selection.posting_count << " postings across "
+                      << selection.matched_path_count << " P/W records and selected "
+                      << selection.node_ranks.size() << " unique nodes from "
+                      << selection.selected_path_step_count << " path steps"
+                      << std::endl;
+            return chunk::extract_subgraph_from_node_ranks(
+                options,
+                selection.node_ranks);
+        }
+
+        // BFS still uses original node-name strings. Convert only the reference
+        // seed ranks selected by the coordinate query.
+        std::vector<std::string> seed_nodes;
+        seed_nodes.reserve(ranks.size());
+        for (const auto rank : ranks) {
+            seed_nodes.emplace_back(path_index.get_node_name(rank));
+        }
         return chunk::extract_subgraph_from_seeds(options, seed_nodes);
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;

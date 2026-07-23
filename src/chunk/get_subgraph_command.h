@@ -37,6 +37,12 @@ int run_get_subgraph(const argparse::ArgumentParser& program);
 int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
                                 const std::vector<std::string>& seed_nodes);
 
+// Materialize an exact rank-aligned node set without graph traversal. Coordinate
+// path-closure queries use this entry point after selecting nodes through .pdx.
+int extract_subgraph_from_node_ranks(
+    const SubgraphExtractionOptions& options,
+    const std::vector<std::uint32_t>& node_ranks);
+
 }  // namespace gfaidx::chunk
 
 #endif  // GFAIDX_GET_SUBGRAPH_COMMAND_H

@@ -1198,6 +1198,21 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
     return inserted_it->second;
 }
 
+std::string PathIndexReader::copy_node_name(std::uint32_t node_id) const {
+    if (node_id >= node_count_) {
+        throw std::runtime_error("Node id out of range");
+    }
+
+    // Bypass both lazy node caches because callers consume each name once and
+    // keep their own selected-node representation.
+    NodeRecordDisk rec{};
+    const auto offset =
+        node_table_offset_ +
+        static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
+    read_exact(offset, &rec, sizeof(rec));
+    return read_string(rec.name_offset, rec.name_len);
+}
+
 std::string_view PathIndexReader::get_overlap_field(std::uint32_t path_id) const {
     if (path_id >= paths_.size()) {
         throw std::runtime_error("Path id out of range");
