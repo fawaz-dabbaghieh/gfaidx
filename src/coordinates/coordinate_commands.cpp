@@ -5,6 +5,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "chunk/get_subgraph_command.h"
@@ -24,6 +25,56 @@ struct ParsedRegion {
     std::uint64_t begin{};
     std::uint64_t end{};
 };
+
+std::string coordinate_walk_key(const CoordinateTrackInfo& track) {
+    return track.reference_name + "|" + std::to_string(track.haplotype) + "|" +
+           track.sequence_name + "|" + std::to_string(track.sequence_start) +
+           "|" + std::to_string(track.sequence_end);
+}
+
+std::vector<paths::SubpathRun> resolve_coordinate_path_runs(
+    const paths::PathIndexReader& path_index,
+    const CoordinateQueryResult& query) {
+    std::vector<paths::SubpathRun> runs;
+    runs.reserve(query.slices.size());
+
+    for (const auto& slice : query.slices) {
+        if (slice.track.source_type == 'S') {
+            // rGFA segment tracks have a coordinate namespace but do not
+            // necessarily correspond to one indexed P/W record.
+            continue;
+        }
+
+        const auto lookup_name = slice.track.source_type == 'P'
+            ? slice.track.sequence_name
+            : coordinate_walk_key(slice.track);
+        std::uint32_t path_id = 0;
+        if (!path_index.lookup_path_id(lookup_name, path_id)) {
+            throw std::runtime_error(
+                "Coordinate P/W track does not exist in the supplied .pdx: " +
+                lookup_name);
+        }
+
+        const auto info = path_index.get_path_info(path_id);
+        if (info.record_type != slice.track.source_type ||
+            info.step_count != slice.track.entry_count ||
+            slice.start_step > info.step_count ||
+            slice.node_ranks.size() > info.step_count - slice.start_step) {
+            throw std::runtime_error(
+                "Coordinate P/W track is not aligned with the supplied .pdx: " +
+                lookup_name);
+        }
+
+        // CDX entries for P/W tracks are written in original path-step order,
+        // so the binary-search offsets are already exact .pdx subpath bounds.
+        runs.push_back(paths::SubpathRun{
+            path_id,
+            slice.start_step,
+            static_cast<std::uint64_t>(slice.node_ranks.size()),
+        });
+    }
+    return runs;
+}
 
 void write_coordinate_tracks(std::ostream& out,
                              const CoordinateIndexReader& index,
@@ -253,7 +304,7 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--all_haplotypes").default_value(false)
       .implicit_value(true)
-      .help("select exact P/W path spans between first and last reference-node hits instead of BFS");
+      .help("select the exact reference interval and anchor-supported P/W spans instead of BFS");
 
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
@@ -331,6 +382,8 @@ int run_get_region(const argparse::ArgumentParser& program) {
         paths::PathIndexReader path_index(pdx_path);
 
         std::vector<std::uint32_t> ranks;
+        std::vector<std::uint32_t> ordered_reference_ranks;
+        std::vector<paths::SubpathRun> exact_reference_path_runs;
         bool used_coordinate_index = false;
         bool coordinate_index_returned_empty = false;
         std::string coordinate_index_error;
@@ -340,10 +393,29 @@ int run_get_region(const argparse::ArgumentParser& program) {
                 throw std::runtime_error(".cdx and .pdx node counts differ; rebuild them against the same .ndx");
             }
             try {
-                ranks = coordinate_index.query_node_ranks(reference,
-                                                          region.sequence,
-                                                          region.begin,
-                                                          region.end);
+                auto query = coordinate_index.query_region(reference,
+                                                            region.sequence,
+                                                            region.begin,
+                                                            region.end);
+                std::vector<std::uint32_t> query_ordered_ranks;
+                for (const auto& slice : query.slices) {
+                    query_ordered_ranks.insert(
+                        query_ordered_ranks.end(),
+                        slice.node_ranks.begin(),
+                        slice.node_ranks.end());
+                }
+                std::vector<paths::SubpathRun> query_reference_runs;
+                if (all_haplotypes) {
+                    query_reference_runs =
+                        resolve_coordinate_path_runs(path_index, query);
+                }
+
+                // Publish the query state only after P/W-to-PDX validation has
+                // also succeeded, so a mismatched sidecar cannot leave a
+                // partially usable rank result behind.
+                ranks = std::move(query.node_ranks);
+                ordered_reference_ranks = std::move(query_ordered_ranks);
+                exact_reference_path_runs = std::move(query_reference_runs);
                 used_coordinate_index = !ranks.empty();
                 coordinate_index_returned_empty = ranks.empty();
             } catch (const std::exception& err) {
@@ -360,6 +432,8 @@ int run_get_region(const argparse::ArgumentParser& program) {
                                                                         region.begin,
                                                                         region.end);
                 ranks = fallback.node_ranks;
+                ordered_reference_ranks = fallback.ordered_node_ranks;
+                exact_reference_path_runs = fallback.reference_path_runs;
                 std::cout << "On-the-fly path coordinate query selected "
                           << ranks.size() << " seed nodes from "
                           << fallback.matched_path_count << " indexed P/W records" << std::endl;
@@ -402,16 +476,29 @@ int run_get_region(const argparse::ArgumentParser& program) {
 
         if (all_haplotypes) {
             // Use the .pdx posting table as an inverted index from every
-            // reference interval node to its path occurrences. Per path, the
-            // selector includes the complete min/max step span without BFS.
+            // ordered reference interval anchor to its path occurrences. Exact
+            // source bounds and repeat-aware path bounds avoid BFS.
             const auto selection =
-                query_path_haplotype_nodes(path_index, ranks);
+                query_path_haplotype_nodes(path_index,
+                                           ordered_reference_ranks,
+                                           exact_reference_path_runs);
             std::cout << "All-haplotype path selection read "
                       << selection.posting_count << " postings across "
                       << selection.matched_path_count << " P/W records and selected "
                       << selection.node_ranks.size() << " unique nodes from "
                       << selection.selected_path_step_count << " path steps"
                       << std::endl;
+            if (selection.exact_reference_path_count > 0 ||
+                selection.repeat_chained_path_count > 0 ||
+                selection.repeat_fallback_path_count > 0) {
+                std::cout << "All-haplotype interval resolution preserved "
+                          << selection.exact_reference_path_count
+                          << " exact coordinate path(s), chained "
+                          << selection.repeat_chained_path_count
+                          << " path(s) with repeated anchors, and retained broad bounds for "
+                          << selection.repeat_fallback_path_count
+                          << " underdetermined path(s)" << std::endl;
+            }
             return chunk::extract_subgraph_from_node_ranks(
                 options,
                 selection.node_ranks,

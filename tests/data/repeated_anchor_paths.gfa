@@ -1,0 +1,33 @@
+H	VN:Z:1.0
+S	A	A
+S	B	C
+S	C	G
+S	D	T
+S	E	A
+S	F	C
+S	Q	G
+S	R	T
+S	X	A
+S	Y	C
+L	A	+	B	+	0M
+L	B	+	C	+	0M
+L	C	+	D	+	0M
+L	D	+	E	+	0M
+L	E	+	B	+	0M
+L	B	+	F	+	0M
+L	B	+	X	+	0M
+L	X	+	C	+	0M
+L	E	+	F	+	0M
+L	Q	+	D	+	0M
+L	D	+	Y	+	0M
+L	Y	+	C	+	0M
+L	C	+	B	+	0M
+L	B	+	R	+	0M
+L	B	+	Q	+	0M
+L	Q	+	R	+	0M
+L	R	+	B	+	0M
+L	R	+	D	+	0M
+P	ref	A+,B+,C+,D+,E+,B+,F+	*
+P	insertion	A+,B+,X+,C+,D+,E+,F+	*
+P	reverse	Q+,B+,R+,D+,Y+,C+,B+	*
+P	repeatnoise	A+,B+,Q+,R+,B+,X+,C+,D+,E+	*

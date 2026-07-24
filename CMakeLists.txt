@@ -59,3 +59,17 @@ target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
 # Install the CLI into the standard binary directory so package managers can use
 # `cmake --install` with their own CMAKE_INSTALL_PREFIX.
 install(TARGETS gfaidx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+include(CTest)
+if(BUILD_TESTING)
+    # Exercise coordinate lookup, repeated-anchor disambiguation, insertions,
+    # and reversed haplotype order through the public CLI.
+    add_test(
+        NAME all_haplotype_repeated_anchors
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_all_haplotype_repeated_anchors.sh
+                $<TARGET_FILE:gfaidx>
+                ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_paths.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_coordinate_paths.tsv
+    )
+endif()

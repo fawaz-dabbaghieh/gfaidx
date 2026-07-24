@@ -20,14 +20,21 @@ struct PathHaplotypeQueryResult {
     std::uint64_t posting_count{};
     std::uint64_t matched_path_count{};
     std::uint64_t selected_path_step_count{};
+    // Resolution counters are reported by get_region so expensive chaining and
+    // conservative single-anchor fallbacks remain visible to the user.
+    std::uint64_t exact_reference_path_count{};
+    std::uint64_t repeat_chained_path_count{};
+    std::uint64_t repeat_fallback_path_count{};
 };
 
-// Find every indexed P/W record that contains at least one reference interval
-// node. For each matching record, include the complete step range between its
-// minimum and maximum matching step, then return the union of those node ranks.
+// Find every indexed P/W record containing at least one ordered reference
+// anchor. Exact coordinate-selected source runs override posting-derived bounds.
+// Other paths use fast min/max bounds unless a repeated anchor defines an
+// endpoint; ambiguous paths use forward/reverse ordered-anchor chaining.
 [[nodiscard]] PathHaplotypeQueryResult query_path_haplotype_nodes(
     const paths::PathIndexReader& path_index,
-    const std::vector<std::uint32_t>& reference_node_ranks);
+    const std::vector<std::uint32_t>& ordered_reference_node_ranks,
+    const std::vector<paths::SubpathRun>& exact_reference_path_runs = {});
 
 }  // namespace gfaidx::coordinates
 

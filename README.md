@@ -305,14 +305,20 @@ Important options:
   This limit is not used with `--all_haplotypes`
 - `--all_haplotypes`
   avoid BFS and use the `.pdx` posting table to find every indexed P/W record
-  containing a reference interval node. For each matching record, include every
-  step between its minimum and maximum matching step, then materialize the exact
-  union of those nodes and edges whose endpoints are both in the union. P/W
-  output preserves that original min/max interval for each matched record rather
-  than searching the final node union for additional occurrences. This mode
-  assumes the graph nodes of interest are covered by indexed P/W records;
-  graph-only nodes are not discovered. A path with only one matching reference
-  node contributes a one-step interval
+  containing a reference interval node. For a coordinate-indexed P/W source,
+  the exact path-step range returned by the coordinate binary search is kept;
+  repeated occurrences of one of its node ids elsewhere on that same path do
+  not widen the reference interval. Other paths normally use their first and
+  last anchor hits. If a repeated anchor would define either endpoint, ordered
+  anchors are chained in both forward and reverse order and the
+  better-supported interval is used.
+  Every step between the chosen endpoints is retained, including inserted
+  nodes, and a fully inverted haplotype can be selected by its reverse chain.
+  The exact node union and edges whose endpoints are both in the union are then
+  materialized. This mode assumes the graph nodes of interest are covered by
+  indexed P/W records; graph-only nodes are not discovered. A path with only
+  one distinct matching anchor has no ordering information, so all occurrences
+  of that anchor remain in its conservative interval
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
@@ -351,8 +357,10 @@ gfaidx get_region chr22.gfa.gz --print_path_names
 
 #### How `--all_haplotypes` preserves paths
 
-Node ids alone do not identify where a node occurs on a path. Consider this
-small example, where the requested reference interval contains `B,C`:
+Node ids alone do not identify where a node occurs on a path. The coordinate
+query therefore keeps the exact source-path steps in addition to the node ids.
+For other haplotypes, consider this small example where the requested reference
+interval contains `B,C`:
 
 ```text
 reference:  A B C D E F G H
@@ -377,6 +385,13 @@ The node union is still used to write the graph's `S` and `L` records. The
 preserved path intervals are used only for `P` and `W` output. Consequently,
 each matched P/W record produces one output interval, including paths whose
 selected interval is reversed relative to the reference.
+
+If `B` also occurs later on the reference path, the `.cdx` step range identifies
+which occurrence overlaps the requested coordinates. If a repeated anchor
+would widen a different haplotype's endpoint, gfaidx compares forward and
+reverse monotonic anchor chains instead of allowing one distant copy to
+determine the complete path span. Insertions between the selected anchor
+endpoints remain part of the result.
 
 ### `gfaidx get_chunk`
 

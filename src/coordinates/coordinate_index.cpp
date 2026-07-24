@@ -994,7 +994,7 @@ void CoordinateIndexReader::read_entries(std::uint64_t entry_index,
     for (const auto& entry : disk) out.push_back(CoordinateEntry{entry.start, entry.node_rank});
 }
 
-std::vector<std::uint32_t> CoordinateIndexReader::query_node_ranks(
+CoordinateQueryResult CoordinateIndexReader::query_region(
     std::string_view reference_name,
     std::string_view sequence_name,
     std::uint64_t begin,
@@ -1022,7 +1022,7 @@ std::vector<std::uint32_t> CoordinateIndexReader::query_node_ranks(
         reference_name = inferred_reference;
     }
 
-    std::vector<std::uint32_t> ranks;
+    CoordinateQueryResult result;
     bool found_track = false;
     for (const auto& track : tracks_) {
         if (track.reference_name != reference_name || track.sequence_name != sequence_name) {
@@ -1062,7 +1062,17 @@ std::vector<std::uint32_t> CoordinateIndexReader::query_node_ranks(
 
         std::vector<CoordinateEntry> matching;
         read_entries(track.entry_begin + low, range_high - low, matching);
-        for (const auto& entry : matching) ranks.push_back(entry.node_rank);
+        if (matching.empty()) continue;
+
+        CoordinateTrackSlice slice;
+        slice.track = track;
+        slice.start_step = low;
+        slice.node_ranks.reserve(matching.size());
+        for (const auto& entry : matching) {
+            slice.node_ranks.push_back(entry.node_rank);
+            result.node_ranks.push_back(entry.node_rank);
+        }
+        result.slices.push_back(std::move(slice));
     }
 
     if (!found_track) {
@@ -1071,11 +1081,22 @@ std::vector<std::uint32_t> CoordinateIndexReader::query_node_ranks(
                                  std::string(sequence_name) + "'");
     }
 
-    // A node can occur more than once in a walk; sorted vector deduplication is
-    // compact and sufficient because coordinate order is not needed after lookup.
-    std::sort(ranks.begin(), ranks.end());
-    ranks.erase(std::unique(ranks.begin(), ranks.end()), ranks.end());
-    return ranks;
+    // Keep ordered occurrences in slices, but collapse the graph seed vector.
+    // The two views prevent BFS from doing duplicate work while allowing the
+    // all-haplotype selector to distinguish repeated path occurrences.
+    std::sort(result.node_ranks.begin(), result.node_ranks.end());
+    result.node_ranks.erase(
+        std::unique(result.node_ranks.begin(), result.node_ranks.end()),
+        result.node_ranks.end());
+    return result;
+}
+
+std::vector<std::uint32_t> CoordinateIndexReader::query_node_ranks(
+    std::string_view reference_name,
+    std::string_view sequence_name,
+    std::uint64_t begin,
+    std::uint64_t end) const {
+    return query_region(reference_name, sequence_name, begin, end).node_ranks;
 }
 
 }  // namespace gfaidx::coordinates

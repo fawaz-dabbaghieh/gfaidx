@@ -83,7 +83,7 @@ void append_overlapping_nodes(const paths::PathIndexReader& path_index,
                               const CandidatePath& candidate,
                               std::uint64_t begin,
                               std::uint64_t end,
-                              std::vector<std::uint32_t>& node_ranks) {
+                              PathCoordinateQueryResult& result) {
     const auto info = path_index.get_path_info(candidate.path_id);
     const auto coordinate_base = info.record_type == 'W'
         ? static_cast<std::uint64_t>(info.seq_start)
@@ -115,8 +115,18 @@ void append_overlapping_nodes(const paths::PathIndexReader& path_index,
         ++low;
     }
 
+    if (low >= high) return;
+
+    // Preserve the exact path occurrence selected by the coordinate binary
+    // search. Repeated node ids elsewhere on the same path must not widen it.
+    result.reference_path_runs.push_back(paths::SubpathRun{
+        candidate.path_id,
+        static_cast<std::uint64_t>(low),
+        static_cast<std::uint64_t>(high - low),
+    });
     for (std::size_t i = low; i < high; ++i) {
-        node_ranks.push_back(table.node_ranks[i]);
+        result.ordered_node_ranks.push_back(table.node_ranks[i]);
+        result.node_ranks.push_back(table.node_ranks[i]);
     }
 }
 
@@ -197,11 +207,27 @@ PathCoordinateQueryResult query_path_coordinates_on_the_fly(
         throw std::runtime_error(".lnx and .pdx node counts differ; rebuild them against the same .ndx");
     }
 
-    const auto candidates = find_candidate_paths(path_index,
-                                                 reference_name,
-                                                 sequence_name,
-                                                 begin,
-                                                 end);
+    auto candidates = find_candidate_paths(path_index,
+                                           reference_name,
+                                           sequence_name,
+                                           begin,
+                                           end);
+    // W fragments need not appear in coordinate order in the original GFA.
+    // Sort them before concatenating anchors so cross-fragment order remains
+    // meaningful to the all-haplotype chaining stage.
+    std::sort(candidates.begin(), candidates.end(),
+              [&](const CandidatePath& lhs, const CandidatePath& rhs) {
+                  const auto lhs_info = path_index.get_path_info(lhs.path_id);
+                  const auto rhs_info = path_index.get_path_info(rhs.path_id);
+                  const auto lhs_start = lhs_info.record_type == 'W'
+                      ? lhs_info.seq_start
+                      : 0;
+                  const auto rhs_start = rhs_info.record_type == 'W'
+                      ? rhs_info.seq_start
+                      : 0;
+                  if (lhs_start != rhs_start) return lhs_start < rhs_start;
+                  return lhs.path_id < rhs.path_id;
+              });
     PathCoordinateQueryResult result;
     result.matched_path_count = candidates.size();
     for (const auto& candidate : candidates) {
@@ -210,7 +236,7 @@ PathCoordinateQueryResult query_path_coordinates_on_the_fly(
                                  candidate,
                                  begin,
                                  end,
-                                 result.node_ranks);
+                                 result);
     }
 
     std::sort(result.node_ranks.begin(), result.node_ranks.end());
