@@ -414,7 +414,9 @@ int run_get_region(const argparse::ArgumentParser& program) {
                       << std::endl;
             return chunk::extract_subgraph_from_node_ranks(
                 options,
-                selection.node_ranks);
+                selection.node_ranks,
+                selection.path_runs,
+                path_index);
         }
 
         // BFS still uses original node-name strings. Convert only the reference

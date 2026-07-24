@@ -307,10 +307,12 @@ Important options:
   avoid BFS and use the `.pdx` posting table to find every indexed P/W record
   containing a reference interval node. For each matching record, include every
   step between its minimum and maximum matching step, then materialize the exact
-  union of those nodes and edges whose endpoints are both in the union. This
-  mode assumes the graph nodes of interest are covered by indexed P/W records;
+  union of those nodes and edges whose endpoints are both in the union. P/W
+  output preserves that original min/max interval for each matched record rather
+  than searching the final node union for additional occurrences. This mode
+  assumes the graph nodes of interest are covered by indexed P/W records;
   graph-only nodes are not discovered. A path with only one matching reference
-  node contributes that node only
+  node contributes a one-step interval
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
@@ -346,6 +348,35 @@ gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
 
 gfaidx get_region chr22.gfa.gz --print_path_names
 ```
+
+#### How `--all_haplotypes` preserves paths
+
+Node ids alone do not identify where a node occurs on a path. Consider this
+small example, where the requested reference interval contains `B,C`:
+
+```text
+reference:  A B C D E F G H
+haplotype:    B G H C
+```
+
+The reference contributes the interval `B,C`. The anchor nodes `B,C` select
+the complete haplotype interval `B,G,H,C`, so the materialized graph contains
+the node union `B,C,G,H`.
+
+Searching that union against the complete reference again would incorrectly
+find two reference runs, `B,C` and `G,H`. The second run is only present because
+`G,H` were selected through the haplotype. `--all_haplotypes` therefore keeps
+the path-specific intervals found during anchor matching and emits:
+
+```text
+reference:  B C
+haplotype:  B G H C
+```
+
+The node union is still used to write the graph's `S` and `L` records. The
+preserved path intervals are used only for `P` and `W` output. Consequently,
+each matched P/W record produces one output interval, including paths whose
+selected interval is reversed relative to the reference.
 
 ### `gfaidx get_chunk`
 

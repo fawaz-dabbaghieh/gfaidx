@@ -101,6 +101,11 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
                 "All-haplotype selected path step count overflow");
         }
         result.selected_path_step_count += step_count;
+        // Keep the path-specific interval alongside the node union. These
+        // bounds are the original anchor-supported haplotype selection and are
+        // later emitted directly as one P/W subpath per matched record.
+        result.path_runs.push_back(
+            paths::SubpathRun{path_id, bounds.min_step, step_count});
 
         path_index.for_each_step(
             path_id,

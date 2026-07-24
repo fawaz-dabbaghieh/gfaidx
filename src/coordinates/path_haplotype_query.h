@@ -4,9 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace gfaidx::paths {
-class PathIndexReader;
-}
+#include "paths/path_index.h"
 
 namespace gfaidx::coordinates {
 
@@ -14,6 +12,10 @@ namespace gfaidx::coordinates {
 // ranks are sorted and unique in the shared .ndx/.pdx rank space.
 struct PathHaplotypeQueryResult {
     std::vector<std::uint32_t> node_ranks;
+    // Preserve the exact min/max interval selected on each matched path. The
+    // output stage must not reconstruct these intervals from the node union,
+    // because shared node ids can occur elsewhere and create incidental runs.
+    std::vector<paths::SubpathRun> path_runs;
     std::uint64_t reference_node_count{};
     std::uint64_t posting_count{};
     std::uint64_t matched_path_count{};

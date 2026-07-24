@@ -78,6 +78,14 @@ struct EmissionStats {
     std::uint64_t l_lines{0};
 };
 
+// Exact all-haplotype extraction keeps the node union for graph records and
+// the original path intervals for P/W records as two views of one selection.
+struct PreservedPathSelection {
+    const std::vector<std::uint32_t>& node_ranks;
+    const std::vector<paths::SubpathRun>& path_runs;
+    const paths::PathIndexReader& path_index;
+};
+
 void warn_get_subgraph(std::string_view message) {
     std::cerr << get_time() << ": Warning: " << message << std::endl;
 }
@@ -486,16 +494,29 @@ std::vector<std::uint32_t> resolve_selected_node_ranks(
 // Append indexed P/W subpaths for the extracted node set when a companion
 // .pdx exists. This keeps graph extraction and path extraction in one command.
 std::uint64_t emit_subpaths_if_available(std::ostream& out,
-                                         const std::string& pdx_path,
+                                         const paths::PathIndexReader& index,
                                          const std::vector<std::uint32_t>& node_ids,
+                                         const std::vector<paths::SubpathRun>* selected_path_runs,
                                          const indexer::NodeHashIndex& node_index,
                                          const std::string& source_gfa,
                                          const std::string& length_index_path,
                                          const std::string& checkpoint_index_path,
                                          bool with_walk_coordinates) {
-    paths::PathIndexReader index(pdx_path);
-    const auto runs = paths::find_subpaths_for_node_ids(index, node_ids);
-    if (runs.empty()) {
+    // All-haplotype queries already selected one exact interval per matched
+    // path. Generic node-set queries still derive every contiguous path run
+    // from the final node membership set.
+    std::vector<paths::SubpathRun> discovered_runs;
+    const std::vector<paths::SubpathRun>* runs = selected_path_runs;
+    if (runs == nullptr) {
+        discovered_runs =
+            paths::find_subpaths_for_node_ids(index, node_ids);
+        runs = &discovered_runs;
+    } else {
+        info_get_subgraph(
+            "Using " + std::to_string(runs->size()) +
+            " preserved all-haplotype path intervals");
+    }
+    if (runs->empty()) {
         return 0;
     }
 
@@ -503,7 +524,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     // use path-local offsets in their output name. Both need node lengths.
     bool has_coordinate_run = false;
     if (with_walk_coordinates) {
-        for (const auto& run : runs) {
+        for (const auto& run : *runs) {
             const auto record_type = index.get_path_info(run.path_id).record_type;
             if (record_type == 'W' || record_type == 'P') {
                 has_coordinate_run = true;
@@ -533,8 +554,15 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     }
 
     std::uint64_t emitted = 0;
-    for (const auto& run : runs) {
+    for (const auto& run : *runs) {
         const auto info = index.get_path_info(run.path_id);
+        if (run.step_count == 0 ||
+            run.start_step > info.step_count ||
+            run.step_count > info.step_count - run.start_step) {
+            throw std::runtime_error(
+                "Selected path interval is outside path '" +
+                std::string(info.name) + "'");
+        }
         const auto base_name = (info.record_type == 'W') ? info.seq_id : info.name;
         const std::string subpath_name = std::string(base_name) + "#subpath_" +
             std::to_string(run.start_step) + "_" +
@@ -594,7 +622,7 @@ int materialize_selected_subgraph(
     const indexer::NodeHashIndex& node_index,
     std::vector<std::string> node_names,
     std::vector<std::uint32_t> materialization_communities,
-    const std::vector<std::uint32_t>* selected_node_ranks) {
+    const PreservedPathSelection* preserved_paths) {
 
     if (node_names.empty()) {
         warn_get_subgraph("No nodes were selected for the requested subgraph");
@@ -613,7 +641,7 @@ int materialize_selected_subgraph(
     // posting selection already supplies the rank vector and skips this pass.
     std::vector<std::uint32_t> resolved_node_ranks;
     const std::vector<std::uint32_t>* path_node_ranks =
-        selected_node_ranks;
+        preserved_paths != nullptr ? &preserved_paths->node_ranks : nullptr;
     if (options.include_paths && index_paths.has_pdx &&
         path_node_ranks == nullptr) {
         resolved_node_ranks =
@@ -670,15 +698,33 @@ int materialize_selected_subgraph(
     if (options.include_paths && index_paths.has_pdx) {
         info_get_subgraph("Starting indexed subpath extraction from " +
                           index_paths.pdx_path);
-        const auto subpath_count = emit_subpaths_if_available(
-            out,
-            index_paths.pdx_path,
-            *path_node_ranks,
-            node_index,
-            options.input_gz,
-            options.lnx_path,
-            options.pcx_path,
-            options.with_walk_coordinates);
+        std::uint64_t subpath_count = 0;
+        if (preserved_paths != nullptr) {
+            subpath_count = emit_subpaths_if_available(
+                out,
+                preserved_paths->path_index,
+                *path_node_ranks,
+                &preserved_paths->path_runs,
+                node_index,
+                options.input_gz,
+                options.lnx_path,
+                options.pcx_path,
+                options.with_walk_coordinates);
+        } else {
+            // BFS extraction has no preloaded reader, so retain the existing
+            // lazy path-index construction for its generic node-set query.
+            paths::PathIndexReader path_index(index_paths.pdx_path);
+            subpath_count = emit_subpaths_if_available(
+                out,
+                path_index,
+                *path_node_ranks,
+                nullptr,
+                node_index,
+                options.input_gz,
+                options.lnx_path,
+                options.pcx_path,
+                options.with_walk_coordinates);
+        }
         info_get_subgraph("Finished indexed subpath extraction with " +
                           std::to_string(subpath_count) + " P/W records");
     }
@@ -841,7 +887,9 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
 
 int extract_subgraph_from_node_ranks(
     const SubgraphExtractionOptions& options,
-    const std::vector<std::uint32_t>& node_ranks) {
+    const std::vector<std::uint32_t>& node_ranks,
+    const std::vector<paths::SubpathRun>& selected_path_runs,
+    const paths::PathIndexReader& path_index) {
 
     if (!file_exists(options.input_gz.c_str())) {
         throw std::runtime_error("Input file does not exist: " +
@@ -893,34 +941,29 @@ int extract_subgraph_from_node_ranks(
         spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
                           : std::numeric_limits<std::uint32_t>::max();
 
-    {
-        // Scope the reader so its path metadata and file handle are released
-        // before selected names move into the graph materialization hash set.
-        paths::PathIndexReader path_index(index_paths.pdx_path);
-        if (path_index.node_count() != node_index.size()) {
+    if (path_index.node_count() != node_index.size()) {
+        throw std::runtime_error(
+            ".pdx and .ndx node counts differ; rebuild aligned indexes");
+    }
+
+    for (const auto node_rank : unique_node_ranks) {
+        if (node_rank >= path_index.node_count()) {
             throw std::runtime_error(
-                ".pdx and .ndx node counts differ; rebuild aligned indexes");
+                "Selected node rank is outside the .pdx node table");
         }
 
-        for (const auto node_rank : unique_node_ranks) {
-            if (node_rank >= path_index.node_count()) {
-                throw std::runtime_error(
-                    "Selected node rank is outside the .pdx node table");
-            }
-
-            const auto community_id =
-                node_index.community_id_by_rank(node_rank);
-            if (community_id >= spans.size() ||
-                community_id == shared_chunk_id) {
-                throw std::runtime_error(
-                    "Selected node rank resolved to an invalid community");
-            }
-            if (seen_communities[community_id] == 0) {
-                seen_communities[community_id] = 1;
-                materialization_communities.push_back(community_id);
-            }
-            node_names.emplace_back(path_index.copy_node_name(node_rank));
+        const auto community_id =
+            node_index.community_id_by_rank(node_rank);
+        if (community_id >= spans.size() ||
+            community_id == shared_chunk_id) {
+            throw std::runtime_error(
+                "Selected node rank resolved to an invalid community");
         }
+        if (seen_communities[community_id] == 0) {
+            seen_communities[community_id] = 1;
+            materialization_communities.push_back(community_id);
+        }
+        node_names.emplace_back(path_index.copy_node_name(node_rank));
     }
 
     info_get_subgraph("Exact path-supported selection contains " +
@@ -928,13 +971,17 @@ int extract_subgraph_from_node_ranks(
                       " nodes across " +
                       std::to_string(materialization_communities.size()) +
                       " communities; BFS was not run");
+    PreservedPathSelection preserved_paths{
+        unique_node_ranks,
+        selected_path_runs,
+        path_index};
     return materialize_selected_subgraph(options,
                                          spans,
                                          index_paths,
                                          node_index,
                                          std::move(node_names),
                                          std::move(materialization_communities),
-                                         &unique_node_ranks);
+                                         &preserved_paths);
 }
 
 int run_get_subgraph(const argparse::ArgumentParser& program) {
