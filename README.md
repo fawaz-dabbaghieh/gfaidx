@@ -31,6 +31,7 @@ Main tasks:
   - [`gfaidx get_region`](#gfaidx-get_region)
   - [`gfaidx get_chunk`](#gfaidx-get_chunk)
   - [`gfaidx index_paths`](#gfaidx-index_paths)
+  - [`gfaidx index_path_checkpoints`](#gfaidx-index_path_checkpoints)
   - [`gfaidx get_path`](#gfaidx-get_path)
   - [Build `.lnx` for existing indexes](#build-lnx-for-existing-indexes)
 - [How the path index works](#how-the-path-index-works)
@@ -55,6 +56,8 @@ Main tasks:
   a rank-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
+- `<graph>.gz.pcx`
+  a small path-coordinate checkpoint index used to avoid long `.pdx` prefix scans
 - `<graph>.gz.cdx`
   an optional standalone reference-coordinate index built by `index_coordinates`
 
@@ -63,9 +66,10 @@ neighborhood across communities.
 
 `get_region` additionally uses `.cdx` to resolve a 0-based reference interval
 to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
-When `--with_coords` is requested, `.lnx` supplies node lengths
-without re-scanning all `S` lines. The `.cdx` and `.lnx` files are separate
-sidecars, so existing path indexes remain compatible.
+When `--with_coords` is requested, `.lnx` supplies node lengths without
+re-scanning all `S` lines and `.pcx` supplies cumulative path-length
+checkpoints. The `.cdx`, `.lnx`, and `.pcx` files are separate sidecars, so
+existing graph and path indexes remain compatible.
 
 `get_chunk` remains available as the compatibility command for streaming a
 single community member back out without graph expansion.
@@ -133,7 +137,8 @@ pip install -e .
 
 ### `gfaidx index_gfa`
 
-Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`.
+Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`
+and `.pcx`.
 
 ```bash
 gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
@@ -166,7 +171,8 @@ Options:
   merge communities smaller than `N` nodes into the neighboring community with
   the most connecting edges; `0` disables small-community merging
 - `--no_paths`
-  skip building `<out_gfa.gz>.pdx`; still write `.gz`, `.idx`, `.ndx`, and `.lnx`
+  skip building `<out_gfa.gz>.pdx` and `.pcx`; still write `.gz`, `.idx`,
+  `.ndx`, and `.lnx`
 
 Outputs:
 
@@ -175,6 +181,7 @@ Outputs:
 - `<out_gfa.gz>.ndx`
 - `<out_gfa.gz>.lnx`
 - `<out_gfa.gz>.pdx` unless `--no_paths` is used
+- `<out_gfa.gz>.pcx` unless `--no_paths` is used
 
 Example:
 
@@ -291,7 +298,7 @@ Important options:
 - `--reference <sample>`
   select the coordinate namespace when multiple reference samples contain the
   requested sequence
-- `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`
+- `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`, `--pcx`
   override companion indexes; each defaults to `<in_gz>.<suffix>`
 - `--max_nodes <N>`
   cap the total seed plus BFS node count; it must be at least the seed count.
@@ -310,9 +317,11 @@ Important options:
   emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates and
   returned no-overlap `P` subpaths with path-local coordinate names such as
   `CHM13#0#chr1:1830045-1840123`. The command uses the resolved `.pdx` for path
-  metadata and the resolved `.lnx` for node lengths. If `.lnx` is absent, it
-  falls back to scanning indexed GFA `S` lines; if validation fails, it falls
-  back to ordinary subpath output and logs a warning.
+  metadata, `.lnx` for node lengths, and `.pcx` to start near the requested
+  path step instead of scanning from step zero. If `.pcx` is absent, it uses
+  the previous bounded path-prefix scan. If `.lnx` is absent, it falls back to
+  scanning indexed GFA `S` lines; if validation fails, it falls back to ordinary
+  subpath output and logs a warning.
 - On-the-fly `.pdx` coordinate lookup
   handles `P` paths as path-local coordinates starting at 0 and handles `W`
   walks from their stored `SeqStart`. This fallback requires `.lnx`, because the
@@ -422,6 +431,30 @@ Example:
 
 ```bash
 gfaidx index_paths graph.indexed.gfa.gz graph.indexed.gfa.gz.pdx
+```
+
+### `gfaidx index_path_checkpoints`
+
+Build the small `.pcx` acceleration sidecar for an existing `.pdx` and `.lnx`
+without rebuilding the graph or path index.
+
+```bash
+gfaidx index_path_checkpoints <indexed_gfa> [out_index.pcx] [options]
+```
+
+The command infers `<indexed_gfa>.pdx`, `<indexed_gfa>.lnx`, and by default
+writes `<indexed_gfa>.pcx`. Use `--pdx`, `--lnx`, or an explicit output path
+when the files were renamed.
+
+`--checkpoint_steps <N>` controls the checkpoint interval and defaults to
+4096. Each checkpoint is one `uint64` cumulative path length, so the default
+sidecar is normally much smaller than `.pdx`. Queries scan at most 4095 path
+steps before the requested subpath instead of starting at path step zero.
+
+Example:
+
+```bash
+gfaidx index_path_checkpoints graph.indexed.gfa.gz
 ```
 
 ### `gfaidx get_path`
@@ -546,6 +579,9 @@ Coordinate options for path output:
 - `--lnx <path>`
   node-length sidecar used to avoid scanning all `S` lines; defaults to
   `<in_gfa>.lnx` when present
+- `--pcx <path>`
+  optional path-coordinate checkpoints used to avoid scanning P/W paths from
+  step zero; defaults to `<in_gfa>.pcx` when present
 - `--source_gfa <path>`
   original source GFA used as a fallback length source when `.lnx` is absent
 

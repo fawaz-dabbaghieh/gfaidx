@@ -123,6 +123,7 @@ def write_index_table(results: Path, graphs: list[dict[str, str]], out_path: Pat
                         results / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz.ndx",
                         results / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz.lnx",
                         results / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz.pdx",
+                        results / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz.pcx",
                         results / "indexes" / "gfaidx" / graph / f"{graph}.indexed.gfa.gz.cdx",
                     ],
                 },

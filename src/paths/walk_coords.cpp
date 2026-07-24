@@ -127,10 +127,23 @@ bool build_coordinate_slice(const PathIndexReader& index,
     out = CoordinateSlice{};
     out.steps.reserve(static_cast<std::size_t>(step_count));
     const std::uint64_t end_step = start_step + step_count;
+    std::uint64_t scan_start_step = 0;
     std::uint64_t cumulative = 0;
 
     try {
-        index.for_each_step(info.path_id, 0, end_step,
+        // A valid .pcx provides the cumulative length at a nearby checkpoint.
+        // The remaining prefix scan is bounded by checkpoint_stride - 1 steps.
+        if (walk_coord_state.checkpoint_index) {
+            cumulative =
+                walk_coord_state.checkpoint_index->prefix_before_step(
+                    info.path_id,
+                    start_step,
+                    scan_start_step);
+        }
+
+        index.for_each_step(info.path_id,
+                            scan_start_step,
+                            end_step - scan_start_step,
             [&](const StepRecord& step, std::uint64_t step_rank) {
                 if (step.node_id >= walk_coord_state.length_count()) {
                     throw std::runtime_error("path references a node outside the length table");
@@ -202,6 +215,7 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
                                           const indexer::NodeHashIndex& node_index,
                                           const std::string& source_gfa,
                                           const std::string& length_index_path,
+                                          const std::string& checkpoint_index_path,
                                           const WalkCoordWarning& warn) {
     WalkCoordState state;
 
@@ -213,7 +227,6 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
             } else {
                 state.length_index = std::move(length_index);
                 state.usable = true;
-                return state;
             }
         } catch (const std::exception& err) {
             warn_if_requested(warn, "could not use node length index '" + length_index_path +
@@ -224,59 +237,87 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
                                 "', falling back to S-line length scan");
     }
 
-    state.node_lengths.resize(index.node_count());
-    std::vector<std::uint64_t> seen_nodes((static_cast<std::size_t>(index.node_count()) + 63) / 64, 0);
-    std::uint64_t seen_node_count = 0;
+    if (!state.usable) {
+        state.node_lengths.resize(index.node_count());
+        std::vector<std::uint64_t> seen_nodes(
+            (static_cast<std::size_t>(index.node_count()) + 63) / 64,
+            0);
+        std::uint64_t seen_node_count = 0;
 
-    Reader reader;
-    if (!reader.open(source_gfa)) {
-        warn_if_requested(warn, "could not open source GFA '" + source_gfa +
-                                "', falling back to W subpaths without coordinates");
-        state.usable = false;
-        return state;
-    }
-
-    std::string_view line;
-    std::string node_name;
-    std::uint64_t node_length = 0;
-
-    while (reader.read_line(line)) {
-        if (line.empty() || line[0] != 'S') continue;
-
-        if (!parse_s_line_name_and_length(line, node_name, node_length)) {
-            warn_if_requested(warn, "could not derive segment length for node '" + node_name +
+        Reader reader;
+        if (!reader.open(source_gfa)) {
+            warn_if_requested(warn, "could not open source GFA '" + source_gfa +
                                     "', falling back to W subpaths without coordinates");
+            state.usable = false;
             return state;
         }
 
-        std::uint32_t node_id = 0;
-        if (!node_index.lookup_rank(node_name, node_id)) {
-            warn_if_requested(warn, "node '" + node_name +
-                                    "' from source GFA was not found in .ndx, falling back to W subpaths without coordinates");
-            return state;
+        std::string_view line;
+        std::string node_name;
+        std::uint64_t node_length = 0;
+
+        while (reader.read_line(line)) {
+            if (line.empty() || line[0] != 'S') continue;
+
+            if (!parse_s_line_name_and_length(line, node_name, node_length)) {
+                warn_if_requested(warn, "could not derive segment length for node '" + node_name +
+                                        "', falling back to W subpaths without coordinates");
+                return state;
+            }
+
+            std::uint32_t node_id = 0;
+            if (!node_index.lookup_rank(node_name, node_id)) {
+                warn_if_requested(warn, "node '" + node_name +
+                                        "' from source GFA was not found in .ndx, falling back to W subpaths without coordinates");
+                return state;
+            }
+            if (node_id >= index.node_count()) {
+                warn_if_requested(warn, "node '" + node_name +
+                                        "' resolved to an id outside the .pdx node range, falling back to W subpaths without coordinates");
+                return state;
+            }
+            if (test_seen_bit(seen_nodes, node_id)) {
+                warn_if_requested(warn, "duplicate source node or .ndx collision for node '" + node_name +
+                                        "', falling back to W subpaths without coordinates");
+                return state;
+            }
+
+            set_seen_bit(seen_nodes, node_id);
+            ++seen_node_count;
+            state.node_lengths[node_id] = node_length;
         }
-        if (node_id >= index.node_count()) {
-            warn_if_requested(warn, "node '" + node_name +
-                                    "' resolved to an id outside the .pdx node range, falling back to W subpaths without coordinates");
-            return state;
-        }
-        if (test_seen_bit(seen_nodes, node_id)) {
-            warn_if_requested(warn, "duplicate source node or .ndx collision for node '" + node_name +
-                                    "', falling back to W subpaths without coordinates");
+
+        if (seen_node_count != index.node_count()) {
+            warn_if_requested(warn, "the node set in source GFA does not match the node set in .pdx/.ndx, falling back to W subpaths without coordinates");
             return state;
         }
 
-        set_seen_bit(seen_nodes, node_id);
-        ++seen_node_count;
-        state.node_lengths[node_id] = node_length;
+        state.usable = true;
     }
 
-    if (seen_node_count != index.node_count()) {
-        warn_if_requested(warn, "the node set in source GFA does not match the node set in .pdx/.ndx, falling back to W subpaths without coordinates");
-        return state;
+    // Checkpoints are an optional acceleration layer. Any missing or mismatched
+    // .pcx leaves coordinate correctness unchanged and uses the old prefix scan.
+    if (!checkpoint_index_path.empty() &&
+        file_exists(checkpoint_index_path.c_str())) {
+        try {
+            auto checkpoint_index =
+                std::make_unique<PathCoordinateCheckpointIndexReader>(
+                    checkpoint_index_path);
+            checkpoint_index->validate_against(index,
+                                               state.length_count());
+            state.checkpoint_index = std::move(checkpoint_index);
+        } catch (const std::exception& err) {
+            warn_if_requested(warn,
+                              "could not use path checkpoint index '" +
+                                  checkpoint_index_path + "' (" + err.what() +
+                                  "), falling back to path-prefix scans");
+        }
+    } else if (!checkpoint_index_path.empty()) {
+        warn_if_requested(warn,
+                          "path checkpoint index not found at '" +
+                              checkpoint_index_path +
+                              "', falling back to path-prefix scans");
     }
-
-    state.usable = true;
     return state;
 }
 

@@ -124,6 +124,10 @@ public:
         return node_count_;
     }
 
+    [[nodiscard]] std::uint64_t total_step_count() const {
+        return total_step_count_;
+    }
+
     [[nodiscard]] bool lookup_path_id(const std::string& name, std::uint32_t& out_path_id) const;
 
     [[nodiscard]] PathInfo get_path_info(std::uint32_t path_id) const;
@@ -186,6 +190,7 @@ private:
     std::uint64_t posting_table_offset_{};
     std::uint64_t strings_offset_{};
     std::uint64_t posting_table_bytes_{};
+    std::uint64_t total_step_count_{};
     std::uint32_t node_count_{};
     std::vector<PathMeta> paths_;
     std::unordered_map<std::string, std::uint32_t> path_name_to_id_;

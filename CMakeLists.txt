@@ -41,7 +41,9 @@ add_executable(gfaidx
         src/indexer/node_hash_index.cpp
         src/indexer/node_length_index.cpp
         src/paths/get_path_command.cpp
+        src/paths/index_path_checkpoints_command.cpp
         src/paths/index_paths_command.cpp
+        src/paths/path_coordinate_checkpoints.cpp
         src/paths/path_index.cpp
         src/paths/walk_coords.cpp
         src/utils/Memory.cpp

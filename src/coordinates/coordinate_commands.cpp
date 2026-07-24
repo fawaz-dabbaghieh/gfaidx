@@ -241,6 +241,11 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("node length index for coordinate-bearing path output; defaults to <in_gz>.lnx when present");
 
+    parser.add_argument("--pcx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("path coordinate checkpoints for faster coordinate-bearing path output; defaults to <in_gz>.pcx when present");
+
     parser.add_argument("--max_nodes")
       .default_value(std::string("10000"))
       .nargs(1)
@@ -283,12 +288,15 @@ int run_get_region(const argparse::ArgumentParser& program) {
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
         auto lnx_path = program.get<std::string>("lnx");
+        auto pcx_path = program.get<std::string>("pcx");
         const bool lnx_explicit = !lnx_path.empty();
+        const bool pcx_explicit = !pcx_path.empty();
         if (cdx_path.empty()) {
             cdx_path = utils::resolve_sidecar_path(input_gz, cdx_path, ".cdx", true);
         }
         if (pdx_path.empty()) pdx_path = utils::companion_path(input_gz, ".pdx");
         if (lnx_path.empty()) lnx_path = utils::companion_path(input_gz, ".lnx");
+        if (pcx_path.empty()) pcx_path = utils::companion_path(input_gz, ".pcx");
         if (print_path_names) {
             if (!file_exists(cdx_path.c_str())) {
                 throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
@@ -315,6 +323,9 @@ int run_get_region(const argparse::ArgumentParser& program) {
         }
         if (with_coords && lnx_explicit && !file_exists(lnx_path.c_str())) {
             throw std::runtime_error("Node length index does not exist: " + lnx_path);
+        }
+        if (with_coords && pcx_explicit && !file_exists(pcx_path.c_str())) {
+            throw std::runtime_error("Path checkpoint index does not exist: " + pcx_path);
         }
 
         paths::PathIndexReader path_index(pdx_path);
@@ -381,6 +392,9 @@ int run_get_region(const argparse::ArgumentParser& program) {
         // Empty means "fall back to the old S-line scan" inside the shared
         // subgraph extractor. Explicit missing --lnx is rejected above.
         options.lnx_path = file_exists(lnx_path.c_str()) ? lnx_path : std::string{};
+        // Missing inferred .pcx files preserve compatibility with existing
+        // indexes by using the previous bounded path-prefix scan.
+        options.pcx_path = file_exists(pcx_path.c_str()) ? pcx_path : std::string{};
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_coords;

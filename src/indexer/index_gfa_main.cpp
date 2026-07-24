@@ -15,6 +15,7 @@
 #include "indexer/node_hash_index.h"
 #include "indexer/node_length_index.h"
 #include "chunk/split_gfa_to_comms.h"
+#include "paths/path_coordinate_checkpoints.h"
 #include "paths/path_index.h"
 #include "utils/Memory.h"
 #include "utils/Timer.h"
@@ -68,6 +69,14 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     const std::string path_index_path = utils::companion_path(out_gzip, ".pdx");
     if (!no_paths && file_exists(path_index_path.c_str())) {
         std::cerr << "Path index file already exists: " << path_index_path << std::endl;
+        return 1;
+    }
+    // Coordinate checkpoints are generated only when path indexing is enabled.
+    const std::string path_checkpoint_index_path =
+        utils::companion_path(out_gzip, ".pcx");
+    if (!no_paths && file_exists(path_checkpoint_index_path.c_str())) {
+        std::cerr << "Path checkpoint index file already exists: "
+                  << path_checkpoint_index_path << std::endl;
         return 1;
     }
 
@@ -153,6 +162,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     const std::string staged_node_index_path = utils::companion_path(staged_out_gzip, ".ndx");
     const std::string staged_node_length_index_path = utils::companion_path(staged_out_gzip, ".lnx");
     const std::string staged_path_index_path = utils::companion_path(staged_out_gzip, ".pdx");
+    const std::string staged_path_checkpoint_index_path =
+        utils::companion_path(staged_out_gzip, ".pcx");
     auto cleanup_staged_outputs = [&]() {
         // Remove any staged final artifacts that were not successfully published.
         remove_path_if_exists(staged_out_gzip);
@@ -160,6 +171,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         remove_path_if_exists(staged_node_index_path);
         remove_path_if_exists(staged_node_length_index_path);
         remove_path_if_exists(staged_path_index_path);
+        remove_path_if_exists(staged_path_checkpoint_index_path);
     };
 
     Timer timer;
@@ -363,6 +375,21 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                             keep_tmp);
             std::cout << get_time() << ": Finished path index in " << timer.elapsed() << " seconds" << std::endl;
             log_memory("After path index");
+
+            timer.reset();
+            // Build the small optional acceleration sidecar after both rank-
+            // aligned source indexes are complete.
+            std::cout << get_time()
+                      << ": Building path coordinate checkpoint index "
+                      << path_checkpoint_index_path << std::endl;
+            gfaidx::paths::build_path_coordinate_checkpoint_index(
+                staged_path_index_path,
+                staged_node_length_index_path,
+                staged_path_checkpoint_index_path);
+            std::cout << get_time()
+                      << ": Finished path coordinate checkpoint index in "
+                      << timer.elapsed() << " seconds" << std::endl;
+            log_memory("After path coordinate checkpoint index");
         }
 
         std::cout << get_time() << ": Publishing final output files" << std::endl;
@@ -372,6 +399,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         rename_path_or_throw(staged_node_length_index_path, node_length_index_path);
         if (!no_paths) {
             rename_path_or_throw(staged_path_index_path, path_index_path);
+            rename_path_or_throw(staged_path_checkpoint_index_path,
+                                 path_checkpoint_index_path);
         }
         // Publish the graph itself last as the visible signal that the full output set is ready.
         rename_path_or_throw(staged_out_gzip, out_gzip);

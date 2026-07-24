@@ -1114,6 +1114,7 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     posting_table_offset_ = header.posting_table_offset;
     strings_offset_ = header.strings_offset;
     posting_table_bytes_ = header.strings_offset - header.posting_table_offset;
+    total_step_count_ = header.step_count;
     node_count_ = static_cast<std::uint32_t>(header.node_count);
 
     // Load the small path metadata table eagerly. Node metadata and node names
