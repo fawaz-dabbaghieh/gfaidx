@@ -12,6 +12,9 @@ class PathIndexReader;
 // A checkpoint every 4096 path steps keeps the sidecar small while limiting a
 // coordinate query to at most 4095 prefix steps before its requested slice.
 inline constexpr std::uint64_t kDefaultPathCheckpointStride = 4096;
+// Large path indexes can take substantial time to scan. Report progress in
+// bounded groups by default; callers may use zero to disable these messages.
+inline constexpr std::uint64_t kDefaultPathCheckpointProgressEvery = 10;
 
 // Build an optional path-coordinate checkpoint sidecar from an existing .pdx
 // and its rank-aligned .lnx. The original graph and other indexes are unchanged.
@@ -19,7 +22,9 @@ void build_path_coordinate_checkpoint_index(
     const std::string& path_index_path,
     const std::string& node_length_index_path,
     const std::string& output_path,
-    std::uint64_t checkpoint_stride = kDefaultPathCheckpointStride);
+    std::uint64_t checkpoint_stride = kDefaultPathCheckpointStride,
+    std::uint64_t progress_every_paths =
+        kDefaultPathCheckpointProgressEvery);
 
 // Mmap-backed reader for the small .pcx sidecar. Checkpoint values are path-local
 // cumulative sequence lengths immediately before a checkpointed step.

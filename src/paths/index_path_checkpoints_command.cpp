@@ -37,6 +37,12 @@ void configure_index_path_checkpoints_parser(
           std::to_string(kDefaultPathCheckpointStride))
       .nargs(1)
       .help("store one cumulative coordinate every N path steps; defaults to 4096");
+
+    parser.add_argument("--progress_every_paths")
+      .default_value(
+          std::to_string(kDefaultPathCheckpointProgressEvery))
+      .nargs(1)
+      .help("report progress every N completed paths; 0 disables periodic progress");
 }
 
 int run_index_path_checkpoints(
@@ -75,6 +81,9 @@ int run_index_path_checkpoints(
             throw std::runtime_error(
                 "--checkpoint_steps must be greater than zero");
         }
+        const auto progress_every_paths = utils::parse_u64_strict(
+            program.get<std::string>("progress_every_paths"),
+            "--progress_every_paths");
 
         Timer timer;
         std::cout << "Building path coordinate checkpoints "
@@ -83,7 +92,8 @@ int run_index_path_checkpoints(
         build_path_coordinate_checkpoint_index(path_index,
                                                length_index,
                                                output_index,
-                                               stride);
+                                               stride,
+                                               progress_every_paths);
 
         // Reopen the completed sidecar to validate its header and report the
         // number of checkpoint values actually published.

@@ -205,16 +205,12 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
             remove_path_if_exists(tmp_edgelist);
             remove_path_if_exists(sorted_tmp_edgelist);
             remove_path_if_exists(tmp_binary);
-            std::error_code ec;
-            // Then remove the full working directory tree for this run.
-            std::filesystem::remove_all(tmp_dir, ec);
             std::filesystem::path latest_path = std::filesystem::path(tmp_base.empty()
                 ? std::filesystem::current_path()
                 : std::filesystem::path(tmp_base)) / "latest";
-            // Finally drop the convenience symlink if it still points at this run directory.
-            if (std::filesystem::exists(latest_path) || std::filesystem::is_symlink(latest_path)) {
-                std::filesystem::remove(latest_path, ec);
-            }
+            // Remove this run and its link without disturbing a newer
+            // concurrent run that may now own the latest symlink.
+            cleanup_temp_dir(tmp_dir, latest_path.string());
         }
     };
 

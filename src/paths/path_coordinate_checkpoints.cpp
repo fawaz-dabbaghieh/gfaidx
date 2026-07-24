@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <fstream>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -16,6 +18,7 @@
 #include "fs/fs_helpers.h"
 #include "indexer/node_length_index.h"
 #include "paths/path_index.h"
+#include "utils/Timer.h"
 
 namespace gfaidx::paths {
 namespace {
@@ -141,7 +144,8 @@ void build_path_coordinate_checkpoint_index(
     const std::string& path_index_path,
     const std::string& node_length_index_path,
     const std::string& output_path,
-    std::uint64_t checkpoint_stride) {
+    std::uint64_t checkpoint_stride,
+    std::uint64_t progress_every_paths) {
 
     if (checkpoint_stride == 0) {
         throw std::runtime_error(
@@ -159,8 +163,30 @@ void build_path_coordinate_checkpoint_index(
             ".pdx and .lnx node counts differ; rebuild aligned indexes");
     }
 
-    const auto staged_output = make_temp_output_path(output_path);
+    // Keep the growing output in a visible run directory beside the final
+    // sidecar. If the process is interrupted, users can find that directory
+    // through latest_path_checkpoints instead of accumulating hidden files.
+    const std::filesystem::path output_target(output_path);
+    const auto output_parent = output_target.has_parent_path()
+        ? output_target.parent_path()
+        : std::filesystem::current_path();
+    constexpr const char* kLatestCheckpointTemp =
+        "latest_path_checkpoints";
+    const auto temp_dir = create_temp_dir(
+        output_parent.string(),
+        "gfaidx_path_checkpoints_tmp_",
+        kLatestCheckpointTemp,
+        true);
+    const auto staged_output =
+        (std::filesystem::path(temp_dir) / "path_checkpoints.pcx").string();
+    const auto latest_path =
+        (output_parent / kLatestCheckpointTemp).string();
+    auto cleanup_temp_output = [&]() {
+        cleanup_temp_dir(temp_dir, latest_path);
+    };
+
     try {
+        Timer progress_timer;
         CheckpointHeaderDisk header{};
         std::memcpy(header.magic, kCheckpointMagic, sizeof(header.magic));
         header.version = kCheckpointVersion;
@@ -188,6 +214,20 @@ void build_path_coordinate_checkpoint_index(
             throw std::runtime_error(
                 "Failed to open path checkpoint output: " + staged_output);
         }
+        std::cout << get_time()
+                  << ": Streaming path checkpoints to temporary file "
+                  << staged_output << std::endl;
+        std::cout << get_time() << ": Latest checkpoint temp directory: "
+                  << latest_path << std::endl;
+        std::cout << get_time() << ": Checkpoint scan covers "
+                  << header.path_count << " paths and "
+                  << header.total_step_count << " path steps";
+        if (progress_every_paths == 0) {
+            std::cout << "; periodic progress is disabled" << std::endl;
+        } else {
+            std::cout << "; reporting every " << progress_every_paths
+                      << " completed path(s)" << std::endl;
+        }
 
         // Reserve the fixed tables first. They are rewritten after checkpoint
         // counts and offsets become known during the streaming path scan.
@@ -207,6 +247,14 @@ void build_path_coordinate_checkpoint_index(
              path_id < path_index.path_count();
              ++path_id) {
             const auto info = path_index.get_path_info(path_id);
+            if (progress_every_paths != 0 && path_id == 0) {
+                // Announce the first path before scanning it so one unusually
+                // long first record does not look like a stalled process.
+                std::cout << get_time() << ": Starting checkpoint path "
+                          << (static_cast<std::uint64_t>(path_id) + 1)
+                          << "/" << header.path_count << " ("
+                          << info.step_count << " steps)" << std::endl;
+            }
             auto& record = path_records[path_id];
             record.step_count = info.step_count;
             record.checkpoint_begin = total_checkpoints;
@@ -245,6 +293,42 @@ void build_path_coordinate_checkpoint_index(
             total_steps_seen = checked_add(total_steps_seen,
                                            info.step_count,
                                            "Total path step count");
+
+            const auto completed_paths =
+                static_cast<std::uint64_t>(path_id) + 1;
+            if (progress_every_paths != 0 &&
+                (completed_paths % progress_every_paths == 0 ||
+                 completed_paths == header.path_count)) {
+                // Flushing at reporting boundaries makes staged-file growth
+                // visible to filesystem tools and detects write errors early.
+                out.flush();
+                if (!out) {
+                    throw std::runtime_error(
+                        "Failed while flushing path checkpoint output");
+                }
+                const double percent = header.total_step_count == 0
+                    ? 100.0
+                    : 100.0 * static_cast<double>(total_steps_seen) /
+                          static_cast<double>(header.total_step_count);
+                std::cout << get_time() << ": Processed "
+                          << completed_paths << "/" << header.path_count
+                          << " paths, " << total_steps_seen << "/"
+                          << header.total_step_count << " steps ("
+                          << std::fixed << std::setprecision(1) << percent
+                          << "%), wrote " << total_checkpoints
+                          << " checkpoints in " << std::defaultfloat
+                          << std::setprecision(6)
+                          << progress_timer.elapsed() << " seconds";
+                if (completed_paths < header.path_count) {
+                    const auto next_info = path_index.get_path_info(
+                        static_cast<std::uint32_t>(completed_paths));
+                    std::cout << "; next path "
+                              << (completed_paths + 1) << "/"
+                              << header.path_count << " has "
+                              << next_info.step_count << " steps";
+                }
+                std::cout << std::endl;
+            }
         }
 
         if (total_steps_seen != header.total_step_count) {
@@ -276,8 +360,11 @@ void build_path_coordinate_checkpoint_index(
         }
 
         rename_path_or_throw(staged_output, output_path);
+        cleanup_temp_output();
     } catch (...) {
-        remove_path_if_exists(staged_output);
+        // Handled failures are cleaned immediately. An abrupt interruption
+        // leaves the visible run directory and latest symlink discoverable.
+        cleanup_temp_output();
         throw;
     }
 }

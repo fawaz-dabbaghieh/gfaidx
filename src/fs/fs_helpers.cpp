@@ -120,6 +120,11 @@ std::string create_temp_dir(const std::string& base_dir,
     for (int attempt = 0; attempt < 10; ++attempt) {
         std::ostringstream name;
         name << prefix << now;
+        if (attempt != 0) {
+            // Preserve the readable timestamp name while still making later
+            // collision attempts distinct.
+            name << "_" << attempt;
+        }
         tmp_path = base_path / name.str();
         if (!fs::exists(tmp_path)) {
             fs::create_directories(tmp_path);
@@ -146,4 +151,36 @@ std::string create_temp_dir(const std::string& base_dir,
     }
 
     return tmp_path.string();
+}
+
+void cleanup_temp_dir(const std::string& temp_dir,
+                      const std::string& latest_path) {
+    std::error_code ec;
+    const fs::path link_path(latest_path);
+
+    // Only remove the convenience link when it still names this run. Another
+    // process may have replaced it with a link to a newer temp directory.
+    if (fs::is_symlink(link_path, ec) && !ec) {
+        const auto raw_target = fs::read_symlink(link_path, ec);
+        if (!ec) {
+            std::error_code resolved_ec;
+            const auto resolved_target = fs::absolute(
+                raw_target.is_absolute()
+                    ? raw_target
+                    : link_path.parent_path() / raw_target,
+                resolved_ec).lexically_normal();
+            std::error_code expected_ec;
+            const auto expected_target =
+                fs::absolute(fs::path(temp_dir), expected_ec).lexically_normal();
+            if (!resolved_ec && !expected_ec &&
+                resolved_target == expected_target) {
+                fs::remove(link_path, ec);
+            }
+        }
+    }
+
+    // Removing the run directory also removes any partially written files
+    // after a normal completion or a handled error.
+    ec.clear();
+    fs::remove_all(temp_dir, ec);
 }

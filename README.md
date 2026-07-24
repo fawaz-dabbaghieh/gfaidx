@@ -494,6 +494,16 @@ when the files were renamed.
 sidecar is normally much smaller than `.pdx`. Queries scan at most 4095 path
 steps before the requested subpath instead of starting at path step zero.
 
+Checkpoint values are streamed into a visible
+`gfaidx_path_checkpoints_tmp_*` directory beside the requested `.pcx`.
+`latest_path_checkpoints` points to the active directory. After a successful
+atomic rename, or after a handled error, the command removes both. If the
+process is interrupted, the remaining directory and symlink make the partial
+file easy to find and remove. Progress reports include completed paths, path
+steps, checkpoint counts, and elapsed time every 10 paths by default. Use
+`--progress_every_paths <N>` to change the interval or `0` to disable periodic
+progress.
+
 Example:
 
 ```bash

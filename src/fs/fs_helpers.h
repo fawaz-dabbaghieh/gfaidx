@@ -27,4 +27,9 @@ std::string create_temp_dir(const std::string& base_dir,
                             const std::string& latest_name = "latest",
                             bool keep_latest = true);
 
+// Remove a run directory and its convenience symlink without deleting a
+// symlink that a newer concurrent run has already replaced.
+void cleanup_temp_dir(const std::string& temp_dir,
+                      const std::string& latest_path);
+
 #endif //GFAIDX_FS_HELPERS_H
