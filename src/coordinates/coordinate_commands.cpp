@@ -451,7 +451,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
         }
 
         if (used_coordinate_index) {
-            std::cout << "Coordinate query selected " << ranks.size()
+            std::cout << get_time() << "Coordinate query selected " << ranks.size()
                       << " reference seed nodes" << std::endl;
         }
 
@@ -482,7 +482,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
                 query_path_haplotype_nodes(path_index,
                                            ordered_reference_ranks,
                                            exact_reference_path_runs);
-            std::cout << "All-haplotype path selection read "
+            std::cout << get_time() << "All-haplotype path selection read "
                       << selection.posting_count << " postings across "
                       << selection.matched_path_count << " P/W records and selected "
                       << selection.node_ranks.size() << " unique nodes from "
@@ -491,7 +491,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
             if (selection.exact_reference_path_count > 0 ||
                 selection.repeat_chained_path_count > 0 ||
                 selection.repeat_fallback_path_count > 0) {
-                std::cout << "All-haplotype interval resolution preserved "
+                std::cout << get_time() << "All-haplotype interval resolution preserved "
                           << selection.exact_reference_path_count
                           << " exact coordinate path(s), chained "
                           << selection.repeat_chained_path_count
