@@ -26,8 +26,8 @@ check_output() {
     cat >"$work_dir/expected_paths.tsv" <<'EOF'
 ref:1-4	B+,C+,D+
 insertion:1-5	B+,X+,C+,D+
-reverse:3-7	D+,Y+,C+,B+
-repeatnoise:4-8	B+,X+,C+,D+
+reverse:1-7	B+,R+,D+,Y+,C+,B+
+repeatnoise:1-8	B+,Q+,R+,B+,X+,C+,D+
 EOF
     diff -u "$work_dir/expected_paths.tsv" "$actual_paths"
 
@@ -36,14 +36,16 @@ EOF
 B
 C
 D
+Q
+R
 X
 Y
 EOF
     diff -u "$work_dir/expected_nodes.txt" "$actual_nodes"
 }
 
-# The CDX query must preserve the exact reference occurrence while chaining
-# forward and reverse anchors only on paths whose anchor copies are ambiguous.
+# The CDX query preserves the exact reference occurrence, while every other
+# path conservatively keeps all sequence between its outermost anchor hits.
 "$gfaidx" get_region \
     "$indexed_gfa" \
     ref:1-4 \
@@ -53,7 +55,7 @@ EOF
 check_output "$work_dir/from_cdx.gfa"
 
 # The slower PDX/LNX fallback computes the same exact source run and must have
-# identical repeated-anchor behavior when no coordinate sidecar is available.
+# identical min/max haplotype behavior when no coordinate sidecar is available.
 "$gfaidx" get_region \
     "$indexed_gfa" \
     ref:1-4 \

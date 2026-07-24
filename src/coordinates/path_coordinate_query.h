@@ -13,9 +13,6 @@ namespace gfaidx::coordinates {
 
 struct PathCoordinateQueryResult {
     std::vector<std::uint32_t> node_ranks;
-    // Coordinate order and repeated occurrences are retained for robust
-    // all-haplotype anchor matching.
-    std::vector<std::uint32_t> ordered_node_ranks;
     // P/W fallback lookup already knows the exact path step interval, so pass
     // it forward instead of rediscovering it through node postings.
     std::vector<paths::SubpathRun> reference_path_runs;

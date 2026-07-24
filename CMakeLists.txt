@@ -62,8 +62,8 @@ install(TARGETS gfaidx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 include(CTest)
 if(BUILD_TESTING)
-    # Exercise coordinate lookup, repeated-anchor disambiguation, insertions,
-    # and reversed haplotype order through the public CLI.
+    # Exercise exact reference coordinates and conservative haplotype spans
+    # containing repeated anchors, insertions, and reversed sequence.
     add_test(
         NAME all_haplotype_repeated_anchors
         COMMAND bash

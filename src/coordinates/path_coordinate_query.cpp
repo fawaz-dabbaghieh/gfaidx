@@ -125,7 +125,6 @@ void append_overlapping_nodes(const paths::PathIndexReader& path_index,
         static_cast<std::uint64_t>(high - low),
     });
     for (std::size_t i = low; i < high; ++i) {
-        result.ordered_node_ranks.push_back(table.node_ranks[i]);
         result.node_ranks.push_back(table.node_ranks[i]);
     }
 }
@@ -213,8 +212,7 @@ PathCoordinateQueryResult query_path_coordinates_on_the_fly(
                                            begin,
                                            end);
     // W fragments need not appear in coordinate order in the original GFA.
-    // Sort them before concatenating anchors so cross-fragment order remains
-    // meaningful to the all-haplotype chaining stage.
+    // Sort them so coordinate-selected reference runs remain deterministic.
     std::sort(candidates.begin(), candidates.end(),
               [&](const CandidatePath& lhs, const CandidatePath& rhs) {
                   const auto lhs_info = path_index.get_path_info(lhs.path_id);

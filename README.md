@@ -308,17 +308,15 @@ Important options:
   containing a reference interval node. For a coordinate-indexed P/W source,
   the exact path-step range returned by the coordinate binary search is kept;
   repeated occurrences of one of its node ids elsewhere on that same path do
-  not widen the reference interval. Other paths normally use their first and
-  last anchor hits. If a repeated anchor would define either endpoint, ordered
-  anchors are chained in both forward and reverse order and the
-  better-supported interval is used.
-  Every step between the chosen endpoints is retained, including inserted
-  nodes, and a fully inverted haplotype can be selected by its reverse chain.
-  The exact node union and edges whose endpoints are both in the union are then
-  materialized. This mode assumes the graph nodes of interest are covered by
-  indexed P/W records; graph-only nodes are not discovered. A path with only
-  one distinct matching anchor has no ordering information, so all occurrences
-  of that anchor remain in its conservative interval
+  not widen the reference interval. Every other path uses the minimum and
+  maximum step containing any reference anchor. All steps between those
+  endpoints are retained, including insertions, duplications, and inverted
+  sequence. The exact node union and edges whose endpoints are both in the
+  union are then materialized. This conservative behavior can produce a broad
+  interval when one anchor occurs at distant positions on the same haplotype;
+  use the default BFS mode when path support is ambiguous. This mode assumes
+  the graph nodes of interest are covered by indexed P/W records; graph-only
+  nodes are not discovered
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
@@ -387,11 +385,10 @@ each matched P/W record produces one output interval, including paths whose
 selected interval is reversed relative to the reference.
 
 If `B` also occurs later on the reference path, the `.cdx` step range identifies
-which occurrence overlaps the requested coordinates. If a repeated anchor
-would widen a different haplotype's endpoint, gfaidx compares forward and
-reverse monotonic anchor chains instead of allowing one distant copy to
-determine the complete path span. Insertions between the selected anchor
-endpoints remain part of the result.
+which occurrence overlaps the requested coordinates. On another haplotype,
+all sequence between the outermost matching anchors is retained. For example,
+`B Q B X C D E` remains complete when `B` and `E` anchor the interval; gfaidx
+does not discard `Q B X` by choosing the shorter of several possible matches.
 
 ### `gfaidx get_chunk`
 

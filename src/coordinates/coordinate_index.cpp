@@ -1067,9 +1067,8 @@ CoordinateQueryResult CoordinateIndexReader::query_region(
         CoordinateTrackSlice slice;
         slice.track = track;
         slice.start_step = low;
-        slice.node_ranks.reserve(matching.size());
+        slice.step_count = matching.size();
         for (const auto& entry : matching) {
-            slice.node_ranks.push_back(entry.node_rank);
             result.node_ranks.push_back(entry.node_rank);
         }
         result.slices.push_back(std::move(slice));

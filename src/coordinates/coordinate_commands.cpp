@@ -59,7 +59,7 @@ std::vector<paths::SubpathRun> resolve_coordinate_path_runs(
         if (info.record_type != slice.track.source_type ||
             info.step_count != slice.track.entry_count ||
             slice.start_step > info.step_count ||
-            slice.node_ranks.size() > info.step_count - slice.start_step) {
+            slice.step_count > info.step_count - slice.start_step) {
             throw std::runtime_error(
                 "Coordinate P/W track is not aligned with the supplied .pdx: " +
                 lookup_name);
@@ -70,7 +70,7 @@ std::vector<paths::SubpathRun> resolve_coordinate_path_runs(
         runs.push_back(paths::SubpathRun{
             path_id,
             slice.start_step,
-            static_cast<std::uint64_t>(slice.node_ranks.size()),
+            slice.step_count,
         });
     }
     return runs;
@@ -382,7 +382,6 @@ int run_get_region(const argparse::ArgumentParser& program) {
         paths::PathIndexReader path_index(pdx_path);
 
         std::vector<std::uint32_t> ranks;
-        std::vector<std::uint32_t> ordered_reference_ranks;
         std::vector<paths::SubpathRun> exact_reference_path_runs;
         bool used_coordinate_index = false;
         bool coordinate_index_returned_empty = false;
@@ -397,13 +396,6 @@ int run_get_region(const argparse::ArgumentParser& program) {
                                                             region.sequence,
                                                             region.begin,
                                                             region.end);
-                std::vector<std::uint32_t> query_ordered_ranks;
-                for (const auto& slice : query.slices) {
-                    query_ordered_ranks.insert(
-                        query_ordered_ranks.end(),
-                        slice.node_ranks.begin(),
-                        slice.node_ranks.end());
-                }
                 std::vector<paths::SubpathRun> query_reference_runs;
                 if (all_haplotypes) {
                     query_reference_runs =
@@ -414,7 +406,6 @@ int run_get_region(const argparse::ArgumentParser& program) {
                 // also succeeded, so a mismatched sidecar cannot leave a
                 // partially usable rank result behind.
                 ranks = std::move(query.node_ranks);
-                ordered_reference_ranks = std::move(query_ordered_ranks);
                 exact_reference_path_runs = std::move(query_reference_runs);
                 used_coordinate_index = !ranks.empty();
                 coordinate_index_returned_empty = ranks.empty();
@@ -432,7 +423,6 @@ int run_get_region(const argparse::ArgumentParser& program) {
                                                                         region.begin,
                                                                         region.end);
                 ranks = fallback.node_ranks;
-                ordered_reference_ranks = fallback.ordered_node_ranks;
                 exact_reference_path_runs = fallback.reference_path_runs;
                 std::cout << "On-the-fly path coordinate query selected "
                           << ranks.size() << " seed nodes from "
@@ -451,7 +441,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
         }
 
         if (used_coordinate_index) {
-            std::cout << get_time() << "Coordinate query selected " << ranks.size()
+            std::cout << get_time() << ": Coordinate query selected " << ranks.size()
                       << " reference seed nodes" << std::endl;
         }
 
@@ -476,28 +466,23 @@ int run_get_region(const argparse::ArgumentParser& program) {
 
         if (all_haplotypes) {
             // Use the .pdx posting table as an inverted index from every
-            // ordered reference interval anchor to its path occurrences. Exact
-            // source bounds and repeat-aware path bounds avoid BFS.
+            // reference interval node to its path occurrences. The coordinate
+            // source keeps exact bounds; other paths use conservative min/max.
             const auto selection =
                 query_path_haplotype_nodes(path_index,
-                                           ordered_reference_ranks,
+                                           ranks,
                                            exact_reference_path_runs);
-            std::cout << get_time() << "All-haplotype path selection read "
+            std::cout << get_time() << ": All-haplotype path selection read "
                       << selection.posting_count << " postings across "
                       << selection.matched_path_count << " P/W records and selected "
                       << selection.node_ranks.size() << " unique nodes from "
                       << selection.selected_path_step_count << " path steps"
                       << std::endl;
-            if (selection.exact_reference_path_count > 0 ||
-                selection.repeat_chained_path_count > 0 ||
-                selection.repeat_fallback_path_count > 0) {
-                std::cout << get_time() << "All-haplotype interval resolution preserved "
+            if (selection.exact_reference_path_count > 0) {
+                std::cout << get_time() << ": All-haplotype interval resolution preserved "
                           << selection.exact_reference_path_count
-                          << " exact coordinate path(s), chained "
-                          << selection.repeat_chained_path_count
-                          << " path(s) with repeated anchors, and retained broad bounds for "
-                          << selection.repeat_fallback_path_count
-                          << " underdetermined path(s)" << std::endl;
+                          << " exact coordinate path(s); other paths retained "
+                          << "their minimum/maximum anchor bounds" << std::endl;
             }
             return chunk::extract_subgraph_from_node_ranks(
                 options,
