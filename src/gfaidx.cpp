@@ -14,7 +14,7 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.7.0";
+    constexpr const char* version = "1.7.1";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
