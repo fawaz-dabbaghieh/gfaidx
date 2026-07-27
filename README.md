@@ -750,12 +750,3 @@ from pygfaidx.chgraph import ChGraph
 - `gfaidx` is Unix-only and is not intended to build or run on Windows
 - current `.ndx` lookup relies on a 64-bit FNV-1a hash plus a 32-bit FNV-1a hash; collision handling is still probabilistic rather than string-verified
 
-## TODO
-
-- allow user-provided graph partitioning for `index_gfa`
-- improve temporary-file behavior in chunk splitting
-- add heavier tests on larger graphs
-- consider a collision-proof node-name side table for very large graphs
-- add unit tests
-- add Rust interface
-- add a conda package

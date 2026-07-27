@@ -5,6 +5,29 @@ This file is a design note for future work on genomic coordinate queries in
 state of the codebase, what has already been implemented, and what the next
 design and implementation steps should be.
 
+## Implementation Status (July 2026)
+
+Most of the coordinate-query design in this note has now been implemented.
+The names and file layout changed in a few places:
+
+- **Done:** the coordinate side-index is `.cdx`, rather than the proposed
+  `.rdx`
+- **Done:** `index_coordinates` builds W-, P-, and rGFA segment-based
+  coordinate tracks
+- **Done:** `get_region` supports `.cdx` queries and on-the-fly `.pdx`/`.lnx`
+  coordinate lookup
+- **Done:** region seeds can use bounded BFS, or `--all_haplotypes` can retain
+  exact path-supported intervals without BFS
+- **Done:** `.lnx` stores rank-aligned node lengths
+- **Done:** `.pcx` stores sparse cumulative path-coordinate checkpoints
+- **Done:** `.ndx` supports direct rank-to-community lookup
+- **Done:** coordinate-bearing P/W subpaths can be emitted with `--with_coords`
+- **Still open:** stronger index identity and collision guarantees, including
+  the `.pcx` fingerprint task tracked in `todo.md`
+
+The older sections below are retained as a record of the design process. Status
+notes indicate where the final implementation differs from the proposal.
+
 The main goal of the new feature is:
 
 - allow a user to query a genomic interval such as `chr22:10000-100000`
@@ -22,6 +45,11 @@ This should work for:
 
 
 ## Current State Of The Repository
+
+> **Status: historical.** The command list and feature descriptions in this
+> section predate `get_subgraph`, `index_coordinates`, `get_region`,
+> `index_path_checkpoints`, `.lnx`, `.cdx`, and `.pcx`. See `README.md` for the
+> current CLI.
 
 At the time of writing, `gfaidx` has 4 main CLI subcommands:
 
@@ -173,6 +201,9 @@ conceptually distinct.
 
 ## Recommended High-Level Design
 
+> **Status: done with a different suffix.** The separate coordinate side-index
+> was implemented as `.cdx`; `.pdx` remains focused on paths and postings.
+
 Do not try to force coordinate queries into the existing `.pdx` only.
 
 Instead:
@@ -214,6 +245,10 @@ A side-index is cleaner:
 
 
 ## Proposed `.rdx` Contents
+
+> **Status: implemented as `.cdx`, with some layout changes.** Stable rGFA
+> intervals and P/W coordinate tracks are stored in `.cdx`. General path
+> checkpoints are stored separately in `.pcx`.
 
 The best design is probably one file with two logical indexes.
 
@@ -283,6 +318,9 @@ This avoids full O(length of chromosome walk) scans for every interval query.
 
 ## Query Types To Support
 
+> **Status: done.** The implemented commands are `index_coordinates` and
+> `get_region`.
+
 There should probably be a new subcommand instead of overloading `get_path`.
 
 Suggested new subcommands:
@@ -339,6 +377,10 @@ Meaning:
 
 ## Expected Output Of A Region Query
 
+> **Status: done.** `get_region` writes the materialized GFA subgraph and can
+> emit matching P/W subpaths. The default mode uses BFS; `--all_haplotypes`
+> instead materializes the exact path-supported node union.
+
 The region-query result should conceptually include multiple layers:
 
 ### 1. Exact interval hit
@@ -370,6 +412,10 @@ This is one of the main use cases motivating the feature.
 
 
 ## Recommended Query Pipeline
+
+> **Status: done.** `.cdx` provides accelerated seed lookup, while `.pdx` and
+> `.lnx` provide an on-the-fly fallback. Seed ranks are mapped directly to
+> communities before graph materialization.
 
 ### Pipeline for stable-coordinate queries
 
@@ -407,6 +453,9 @@ This is one of the main use cases motivating the feature.
 ## What Existing Indexes Can Be Reused
 
 ### Reuse `.ndx`
+
+> **Status: done.** `NodeHashIndex::community_id_by_rank()` provides direct
+> rank-to-community lookup and is used by region/subgraph extraction.
 
 This is very important.
 
@@ -474,6 +523,9 @@ Suggested conceptual output fields:
 
 ## Coordinate Computation For `W` Queries
 
+> **Status: done.** Rank-aligned lengths are stored in `.lnx`, and `.pcx`
+> checkpoints avoid scanning chromosome-scale path prefixes from step zero.
+
 There is already existing work in `get_path` that recomputes exact subwalk
 coordinates using node lengths from the source GFA.
 
@@ -496,6 +548,10 @@ For repeated region queries, storing lengths once may be worth it.
 
 ## One Important Caveat About `P` Lines
 
+> **Status: deliberately expanded.** `gfaidx` now supports P paths as 0-based
+> path-local coordinate namespaces when their overlap field is `*`. Paths with
+> overlaps are not given inferred coordinates.
+
 Coordinate indexing should primarily target:
 
 - `W` lines
@@ -515,6 +571,9 @@ So:
 
 
 ## Proposed `.rdx` File Layout
+
+> **Status: superseded by the implemented `.cdx` format.** `.pcx` remains a
+> separate sidecar for sparse path-coordinate checkpoints.
 
 This section is still provisional, but the file could look like this.
 
@@ -592,6 +651,9 @@ This should be good enough even for chromosome-length `W` walks.
 
 
 ## Suggested Incremental Implementation Plan
+
+> **Status: completed.** The on-the-fly prototype was implemented first, then
+> `.cdx`, `.lnx`, `.pcx`, and direct rank-to-community access were added.
 
 This should be built in phases.
 
@@ -690,6 +752,10 @@ These are the main unresolved design points.
 
 ### 1. Should `get_region` expand by full communities or only induce on the seed node set?
 
+> **Status: resolved.** The default query performs bounded BFS from the
+> coordinate seeds. `--all_haplotypes` selects exact path-supported intervals
+> and does not run BFS.
+
 Current thinking:
 
 - full communities are useful for context
@@ -702,6 +768,9 @@ Possible solution:
   - community-expanded context mode
 
 ### 2. Should node lengths be stored explicitly in `.rdx`?
+
+> **Status: resolved.** Lengths are stored in the separate rank-aligned `.lnx`
+> sidecar so they can be reused by coordinate queries and path output.
 
 Pros:
 
@@ -716,6 +785,9 @@ This may depend on query frequency.
 
 ### 3. How should rGFA stable-coordinate overlaps be interpreted?
 
+> **Status: resolved.** Queries use 0-based half-open intervals and include
+> segments whose stored intervals overlap the requested range.
+
 Likely:
 
 - include any segment overlapping the interval
@@ -724,6 +796,9 @@ But it may be worth defining whether touching endpoints counts and whether
 output should be clipped conceptually or segment-based only.
 
 ### 4. How should the result be serialized?
+
+> **Status: partially resolved.** The graph and paths are emitted as GFA. A
+> separate structured TSV/JSON query report remains a possible future feature.
 
 Possibilities:
 
@@ -738,6 +813,8 @@ This may be helpful for downstream tooling.
 
 ### 5. Collision handling
 
+> **Status: open.**
+
 Currently `.ndx` uses:
 
 - 64-bit FNV-1a
@@ -750,6 +827,9 @@ if graphs grow much larger or if the project wants stronger guarantees.
 
 
 ## Recommended Next Practical Step
+
+> **Status: completed.** The prototype and accelerated coordinate index are now
+> implemented.
 
 The best immediate next step is probably not to build the full `.rdx` right
 away.
@@ -773,6 +853,9 @@ Reason:
 
 ## Short Summary For A Future Session
 
+> **Status: historical.** Use the implementation-status section at the top of
+> this file and the current `README.md` for an up-to-date summary.
+
 If a future Codex session needs a fast recap:
 
 - `.pdx` already supports exact path retrieval and node-set subpath retrieval
@@ -791,4 +874,3 @@ If a future Codex session needs a fast recap:
 - the user wants both:
   - exact interval-hit nodes
   - expanded graph context for visualization
-
