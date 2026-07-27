@@ -1,8 +1,10 @@
 #include "coordinates/coordinate_commands.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -30,6 +32,149 @@ std::string coordinate_walk_key(const CoordinateTrackInfo& track) {
     return track.reference_name + "|" + std::to_string(track.haplotype) + "|" +
            track.sequence_name + "|" + std::to_string(track.sequence_start) +
            "|" + std::to_string(track.sequence_end);
+}
+
+std::string coordinate_track_path_key(const CoordinateTrackInfo& track) {
+    if (track.source_type == 'P') {
+        return "P\t" + track.sequence_name;
+    }
+    if (track.source_type == 'W') {
+        return "W\t" + coordinate_walk_key(track);
+    }
+    return {};
+}
+
+std::string indexed_path_key(const paths::PathInfo& info) {
+    return std::string(1, info.record_type) + "\t" + std::string(info.name);
+}
+
+struct CoordinateTrackLookup {
+    std::string path_key;
+    std::size_t track_index{};
+};
+
+void write_coordinate_value(std::ostream& out, std::int64_t value) {
+    if (value >= 0) {
+        out << value;
+    } else {
+        out << '*';
+    }
+}
+
+void write_available_coordinate_paths(
+    std::ostream& out,
+    const paths::PathIndexReader& path_index,
+    const CoordinateIndexReader* coordinate_index,
+    bool on_the_fly_available,
+    bool with_header) {
+
+    if (with_header) {
+        out << "source\treference\thaplotype\tsequence\tstart\tend\tentries"
+               "\tcoordinate_access\n";
+    }
+
+    // Keep a sorted vector instead of a hash table because coordinate-track
+    // metadata is normally small and each P/W path needs only one lookup.
+    std::vector<CoordinateTrackLookup> track_lookup;
+    if (coordinate_index != nullptr) {
+        track_lookup.reserve(coordinate_index->tracks().size());
+        for (std::size_t i = 0; i < coordinate_index->tracks().size(); ++i) {
+            const auto key =
+                coordinate_track_path_key(coordinate_index->tracks()[i]);
+            if (!key.empty()) {
+                track_lookup.push_back(CoordinateTrackLookup{key, i});
+            }
+        }
+        std::sort(track_lookup.begin(),
+                  track_lookup.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      return lhs.path_key < rhs.path_key;
+                  });
+    }
+
+    std::vector<std::string> emitted_cdx_keys;
+    emitted_cdx_keys.reserve(track_lookup.size());
+    for (std::uint32_t path_id = 0;
+         path_id < path_index.path_count();
+         ++path_id) {
+        const auto info = path_index.get_path_info(path_id);
+        const auto path_key = indexed_path_key(info);
+        const auto found = std::lower_bound(
+            track_lookup.begin(),
+            track_lookup.end(),
+            path_key,
+            [](const CoordinateTrackLookup& entry, const std::string& key) {
+                return entry.path_key < key;
+            });
+        const CoordinateTrackInfo* accelerated_track = nullptr;
+        if (found != track_lookup.end() && found->path_key == path_key) {
+            accelerated_track =
+                &coordinate_index->tracks()[found->track_index];
+            emitted_cdx_keys.push_back(path_key);
+        }
+
+        if (accelerated_track != nullptr) {
+            // Reuse the exact coordinate bounds already stored in .cdx.
+            const auto& track = *accelerated_track;
+            out << track.source_type << '\t'
+                << track.reference_name << '\t'
+                << track.haplotype << '\t'
+                << track.sequence_name << '\t'
+                << track.sequence_start << '\t'
+                << track.sequence_end << '\t'
+                << track.entry_count << "\tcdx\n";
+            continue;
+        }
+
+        if (info.record_type == 'W') {
+            out << "W\t" << info.sample_id << '\t' << info.hap_index
+                << '\t' << info.seq_id << '\t';
+            write_coordinate_value(out, info.seq_start);
+            out << '\t';
+            write_coordinate_value(out, info.seq_end);
+            out << '\t' << info.step_count << '\t';
+            const bool has_walk_coordinates =
+                info.seq_start >= 0 && info.seq_end >= info.seq_start;
+            out << (on_the_fly_available && has_walk_coordinates
+                        ? "on_the_fly"
+                        : "unavailable")
+                << '\n';
+        } else {
+            // P paths use a 0-based local coordinate system. Their total end
+            // is not stored in .pdx and is deliberately left unknown here so
+            // printing names does not scan every path's node lengths.
+            out << "P\t\t0\t" << info.name << "\t0\t*\t"
+                << info.step_count << '\t'
+                << (on_the_fly_available ? "on_the_fly" : "unavailable")
+                << '\n';
+        }
+    }
+
+    // Preserve .cdx-only coordinate namespaces, primarily rGFA S/SN/SO
+    // tracks. P/W tracks absent from the supplied .pdx are also shown rather
+    // than silently disappearing from the previous listing behavior.
+    std::sort(emitted_cdx_keys.begin(), emitted_cdx_keys.end());
+    emitted_cdx_keys.erase(
+        std::unique(emitted_cdx_keys.begin(), emitted_cdx_keys.end()),
+        emitted_cdx_keys.end());
+    if (coordinate_index != nullptr) {
+        for (const auto& track : coordinate_index->tracks()) {
+            const auto path_key = coordinate_track_path_key(track);
+            if (!path_key.empty() &&
+                std::binary_search(emitted_cdx_keys.begin(),
+                                   emitted_cdx_keys.end(),
+                                   path_key)) {
+                continue;
+            }
+            out << track.source_type << '\t'
+                << track.reference_name << '\t'
+                << track.haplotype << '\t'
+                << track.sequence_name << '\t'
+                << track.sequence_start << '\t'
+                << track.sequence_end << '\t'
+                << track.entry_count << "\tcdx\n";
+        }
+    }
 }
 
 std::vector<paths::SubpathRun> resolve_coordinate_path_runs(
@@ -74,27 +219,6 @@ std::vector<paths::SubpathRun> resolve_coordinate_path_runs(
         });
     }
     return runs;
-}
-
-void write_coordinate_tracks(std::ostream& out,
-                             const CoordinateIndexReader& index,
-                             bool with_header) {
-    if (with_header) {
-        out << "source\treference\thaplotype\tsequence\tstart\tend\tentries\n";
-    }
-
-    // The .cdx stores one row per continuous coordinate track fragment. W rows
-    // use the original walk sample/haplotype/sequence namespace, P rows use the
-    // path name as the sequence, and S rows come from rGFA SN/SO/SR tags.
-    for (const auto& track : index.tracks()) {
-        out << track.source_type << '\t'
-            << track.reference_name << '\t'
-            << track.haplotype << '\t'
-            << track.sequence_name << '\t'
-            << track.sequence_start << '\t'
-            << track.sequence_end << '\t'
-            << track.entry_count << '\n';
-    }
 }
 
 std::uint32_t parse_max_nodes(const std::string& value) {
@@ -316,7 +440,7 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--print_path_names").default_value(false)
       .implicit_value(true)
-      .help("print coordinate tracks available in the .cdx, then exit");
+      .help("print coordinate-queryable P/W paths and optional .cdx acceleration status, then exit");
 
     parser.add_argument("--no_header").default_value(false)
       .implicit_value(true)
@@ -349,11 +473,29 @@ int run_get_region(const argparse::ArgumentParser& program) {
         if (lnx_path.empty()) lnx_path = utils::companion_path(input_gz, ".lnx");
         if (pcx_path.empty()) pcx_path = utils::companion_path(input_gz, ".pcx");
         if (print_path_names) {
-            if (!file_exists(cdx_path.c_str())) {
-                throw std::runtime_error("Coordinate index does not exist: " + cdx_path);
+            if (!file_exists(pdx_path.c_str())) {
+                throw std::runtime_error(
+                    "Path index required to list coordinate-queryable paths "
+                    "does not exist: " + pdx_path);
             }
-            CoordinateIndexReader coordinate_index(cdx_path);
-            write_coordinate_tracks(std::cout, coordinate_index, !program.get<bool>("no_header"));
+            paths::PathIndexReader path_index(pdx_path);
+            std::unique_ptr<CoordinateIndexReader> coordinate_index;
+            if (file_exists(cdx_path.c_str())) {
+                coordinate_index =
+                    std::make_unique<CoordinateIndexReader>(cdx_path);
+                if (coordinate_index->node_count() !=
+                    path_index.node_count()) {
+                    throw std::runtime_error(
+                        ".cdx and .pdx node counts differ; rebuild them "
+                        "against the same .ndx");
+                }
+            }
+            write_available_coordinate_paths(
+                std::cout,
+                path_index,
+                coordinate_index.get(),
+                file_exists(lnx_path.c_str()),
+                !program.get<bool>("no_header"));
             return 0;
         }
 

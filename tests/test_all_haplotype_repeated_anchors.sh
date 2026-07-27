@@ -17,6 +17,39 @@ indexed_gfa="$work_dir/graph.gfa.gz"
     --path_names_file "$coordinate_paths" \
     --progress_every 0 >/dev/null
 
+# Name listing is driven by the complete .pdx path table. The optional .cdx
+# only marks the selected reference path as accelerated.
+"$gfaidx" get_region "$indexed_gfa" --print_path_names \
+    >"$work_dir/path_names_with_cdx.tsv"
+awk -F '\t' 'NR > 1 && $1 == "P" {print $4 "\t" $8}' \
+    "$work_dir/path_names_with_cdx.tsv" \
+    | sort >"$work_dir/path_access_with_cdx.tsv"
+cat >"$work_dir/expected_path_access_with_cdx.tsv" <<'EOF'
+insertion	on_the_fly
+ref	cdx
+repeatnoise	on_the_fly
+reverse	on_the_fly
+EOF
+diff -u "$work_dir/expected_path_access_with_cdx.tsv" \
+    "$work_dir/path_access_with_cdx.tsv"
+
+# A missing .cdx is not an error: all coordinate-capable P paths remain
+# available through the slower .pdx/.lnx fallback.
+"$gfaidx" get_region "$indexed_gfa" --print_path_names \
+    --cdx "$work_dir/not_present.cdx" \
+    >"$work_dir/path_names_without_cdx.tsv"
+awk -F '\t' 'NR > 1 && $1 == "P" {print $4 "\t" $8}' \
+    "$work_dir/path_names_without_cdx.tsv" \
+    | sort >"$work_dir/path_access_without_cdx.tsv"
+cat >"$work_dir/expected_path_access_without_cdx.tsv" <<'EOF'
+insertion	on_the_fly
+ref	on_the_fly
+repeatnoise	on_the_fly
+reverse	on_the_fly
+EOF
+diff -u "$work_dir/expected_path_access_without_cdx.tsv" \
+    "$work_dir/path_access_without_cdx.tsv"
+
 check_output() {
     local output_gfa=$1
     local actual_paths="$work_dir/actual_paths.tsv"

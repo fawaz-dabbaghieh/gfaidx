@@ -80,6 +80,23 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         return 1;
     }
 
+    // Parse the checkpoint spacing before allocating any indexing work files.
+    // Zero is not meaningful because it would make the checkpoint boundary
+    // calculation undefined.
+    std::uint64_t checkpoint_steps;
+    try {
+        checkpoint_steps = utils::parse_u64_strict(
+            program.get<std::string>("checkpoint_steps"),
+            "--checkpoint_steps");
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
+    if (checkpoint_steps == 0) {
+        std::cerr << "--checkpoint_steps must be greater than zero"
+                  << std::endl;
+        return 1;
+    }
 
     bool keep_tmp = program.get<bool>("keep_tmp");
 
@@ -381,7 +398,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
             gfaidx::paths::build_path_coordinate_checkpoint_index(
                 staged_path_index_path,
                 staged_node_length_index_path,
-                staged_path_checkpoint_index_path);
+                staged_path_checkpoint_index_path,
+                checkpoint_steps);
             std::cout << get_time()
                       << ": Finished path coordinate checkpoint index in "
                       << timer.elapsed() << " seconds" << std::endl;

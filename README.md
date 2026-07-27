@@ -163,6 +163,9 @@ Options:
   gzip compression level for the final chunked output
 - `--gzip_mem_level <1..9>`
   zlib memory level for gzip compression
+- `--checkpoint_steps <N>`
+  store one cumulative path-coordinate checkpoint every `N` path steps in
+  `.pcx`; defaults to `4096`
 - `--max_chunk_nodes <N>`
   re-run Louvain inside communities containing at least `N` nodes and prevent
   small-community merges from producing a chunk larger than `N`; `0` disables
@@ -334,10 +337,13 @@ Important options:
   path steps in `.pdx` need rank-aligned node lengths to derive cumulative
   coordinates.
 - `--print_path_names`
-  print the coordinate tracks available in the resolved `.cdx`, then exit. The
-  output is TSV with columns `source`, `reference`, `haplotype`, `sequence`,
-  `start`, `end`, and `entries`. `source` is `W` for walks, `P` for paths with
-  path-local coordinates, or `S` for rGFA segment-derived tracks.
+  print every P/W record available through `.pdx`, plus any `.cdx`-only rGFA
+  tracks, then exit. The output is TSV with columns `source`, `reference`,
+  `haplotype`, `sequence`, `start`, `end`, `entries`, and
+  `coordinate_access`. The final column is `cdx` for accelerated tracks,
+  `on_the_fly` for paths calculated from `.pdx` and `.lnx`, or `unavailable`
+  when the required lengths or W coordinates are absent. A missing `.cdx` is
+  not an error.
 - `--no_header`
   omit the TSV header when used with `--print_path_names`
 
