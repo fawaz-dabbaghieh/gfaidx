@@ -1,6 +1,9 @@
 # Prerequisites
 *.d
 
+main_build/
+current_build/
+
 build-asan/
 .codex
 review_tmp/
