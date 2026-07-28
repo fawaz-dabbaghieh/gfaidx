@@ -63,10 +63,10 @@ class Community {
   void display();
 
   // remove the node from its current community with which it has dnodecomm links
-  inline void remove(int node, int comm, double dnodecomm);
+  inline void remove(int node, int comm, double dnodecomm, double self_loop_weight);
 
   // insert the node in comm with which it shares dnodecomm links
-  inline void insert(int node, int comm, double dnodecomm);
+  inline void insert(int node, int comm, double dnodecomm, double self_loop_weight);
 
   // compute the gain of modularity if node where inserted in comm
   // given that node has dnodecomm links to comm.  The formula is:
@@ -79,9 +79,9 @@ class Community {
   //       m           = number of links
   inline double modularity_gain(int node, int comm, double dnodecomm, double w_degree);
 
-  // compute the set of neighboring communities of node
-  // for each community, gives the number of links from node to comm
-  void neigh_comm(unsigned int node);
+  // Compute the neighboring-community weights and return the node's self-loop
+  // weight from the same adjacency scan.
+  double neigh_comm(unsigned int node);
 
   // compute the modularity of the current partition
   double modularity();
@@ -100,20 +100,24 @@ class Community {
 };
 
 inline void
-Community::remove(int node, int comm, double dnodecomm) {
+Community::remove(int node, int comm, double dnodecomm, double self_loop_weight) {
   assert(node>=0 && node<size);
 
   tot[comm] -= g.weighted_degree(node);
-  in[comm]  -= 2*dnodecomm + g.nb_selfloops(node);
+  // Reuse the self-loop found by neigh_comm() instead of rescanning this
+  // node's complete adjacency list.
+  in[comm]  -= 2*dnodecomm + self_loop_weight;
   n2c[node]  = -1;
 }
 
 inline void
-Community::insert(int node, int comm, double dnodecomm) {
+Community::insert(int node, int comm, double dnodecomm, double self_loop_weight) {
   assert(node>=0 && node<size);
 
   tot[comm] += g.weighted_degree(node);
-  in[comm]  += 2*dnodecomm + g.nb_selfloops(node);
+  // Use the same cached value for insertion so neither half of a move performs
+  // another adjacency scan.
+  in[comm]  += 2*dnodecomm + self_loop_weight;
   n2c[node]=comm;
 }
 
