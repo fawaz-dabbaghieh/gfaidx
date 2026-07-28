@@ -1114,6 +1114,7 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     posting_table_offset_ = header.posting_table_offset;
     strings_offset_ = header.strings_offset;
     posting_table_bytes_ = header.strings_offset - header.posting_table_offset;
+    total_step_count_ = header.step_count;
     node_count_ = static_cast<std::uint32_t>(header.node_count);
 
     // Load the small path metadata table eagerly. Node metadata and node names
@@ -1196,6 +1197,21 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
     auto [inserted_it, inserted] = node_name_cache_.emplace(node_id, read_string(rec.name_offset, rec.name_len));
     (void)inserted;
     return inserted_it->second;
+}
+
+std::string PathIndexReader::copy_node_name(std::uint32_t node_id) const {
+    if (node_id >= node_count_) {
+        throw std::runtime_error("Node id out of range");
+    }
+
+    // Bypass both lazy node caches because callers consume each name once and
+    // keep their own selected-node representation.
+    NodeRecordDisk rec{};
+    const auto offset =
+        node_table_offset_ +
+        static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
+    read_exact(offset, &rec, sizeof(rec));
+    return read_string(rec.name_offset, rec.name_len);
 }
 
 std::string_view PathIndexReader::get_overlap_field(std::uint32_t path_id) const {

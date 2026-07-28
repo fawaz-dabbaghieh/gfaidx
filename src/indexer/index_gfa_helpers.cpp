@@ -19,6 +19,7 @@
 #include "fs/Reader.h"
 #include "fs/fs_helpers.h"
 #include "fs/gfa_line_parsers.h"
+#include "paths/path_coordinate_checkpoints.h"
 #include "utils/Timer.h"
 
 #define WEIGHTED     0
@@ -88,6 +89,12 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
       .help("skip building the .pdx path index; still write .gz, .idx, .ndx, and .lnx");
+
+    parser.add_argument("--checkpoint_steps")
+      .default_value(std::to_string(
+          paths::kDefaultPathCheckpointStride))
+      .nargs(1)
+      .help("store one .pcx coordinate checkpoint every N path steps; defaults to 4096");
 
     parser.add_argument("--max_chunk_nodes").default_value(std::string("0"))
       .nargs(1)

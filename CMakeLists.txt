@@ -31,6 +31,7 @@ add_executable(gfaidx
         src/chunk/split_gfa_to_comms.cpp
         src/coordinates/coordinate_commands.cpp
         src/coordinates/coordinate_index.cpp
+        src/coordinates/path_haplotype_query.cpp
         src/coordinates/path_coordinate_query.cpp
         src/indexer/community_coarsening.cpp
         src/indexer/community_refinement.cpp
@@ -40,7 +41,9 @@ add_executable(gfaidx
         src/indexer/node_hash_index.cpp
         src/indexer/node_length_index.cpp
         src/paths/get_path_command.cpp
+        src/paths/index_path_checkpoints_command.cpp
         src/paths/index_paths_command.cpp
+        src/paths/path_coordinate_checkpoints.cpp
         src/paths/path_index.cpp
         src/paths/walk_coords.cpp
         src/utils/Memory.cpp
@@ -56,3 +59,17 @@ target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
 # Install the CLI into the standard binary directory so package managers can use
 # `cmake --install` with their own CMAKE_INSTALL_PREFIX.
 install(TARGETS gfaidx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+include(CTest)
+if(BUILD_TESTING)
+    # Exercise exact reference coordinates and conservative haplotype spans
+    # containing repeated anchors, insertions, and reversed sequence.
+    add_test(
+        NAME all_haplotype_repeated_anchors
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_all_haplotype_repeated_anchors.sh
+                $<TARGET_FILE:gfaidx>
+                ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_paths.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_coordinate_paths.tsv
+    )
+endif()

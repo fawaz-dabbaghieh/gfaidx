@@ -13,6 +13,9 @@ namespace gfaidx::coordinates {
 
 struct PathCoordinateQueryResult {
     std::vector<std::uint32_t> node_ranks;
+    // P/W fallback lookup already knows the exact path step interval, so pass
+    // it forward instead of rediscovering it through node postings.
+    std::vector<paths::SubpathRun> reference_path_runs;
     std::size_t matched_path_count{};
 };
 

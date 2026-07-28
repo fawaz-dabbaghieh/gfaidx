@@ -8,12 +8,13 @@
 #include "indexer/index_gfa_helpers.h"
 #include "indexer/index_gfa_main.h"
 #include "paths/get_path_command.h"
+#include "paths/index_path_checkpoints_command.h"
 #include "paths/index_paths_command.h"
 
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.7.0";
+    constexpr const char* version = "1.7.1";
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);
@@ -37,6 +38,15 @@ int main(int argc, char** argv) {
     index_paths.add_description("Index the P and W lines of a GFA file into a binary path index");
     gfaidx::paths::configure_index_paths_parser(index_paths);
     program.add_subparser(index_paths);
+
+    argparse::ArgumentParser index_path_checkpoints(
+        "index_path_checkpoints",
+        version);
+    index_path_checkpoints.add_description(
+        "Build path-coordinate checkpoints from existing .pdx and .lnx indexes");
+    gfaidx::paths::configure_index_path_checkpoints_parser(
+        index_path_checkpoints);
+    program.add_subparser(index_path_checkpoints);
 
     argparse::ArgumentParser get_path("get_path", version);
     get_path.add_description("Print a full P/W record or node-restricted subpaths from an indexed graph's path index");
@@ -65,6 +75,12 @@ int main(int argc, char** argv) {
 
     if (argc == 2 && std::string(argv[1]) == "index_paths") {
         std::cerr << index_paths;
+        return 1;
+    }
+
+    if (argc == 2 &&
+        std::string(argv[1]) == "index_path_checkpoints") {
+        std::cerr << index_path_checkpoints;
         return 1;
     }
 
@@ -106,6 +122,11 @@ int main(int argc, char** argv) {
 
     if (program.is_subcommand_used("index_paths")) {
         return gfaidx::paths::run_index_paths(index_paths);
+    }
+
+    if (program.is_subcommand_used("index_path_checkpoints")) {
+        return gfaidx::paths::run_index_path_checkpoints(
+            index_path_checkpoints);
     }
 
     if (program.is_subcommand_used("get_subgraph")) {

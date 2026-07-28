@@ -12,6 +12,7 @@
 
 #include "indexer/node_hash_index.h"
 #include "indexer/node_length_index.h"
+#include "paths/path_coordinate_checkpoints.h"
 #include "paths/path_index.h"
 
 namespace gfaidx::paths {
@@ -24,6 +25,7 @@ struct WalkCoordState {
     bool usable{false};
     std::vector<std::uint64_t> node_lengths;
     std::unique_ptr<indexer::NodeLengthIndexReader> length_index;
+    std::unique_ptr<PathCoordinateCheckpointIndexReader> checkpoint_index;
 
     [[nodiscard]] std::uint64_t length_count() const;
     [[nodiscard]] std::uint64_t node_length(std::uint32_t node_id) const;
@@ -43,6 +45,7 @@ WalkCoordState load_node_lengths_by_index(const PathIndexReader& index,
                                           const indexer::NodeHashIndex& node_index,
                                           const std::string& source_gfa,
                                           const std::string& length_index_path = std::string{},
+                                          const std::string& checkpoint_index_path = std::string{},
                                           const WalkCoordWarning& warn = WalkCoordWarning{});
 
 // Build and cache per-step prefix lengths for one path so repeated subpath runs

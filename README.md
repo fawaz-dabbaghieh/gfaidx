@@ -31,6 +31,7 @@ Main tasks:
   - [`gfaidx get_region`](#gfaidx-get_region)
   - [`gfaidx get_chunk`](#gfaidx-get_chunk)
   - [`gfaidx index_paths`](#gfaidx-index_paths)
+  - [`gfaidx index_path_checkpoints`](#gfaidx-index_path_checkpoints)
   - [`gfaidx get_path`](#gfaidx-get_path)
   - [Build `.lnx` for existing indexes](#build-lnx-for-existing-indexes)
 - [How the path index works](#how-the-path-index-works)
@@ -55,6 +56,8 @@ Main tasks:
   a rank-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
+- `<graph>.gz.pcx`
+  a small path-coordinate checkpoint index used to avoid long `.pdx` prefix scans
 - `<graph>.gz.cdx`
   an optional standalone reference-coordinate index built by `index_coordinates`
 
@@ -63,9 +66,10 @@ neighborhood across communities.
 
 `get_region` additionally uses `.cdx` to resolve a 0-based reference interval
 to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
-When `--with_coords` is requested, `.lnx` supplies node lengths
-without re-scanning all `S` lines. The `.cdx` and `.lnx` files are separate
-sidecars, so existing path indexes remain compatible.
+When `--with_coords` is requested, `.lnx` supplies node lengths without
+re-scanning all `S` lines and `.pcx` supplies cumulative path-length
+checkpoints. The `.cdx`, `.lnx`, and `.pcx` files are separate sidecars, so
+existing graph and path indexes remain compatible.
 
 `get_chunk` remains available as the compatibility command for streaming a
 single community member back out without graph expansion.
@@ -133,7 +137,8 @@ pip install -e .
 
 ### `gfaidx index_gfa`
 
-Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`.
+Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`
+and `.pcx`.
 
 ```bash
 gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
@@ -158,6 +163,9 @@ Options:
   gzip compression level for the final chunked output
 - `--gzip_mem_level <1..9>`
   zlib memory level for gzip compression
+- `--checkpoint_steps <N>`
+  store one cumulative path-coordinate checkpoint every `N` path steps in
+  `.pcx`; defaults to `4096`
 - `--max_chunk_nodes <N>`
   re-run Louvain inside communities containing at least `N` nodes and prevent
   small-community merges from producing a chunk larger than `N`; `0` disables
@@ -166,7 +174,8 @@ Options:
   merge communities smaller than `N` nodes into the neighboring community with
   the most connecting edges; `0` disables small-community merging
 - `--no_paths`
-  skip building `<out_gfa.gz>.pdx`; still write `.gz`, `.idx`, `.ndx`, and `.lnx`
+  skip building `<out_gfa.gz>.pdx` and `.pcx`; still write `.gz`, `.idx`,
+  `.ndx`, and `.lnx`
 
 Outputs:
 
@@ -175,6 +184,7 @@ Outputs:
 - `<out_gfa.gz>.ndx`
 - `<out_gfa.gz>.lnx`
 - `<out_gfa.gz>.pdx` unless `--no_paths` is used
+- `<out_gfa.gz>.pcx` unless `--no_paths` is used
 
 Example:
 
@@ -276,11 +286,11 @@ gfaidx index_coordinates graph.indexed.gfa.gz graph.gfa.gz.cdx --path_names_file
 ### `gfaidx get_region`
 
 Resolve a 0-based, half-open reference interval through `.cdx`, translate its
-node ranks through `.pdx`, and use all overlapping reference nodes as seeds for
-the existing subgraph and optional path-extraction pipeline. If `.cdx` is absent
-or does not contain the requested coordinate track, `get_region` can fall back to
-the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any indexed
-`P` path or concrete-coordinate `W` walk.
+node ranks through `.pdx`, and either use all overlapping reference nodes as BFS
+seeds or select the P/W path spans supported by those nodes. If `.cdx` is absent
+or does not contain the requested coordinate track, `get_region` can fall back
+to the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any
+indexed `P` path or concrete-coordinate `W` walk.
 
 ```bash
 gfaidx get_region <in_gz> <sequence:start-end> <out_gfa> [options]
@@ -291,29 +301,49 @@ Important options:
 - `--reference <sample>`
   select the coordinate namespace when multiple reference samples contain the
   requested sequence
-- `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`
+- `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`, `--pcx`
   override companion indexes; each defaults to `<in_gz>.<suffix>`
 - `--max_nodes <N>`
-  cap the total seed plus BFS node count; it must be at least the seed count
+  cap the total seed plus BFS node count; it must be at least the seed count.
+  This limit is not used with `--all_haplotypes`
+- `--all_haplotypes`
+  avoid BFS and use the `.pdx` posting table to find every indexed P/W record
+  containing a reference interval node. For a coordinate-indexed P/W source,
+  the exact path-step range returned by the coordinate binary search is kept;
+  repeated occurrences of one of its node ids elsewhere on that same path do
+  not widen the reference interval. Every other path uses the minimum and
+  maximum step containing any reference anchor. All steps between those
+  endpoints are retained, including insertions, duplications, and inverted
+  sequence. The exact node union and edges whose endpoints are both in the
+  union are then materialized. This conservative behavior can produce a broad
+  interval when one anchor occurs at distant positions on the same haplotype;
+  use the default BFS mode when path support is ambiguous. This mode assumes
+  the graph nodes of interest are covered by indexed P/W records; graph-only
+  nodes are not discovered
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
   emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates and
   returned no-overlap `P` subpaths with path-local coordinate names such as
   `CHM13#0#chr1:1830045-1840123`. The command uses the resolved `.pdx` for path
-  metadata and the resolved `.lnx` for node lengths. If `.lnx` is absent, it
-  falls back to scanning indexed GFA `S` lines; if validation fails, it falls
-  back to ordinary subpath output and logs a warning.
+  metadata, `.lnx` for node lengths, and `.pcx` to start near the requested
+  path step instead of scanning from step zero. If `.pcx` is absent, it uses
+  the previous bounded path-prefix scan. If `.lnx` is absent, it falls back to
+  scanning indexed GFA `S` lines; if validation fails, it falls back to ordinary
+  subpath output and logs a warning.
 - On-the-fly `.pdx` coordinate lookup
   handles `P` paths as path-local coordinates starting at 0 and handles `W`
   walks from their stored `SeqStart`. This fallback requires `.lnx`, because the
   path steps in `.pdx` need rank-aligned node lengths to derive cumulative
   coordinates.
 - `--print_path_names`
-  print the coordinate tracks available in the resolved `.cdx`, then exit. The
-  output is TSV with columns `source`, `reference`, `haplotype`, `sequence`,
-  `start`, `end`, and `entries`. `source` is `W` for walks, `P` for paths with
-  path-local coordinates, or `S` for rGFA segment-derived tracks.
+  print every P/W record available through `.pdx`, plus any `.cdx`-only rGFA
+  tracks, then exit. The output is TSV with columns `source`, `reference`,
+  `haplotype`, `sequence`, `start`, `end`, `entries`, and
+  `coordinate_access`. The final column is `cdx` for accelerated tracks,
+  `on_the_fly` for paths calculated from `.pdx` and `.lnx`, or `unavailable`
+  when the required lengths or W coordinates are absent. A missing `.cdx` is
+  not an error.
 - `--no_header`
   omit the TSV header when used with `--print_path_names`
 
@@ -323,8 +353,48 @@ Example:
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
   --reference CHM13 --max_nodes 100000
 
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
+  --reference CHM13 --all_haplotypes
+
 gfaidx get_region chr22.gfa.gz --print_path_names
 ```
+
+#### How `--all_haplotypes` preserves paths
+
+Node ids alone do not identify where a node occurs on a path. The coordinate
+query therefore keeps the exact source-path steps in addition to the node ids.
+For other haplotypes, consider this small example where the requested reference
+interval contains `B,C`:
+
+```text
+reference:  A B C D E F G H
+haplotype:    B G H C
+```
+
+The reference contributes the interval `B,C`. The anchor nodes `B,C` select
+the complete haplotype interval `B,G,H,C`, so the materialized graph contains
+the node union `B,C,G,H`.
+
+Searching that union against the complete reference again would incorrectly
+find two reference runs, `B,C` and `G,H`. The second run is only present because
+`G,H` were selected through the haplotype. `--all_haplotypes` therefore keeps
+the path-specific intervals found during anchor matching and emits:
+
+```text
+reference:  B C
+haplotype:  B G H C
+```
+
+The node union is still used to write the graph's `S` and `L` records. The
+preserved path intervals are used only for `P` and `W` output. Consequently,
+each matched P/W record produces one output interval, including paths whose
+selected interval is reversed relative to the reference.
+
+If `B` also occurs later on the reference path, the `.cdx` step range identifies
+which occurrence overlaps the requested coordinates. On another haplotype,
+all sequence between the outermost matching anchors is retained. For example,
+`B Q B X C D E` remains complete when `B` and `E` anchor the interval; gfaidx
+does not discard `Q B X` by choosing the shorter of several possible matches.
 
 ### `gfaidx get_chunk`
 
@@ -410,6 +480,40 @@ Example:
 
 ```bash
 gfaidx index_paths graph.indexed.gfa.gz graph.indexed.gfa.gz.pdx
+```
+
+### `gfaidx index_path_checkpoints`
+
+Build the small `.pcx` acceleration sidecar for an existing `.pdx` and `.lnx`
+without rebuilding the graph or path index.
+
+```bash
+gfaidx index_path_checkpoints <indexed_gfa> [out_index.pcx] [options]
+```
+
+The command infers `<indexed_gfa>.pdx`, `<indexed_gfa>.lnx`, and by default
+writes `<indexed_gfa>.pcx`. Use `--pdx`, `--lnx`, or an explicit output path
+when the files were renamed.
+
+`--checkpoint_steps <N>` controls the checkpoint interval and defaults to
+4096. Each checkpoint is one `uint64` cumulative path length, so the default
+sidecar is normally much smaller than `.pdx`. Queries scan at most 4095 path
+steps before the requested subpath instead of starting at path step zero.
+
+Checkpoint values are streamed into a visible
+`gfaidx_path_checkpoints_tmp_*` directory beside the requested `.pcx`.
+`latest_path_checkpoints` points to the active directory. After a successful
+atomic rename, or after a handled error, the command removes both. If the
+process is interrupted, the remaining directory and symlink make the partial
+file easy to find and remove. Progress reports include completed paths, path
+steps, checkpoint counts, and elapsed time every 10 paths by default. Use
+`--progress_every_paths <N>` to change the interval or `0` to disable periodic
+progress.
+
+Example:
+
+```bash
+gfaidx index_path_checkpoints graph.indexed.gfa.gz
 ```
 
 ### `gfaidx get_path`
@@ -534,6 +638,9 @@ Coordinate options for path output:
 - `--lnx <path>`
   node-length sidecar used to avoid scanning all `S` lines; defaults to
   `<in_gfa>.lnx` when present
+- `--pcx <path>`
+  optional path-coordinate checkpoints used to avoid scanning P/W paths from
+  step zero; defaults to `<in_gfa>.pcx` when present
 - `--source_gfa <path>`
   original source GFA used as a fallback length source when `.lnx` is absent
 
@@ -643,12 +750,3 @@ from pygfaidx.chgraph import ChGraph
 - `gfaidx` is Unix-only and is not intended to build or run on Windows
 - current `.ndx` lookup relies on a 64-bit FNV-1a hash plus a 32-bit FNV-1a hash; collision handling is still probabilistic rather than string-verified
 
-## TODO
-
-- allow user-provided graph partitioning for `index_gfa`
-- improve temporary-file behavior in chunk splitting
-- add heavier tests on larger graphs
-- consider a collision-proof node-name side table for very large graphs
-- add unit tests
-- add Rust interface
-- add a conda package

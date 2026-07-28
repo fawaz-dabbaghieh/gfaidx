@@ -7,6 +7,8 @@
 
 #include <argparse/argparse.hpp>
 
+#include "paths/path_index.h"
+
 namespace gfaidx::chunk {
 
 // Shared extraction options used by the node and coordinate query commands.
@@ -17,6 +19,7 @@ struct SubgraphExtractionOptions {
     std::string ndx_path;
     std::string pdx_path;
     std::string lnx_path;
+    std::string pcx_path;
     std::uint32_t max_nodes{};
     bool include_paths{true};
     bool with_walk_coordinates{false};
@@ -36,6 +39,15 @@ int run_get_subgraph(const argparse::ArgumentParser& program);
 // queries use this multi-source entry point after resolving their node ranks.
 int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
                                 const std::vector<std::string>& seed_nodes);
+
+// Materialize an exact rank-aligned node set without graph traversal. Coordinate
+// path-closure queries also provide their original path intervals so emission
+// does not reconstruct different runs from the final node union.
+int extract_subgraph_from_node_ranks(
+    const SubgraphExtractionOptions& options,
+    const std::vector<std::uint32_t>& node_ranks,
+    const std::vector<paths::SubpathRun>& selected_path_runs,
+    const paths::PathIndexReader& path_index);
 
 }  // namespace gfaidx::chunk
 

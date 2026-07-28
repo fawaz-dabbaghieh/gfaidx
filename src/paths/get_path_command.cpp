@@ -185,6 +185,11 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("optional node length index (.lnx) for coordinate-bearing path output; defaults to <in_gfa>.lnx when present");
 
+    parser.add_argument("--pcx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("optional path coordinate checkpoint index (.pcx); defaults to <in_gfa>.pcx when present");
+
     parser.add_argument("--path_id")
       .default_value(std::string(""))
       .nargs(1)
@@ -281,7 +286,9 @@ int run_get_path(const argparse::ArgumentParser& program) {
     const auto subgraph_gfa = program.get<std::string>("subgraph_gfa");
     const auto source_gfa = program.get<std::string>("source_gfa");
     std::string length_index_path = program.get<std::string>("lnx");
+    std::string checkpoint_index_path = program.get<std::string>("pcx");
     const bool lnx_explicit = !length_index_path.empty();
+    const bool pcx_explicit = !checkpoint_index_path.empty();
     const bool with_walk_coords = program.get<bool>("with_walk_coords");
     const bool print_path_names = program.get<bool>("print_path_names");
 
@@ -309,12 +316,23 @@ int run_get_path(const argparse::ArgumentParser& program) {
         if (length_index_path.empty()) {
             length_index_path = utils::companion_path(input_graph, ".lnx");
         }
+        if (checkpoint_index_path.empty()) {
+            checkpoint_index_path = utils::companion_path(input_graph, ".pcx");
+        }
         if (lnx_explicit && !file_exists(length_index_path.c_str())) {
             std::cerr << "Node length index does not exist: " << length_index_path << std::endl;
             return 1;
         }
+        if (pcx_explicit && !file_exists(checkpoint_index_path.c_str())) {
+            std::cerr << "Path checkpoint index does not exist: "
+                      << checkpoint_index_path << std::endl;
+            return 1;
+        }
         if (!file_exists(length_index_path.c_str())) {
             length_index_path.clear();
+        }
+        if (!file_exists(checkpoint_index_path.c_str())) {
+            checkpoint_index_path.clear();
         }
     }
 
@@ -430,6 +448,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
                                                           node_index,
                                                           source_gfa,
                                                           length_index_path,
+                                                          checkpoint_index_path,
                                                           warn_get_path);
         }
 
