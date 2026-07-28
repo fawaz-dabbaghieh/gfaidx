@@ -22,6 +22,8 @@ The names and file layout changed in a few places:
 - **Done:** `.pcx` stores sparse cumulative path-coordinate checkpoints
 - **Done:** `.ndx` supports direct rank-to-community lookup
 - **Done:** coordinate-bearing P/W subpaths can be emitted with `--with_coords`
+- **Proposed:** a reusable C++ library API and cross-language binding layer are
+  described at the end of this file
 - **Still open:** stronger index identity and collision guarantees, including
   the `.pcx` fingerprint task tracked in `todo.md`
 
@@ -874,3 +876,231 @@ If a future Codex session needs a fast recap:
 - the user wants both:
   - exact interval-hit nodes
   - expanded graph context for visualization
+
+
+## Future C++ Library And Language Bindings
+
+> **Status: proposed.** The current code contains reusable index readers and
+> query algorithms, but only the command-line executable is built and
+> installed.
+
+### Goal
+
+Allow another C++ program, such as BandageNG, to open an indexed graph once and
+perform repeated operations without starting `gfaidx` subprocesses or writing
+temporary GFA files.
+
+The first public operations should cover:
+
+- open and validate an indexed graph and its sidecars
+- list indexed P/W paths and coordinate tracks
+- retrieve one community
+- select a BFS subgraph from one or more node names
+- select a region using BFS or `--all_haplotypes` semantics
+- retrieve full paths or selected subpaths
+- emit the selected graph and paths to a stream or callback
+
+### Current Reusable Pieces
+
+Several classes and functions already perform most of the low-level work:
+
+- `NodeHashIndex`
+- `PathIndexReader`
+- `CoordinateIndexReader`
+- `NodeLengthIndexReader`
+- `PathCoordinateCheckpointIndexReader`
+- coordinate and all-haplotype selection functions
+- chunk streaming and exact/BFS materialization functions
+
+The main limitation is that command handling and library work are still mixed:
+
+- some public-looking headers include `argparse`
+- extraction options contain input and output filenames
+- extraction functions return CLI exit codes
+- graph materialization writes directly to a file
+- logging is written directly to standard output or standard error
+- several useful implementation functions are private to command `.cpp` files
+
+This makes a C++ library feasible, but it needs a proper boundary rather than
+only adding thin wrappers around the current command functions.
+
+### Recommended C++ API Shape
+
+Use an `IndexedGraph` object rather than a fully loaded `Graph` object. The
+indexed gzip and sidecars remain on disk; the object owns open readers, mmap
+handles, resolved sidecar paths, and validated metadata.
+
+A possible public API is:
+
+```cpp
+namespace gfaidx {
+
+struct IndexPaths {
+    std::string idx;
+    std::string ndx;
+    std::string pdx;
+    std::string lnx;
+    std::string pcx;
+    std::string cdx;
+};
+
+struct Region {
+    std::string reference;
+    std::string sequence;
+    std::uint64_t begin{};
+    std::uint64_t end{};
+};
+
+enum class RegionMode {
+    bfs,
+    all_haplotypes
+};
+
+struct QueryOptions {
+    RegionMode region_mode{RegionMode::bfs};
+    std::uint32_t max_nodes{10000};
+    bool include_paths{true};
+    bool include_coordinates{false};
+};
+
+struct QueryStats {
+    std::uint64_t node_count{};
+    std::uint64_t link_count{};
+    std::uint64_t path_count{};
+    std::uint64_t community_count{};
+};
+
+struct PathDescriptor;
+class Selection;
+
+class GfaSink {
+public:
+    virtual ~GfaSink() = default;
+    virtual void write_line(std::string_view line) = 0;
+};
+
+class IndexedGraph {
+public:
+    explicit IndexedGraph(std::string graph_path,
+                          IndexPaths overrides = {});
+
+    std::vector<PathDescriptor> paths() const;
+    Selection select_nodes(const std::vector<std::string>& seeds,
+                           const QueryOptions& options) const;
+    Selection select_region(const Region& region,
+                            const QueryOptions& options) const;
+    QueryStats emit(const Selection& selection,
+                    GfaSink& sink,
+                    const QueryOptions& options) const;
+};
+
+}  // namespace gfaidx
+```
+
+The exact names can change, but the separation is important:
+
+1. `IndexedGraph` owns and validates the index bundle.
+2. Query methods produce a reusable selection.
+3. Emission sends GFA records to a caller-provided sink.
+
+Convenience overloads can write to `std::ostream` or a file. Returning one large
+`std::string` should not be the default because extracted graphs may still be
+large.
+
+For an initial BandageNG integration, a line callback is the least invasive
+output interface because `gfaidx` already replays GFA records. A later typed
+record sink could expose parsed segments, links, paths, and walks without text
+reparsing.
+
+### Public API Rules
+
+The installed API should:
+
+- live under `include/gfaidx/`
+- avoid `argparse` and command-specific types
+- use RAII for files and mappings
+- use typed exceptions in C++, with no logging as a side effect
+- accept optional progress, warning, and cancellation callbacks
+- keep disk-format structs private
+- use a PIMPL for `IndexedGraph` so internal changes do not constantly break
+  the C++ ABI
+- document thread safety
+
+The current readers contain mutable streams and caches. The simplest safe first
+rule is one `IndexedGraph` or query session per worker thread. Shared concurrent
+queries should only be promised after the readers use thread-safe positional
+reads or per-query stream state.
+
+### CMake And Installation
+
+Split the executable from the reusable code:
+
+- `gfaidx_query` for readers, queries, and materialization
+- optionally `gfaidx_indexing` for index construction and Louvain
+- `gfaidx_cli` as the executable target, with output name `gfaidx`
+
+The query library would mainly require zlib. Keeping Louvain in the indexing
+target means applications that only read existing graphs do not need to link
+the community-detection code.
+
+Install:
+
+- public headers
+- static and/or shared libraries
+- exported CMake targets such as `gfaidx::query`
+- `gfaidxConfig.cmake` and a version file
+- optionally a `pkg-config` file
+
+A downstream C++ application should then be able to use:
+
+```cmake
+find_package(gfaidx CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE gfaidx::query)
+```
+
+### Python And Rust
+
+A C++ API alone is not a good cross-language ABI because compiler versions,
+STL types, exceptions, and object ownership differ.
+
+Add a small C ABI after the C++ API is stable:
+
+- opaque graph and selection handles
+- fixed-width integer and plain C option structs
+- explicit create/destroy functions
+- callback-based or buffered GFA output
+- numeric status codes and caller-readable error messages
+- no C++ exceptions crossing the ABI
+
+Python can then use either:
+
+- `pybind11` or `nanobind` directly over the C++ API for the most natural
+  Python interface
+- CFFI over the C ABI for a smaller and more stable binding layer
+
+Rust can use:
+
+- a `-sys` crate generated from the C header, plus a safe owning wrapper
+- the `cxx` crate for a more direct C++ bridge if maintaining a separate Rust
+  interface is acceptable
+
+The C ABI is the best common base when long-term compatibility matters. Python
+and Rust binding dependencies should be optional and should not become runtime
+dependencies of the core library or CLI.
+
+### Suggested Implementation Order
+
+1. Separate command parsing from query and materialization code.
+2. Build the existing reusable sources as a library and link the CLI to it.
+3. Add installed public value types, `IndexedGraph`, selection, and sink APIs.
+4. Make the CLI call only the public library API so behavior cannot diverge.
+5. Add install-tree tests using `find_package(gfaidx)`.
+6. Add progress and cancellation callbacks needed by GUI applications.
+7. Add the stable C ABI.
+8. Add Python and Rust wrappers after the native API has been exercised by
+   BandageNG.
+
+This is a moderate refactor, not a new graph algorithm. The existing on-disk
+indexes and extraction logic can be reused. The important work is defining
+ownership, output streaming, errors, thread safety, installation, and API
+compatibility clearly before publishing the library.
