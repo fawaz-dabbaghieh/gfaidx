@@ -587,7 +587,6 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
                     walk_coord_state,
                     run.start_step,
                     run.step_count,
-                    subpath_name,
                     [](const std::string& message) {
                         warn_get_subgraph(message);
                     });

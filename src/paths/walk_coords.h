@@ -58,13 +58,13 @@ PathCoordCacheEntry& get_or_build_path_coord_cache(
     const WalkCoordWarning& warn = WalkCoordWarning{});
 
 // Emit a W subpath with concrete SeqStart/SeqEnd coordinates derived from the
-// cached prefix lengths. Callers should only use this when entry.usable is true.
+// cached prefix lengths. The original SeqId plus this interval identifies the
+// subwalk, so no additional synthetic subpath tag is emitted.
 void write_w_subpath_with_coords(std::ostream& out,
                                  const PathIndexReader& index,
                                  const PathCoordCacheEntry& entry,
                                  std::uint64_t start_step,
-                                 std::uint64_t step_count,
-                                 std::string_view subpath_label);
+                                 std::uint64_t step_count);
 
 // Emit a P subpath whose path name carries path-local coordinates, e.g.
 // CHM13#0#chr1:1830045-1840123. This assumes the original P path has no
@@ -84,7 +84,6 @@ bool write_w_subpath_with_coords_bounded(std::ostream& out,
                                          const WalkCoordState& walk_coord_state,
                                          std::uint64_t start_step,
                                          std::uint64_t step_count,
-                                         std::string_view subpath_label,
                                          const WalkCoordWarning& warn = WalkCoordWarning{});
 
 bool write_p_subpath_with_coords_bounded(std::ostream& out,

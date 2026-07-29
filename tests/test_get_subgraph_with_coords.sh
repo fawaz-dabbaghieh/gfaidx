@@ -34,6 +34,13 @@ reference	0	chr1	100	106	>1>2>3
 EOF
 diff -u "$work_dir/expected_w.tsv" "$work_dir/actual_w.tsv"
 
+# SeqId and SeqStart/SeqEnd already identify a coordinate-bearing W subwalk;
+# no synthetic sp:Z label should be appended to the original W tags.
+if grep -F $'\tsp:Z:' "$work_dir/with_coords.gfa" >/dev/null; then
+    echo "get_subgraph unexpectedly emitted a synthetic sp:Z subpath tag" >&2
+    exit 1
+fi
+
 # Coordinates describe path output, so accepting them together with --no_paths
 # would silently discard the requested result.
 if "$gfaidx" get_subgraph \
