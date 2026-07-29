@@ -170,7 +170,8 @@ ResolvedIndexPaths resolve_index_paths(const std::string& input_gz,
                                        const std::string& idx_override,
                                        const std::string& ndx_override,
                                        const std::string& pdx_override,
-                                       bool include_paths) {
+                                       bool include_paths,
+                                       bool require_pdx) {
     ResolvedIndexPaths paths;
     paths.idx_path = idx_override;
     paths.ndx_path = ndx_override;
@@ -209,6 +210,13 @@ ResolvedIndexPaths resolve_index_paths(const std::string& input_gz,
         paths.has_pdx = true;
     } else if (file_exists(paths.pdx_path.c_str())) {
         paths.has_pdx = true;
+    } else if (require_pdx) {
+        // Coordinate-bearing subpaths cannot be emitted without the path
+        // metadata and steps stored in .pdx, so fail instead of silently
+        // degrading to graph-only output when the user requested coordinates.
+        throw std::runtime_error(
+            "Path index required for coordinate-bearing P/W output does not exist: " +
+            paths.pdx_path);
     } else {
         warn_get_subgraph("No companion .pdx found at " + paths.pdx_path +
                           "; continuing without P/W subpaths");
@@ -761,6 +769,16 @@ void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("path to .pdx file (defaults to <in_gz>.pdx); used to emit P/W subpaths when available");
 
+    parser.add_argument("--lnx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("node length index for coordinate-bearing path output; defaults to <in_gz>.lnx when present");
+
+    parser.add_argument("--pcx")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("path coordinate checkpoints for faster coordinate-bearing path output; defaults to <in_gz>.pcx when present");
+
     parser.add_argument("--max_nodes")
       .default_value(std::string("100"))
       .nargs(1)
@@ -769,6 +787,10 @@ void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
       .help("skip indexed P/W subpath extraction and emit only the graph records");
+
+    parser.add_argument("--with_coords").default_value(false)
+      .implicit_value(true)
+      .help("emit coordinate-bearing W/P subpaths");
 
     parser.add_argument("--debug_trace").default_value(false)
       .implicit_value(true)
@@ -786,6 +808,10 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
     if (options.max_nodes == 0) {
         throw std::runtime_error("--max_nodes must be greater than zero");
     }
+    if (options.with_walk_coordinates && !options.include_paths) {
+        throw std::runtime_error(
+            "--with_coords requires path output; remove --no_paths");
+    }
 
     // Export the trace flag before opening indexes so helper code in other
     // translation units can participate in the same debug run.
@@ -798,7 +824,8 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
                                                  options.idx_path,
                                                  options.ndx_path,
                                                  options.pdx_path,
-                                                 options.include_paths);
+                                                 options.include_paths,
+                                                 options.with_walk_coordinates);
     const auto spans = load_all_community_spans_tsv(index_paths.idx_path);
     if (spans.empty()) {
         throw std::runtime_error("The .idx file does not contain any community spans");
@@ -899,6 +926,12 @@ int extract_subgraph_from_node_ranks(
         throw std::runtime_error(
             "At least one node rank is required for exact subgraph extraction");
     }
+    if (options.with_walk_coordinates && !options.include_paths) {
+        // Keep the shared library-facing extraction entry points consistent
+        // even when callers bypass the CLI's --with_coords validation.
+        throw std::runtime_error(
+            "--with_coords requires path output; remove --no_paths");
+    }
 
     // Export the same trace flag used by BFS so cross-index diagnostics remain
     // available for exact path-supported materialization.
@@ -914,6 +947,7 @@ int extract_subgraph_from_node_ranks(
                                                  options.idx_path,
                                                  options.ndx_path,
                                                  options.pdx_path,
+                                                 true,
                                                  true);
     if (!index_paths.has_pdx) {
         throw std::runtime_error(
@@ -992,12 +1026,44 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         options.idx_path = program.get<std::string>("idx");
         options.ndx_path = program.get<std::string>("ndx");
         options.pdx_path = program.get<std::string>("pdx");
+        auto lnx_path = program.get<std::string>("lnx");
+        auto pcx_path = program.get<std::string>("pcx");
+        const bool lnx_explicit = !lnx_path.empty();
+        const bool pcx_explicit = !pcx_path.empty();
+        const bool with_coords = program.get<bool>("with_coords");
+        const bool no_paths = program.get<bool>("no_paths");
+
+        // Match get_region sidecar behavior: infer adjacent acceleration
+        // indexes, reject explicitly misspelled paths, and preserve the
+        // compatibility fallbacks when inferred sidecars do not exist.
+        if (lnx_path.empty()) {
+            lnx_path = utils::companion_path(options.input_gz, ".lnx");
+        }
+        if (pcx_path.empty()) {
+            pcx_path = utils::companion_path(options.input_gz, ".pcx");
+        }
+        if (with_coords && lnx_explicit &&
+            !file_exists(lnx_path.c_str())) {
+            throw std::runtime_error(
+                "Node length index does not exist: " + lnx_path);
+        }
+        if (with_coords && pcx_explicit &&
+            !file_exists(pcx_path.c_str())) {
+            throw std::runtime_error(
+                "Path checkpoint index does not exist: " + pcx_path);
+        }
+
+        options.lnx_path =
+            file_exists(lnx_path.c_str()) ? lnx_path : std::string{};
+        options.pcx_path =
+            file_exists(pcx_path.c_str()) ? pcx_path : std::string{};
         options.max_nodes = utils::parse_u32_strict(
             program.get<std::string>("max_nodes"),
             "--max_nodes",
             1,
             std::numeric_limits<std::uint32_t>::max());
-        options.include_paths = !program.get<bool>("no_paths");
+        options.include_paths = !no_paths;
+        options.with_walk_coordinates = with_coords;
         options.debug_trace = program.get<bool>("debug_trace");
         return extract_subgraph_from_seeds(
             options,

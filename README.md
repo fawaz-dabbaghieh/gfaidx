@@ -218,15 +218,29 @@ Index options:
   override the companion `.ndx`; defaults to `<in_gz>.ndx`
 - `--pdx <path>`
   override the companion `.pdx`; defaults to `<in_gz>.pdx`
+- `--lnx <path>`
+  override the optional node-length index used by `--with_coords`; defaults to
+  `<in_gz>.lnx`
+- `--pcx <path>`
+  override the optional path-coordinate checkpoints used by `--with_coords`;
+  defaults to `<in_gz>.pcx`
 
 - `--max_nodes <N>`
   BFS node cap; defaults to `100`
+- `--with_coords`
+  emit coordinate-bearing `W` subwalks and coordinate-named `P` subpaths
+- `--no_paths`
+  omit all `P/W` subpaths; this cannot be combined with `--with_coords`
 
 Behavior:
 
 - explicit `--idx`, `--ndx`, and `--pdx` take priority over inferred companion files
 - if `.pdx` is present, `get_subgraph` appends the matching `P/W` subpaths for the extracted node set
 - if `.pdx` is missing and was not explicitly requested, `get_subgraph` warns and continues with `S/L` output only
+- `--with_coords` requires `.pdx`; `.lnx` and `.pcx` accelerate coordinate
+  calculation but remain optional for compatibility with older indexes
+- coordinate output preserves the original coordinate namespace and emits one
+  record for each contiguous selected run along a path
 - BFS discovery uses a simple node-level adjacency, but final output re-streams the original chunk lines so emitted `S/L` records preserve the original GFA edge orientations
 
 Examples:
@@ -234,6 +248,7 @@ Examples:
 ```bash
 gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa
 gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
+gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa --max_nodes 2000 --with_coords
 ```
 
 ### `gfaidx index_coordinates`
@@ -749,4 +764,3 @@ from pygfaidx.chgraph import ChGraph
 - full-path `get_path --path_id ...` does not need `.ndx`
 - `gfaidx` is Unix-only and is not intended to build or run on Windows
 - current `.ndx` lookup relies on a 64-bit FNV-1a hash plus a 32-bit FNV-1a hash; collision handling is still probabilistic rather than string-verified
-
