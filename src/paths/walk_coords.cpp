@@ -389,8 +389,7 @@ void write_w_subpath_with_coords(std::ostream& out,
                                  const PathIndexReader& index,
                                  const PathCoordCacheEntry& entry,
                                  std::uint64_t start_step,
-                                 std::uint64_t step_count,
-                                 std::string_view subpath_label) {
+                                 std::uint64_t step_count) {
     const auto sub_start = static_cast<std::uint64_t>(entry.info.seq_start) + entry.prefix_lengths[start_step];
     const auto sub_end = static_cast<std::uint64_t>(entry.info.seq_start) + entry.prefix_lengths[start_step + step_count];
 
@@ -403,12 +402,6 @@ void write_w_subpath_with_coords(std::ostream& out,
     }
     if (!entry.info.tags.empty()) {
         out << '\t' << entry.info.tags;
-    }
-    // Keep the W SeqId as the original coordinate namespace. The synthetic
-    // subpath label is useful for humans/debugging, but putting it in SeqId
-    // makes the concrete SeqStart/SeqEnd coordinates refer to a fake sequence.
-    if (!subpath_label.empty()) {
-        out << "\tsp:Z:" << subpath_label;
     }
     out << '\n';
 }
@@ -442,7 +435,6 @@ bool write_w_subpath_with_coords_bounded(std::ostream& out,
                                          const WalkCoordState& walk_coord_state,
                                          std::uint64_t start_step,
                                          std::uint64_t step_count,
-                                         std::string_view subpath_label,
                                          const WalkCoordWarning& warn) {
     const auto info = index.get_path_info(path_id);
     CoordinateSlice slice;
@@ -456,9 +448,6 @@ bool write_w_subpath_with_coords_bounded(std::ostream& out,
     write_w_segments_from_steps(out, index, slice.steps);
     if (!info.tags.empty()) {
         out << '\t' << info.tags;
-    }
-    if (!subpath_label.empty()) {
-        out << "\tsp:Z:" << subpath_label;
     }
     out << '\n';
     return true;

@@ -469,7 +469,6 @@ int run_get_path(const argparse::ArgumentParser& program) {
                                                                             walk_coord_state,
                                                                             run.start_step,
                                                                             run.step_count,
-                                                                            subpath_name,
                                                                             warn_get_path);
                 } else {
                     wrote_coordinates = write_p_subpath_with_coords_bounded(std::cout,

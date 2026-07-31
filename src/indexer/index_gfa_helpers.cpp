@@ -271,7 +271,18 @@ void generate_communities(const std::string& binary_graph,
     while ((iterations < 50) & improvement) {
         iterations++;
         print_c_stats(c, level);
+
+        // Time the local-moving phase independently from graph contraction and
+        // construction of the next level so later optimizations can be measured
+        // against a clear per-level baseline.
+        Timer one_level_timer;
         improvement = c.one_level();
+        const double one_level_seconds = one_level_timer.elapsed();
+        std::cout << get_time() << ": Louvain level " << level
+                  << " local moving finished in " << one_level_seconds
+                  << " seconds; nodes moved: " << (improvement ? "yes" : "no")
+                  << std::endl;
+
         const double new_mod = c.modularity();
         level++;
         g = c.partition2graph_binary();

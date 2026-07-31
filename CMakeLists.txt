@@ -72,4 +72,14 @@ if(BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_paths.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_coordinate_paths.tsv
     )
+
+    # Verify that BFS subgraph extraction can emit coordinate-bearing P and W
+    # records through the same .lnx/.pcx path machinery used by get_region.
+    add_test(
+        NAME get_subgraph_with_coords
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_get_subgraph_with_coords.sh
+                $<TARGET_FILE:gfaidx>
+                ${CMAKE_SOURCE_DIR}/tests/data/subgraph_coordinate_paths.gfa
+    )
 endif()

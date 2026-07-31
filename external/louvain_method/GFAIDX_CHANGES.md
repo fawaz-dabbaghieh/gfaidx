@@ -22,6 +22,24 @@ Why:
   step
 - reduces temporary memory overlap inside the Louvain method
 
+## Self-Loop Scan Reuse
+
+The original local-moving loop scanned each node's adjacency list in
+`neigh_comm()`, then scanned it again in both `remove()` and `insert()` to find
+the same self-loop weight.
+
+Local change:
+
+- return the self-loop weight found during the required `neigh_comm()` scan
+- pass that value to `remove()` and `insert()` instead of calling
+  `nb_selfloops()` again
+
+Why:
+
+- removes two redundant adjacency scans for every processed node and pass
+- preserves the existing node order, modularity calculation, and treatment of
+  weighted and unweighted self-loops
+
 ## Binary Reader Fix
 
 The binary graph reader was also corrected locally to read `links` using

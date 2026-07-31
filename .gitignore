@@ -1,8 +1,8 @@
 # Prerequisites
 *.d
 
-main_build
-current_build
+main_build/
+current_build/
 
 build-asan/
 .codex

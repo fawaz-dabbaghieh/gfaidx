@@ -78,43 +78,27 @@ Community::init_partition(char * filename) {
     
     if (finput) {
       int old_comm = n2c[node];
-      neigh_comm(node);
+      // neigh_comm() already visits every adjacent edge, so keep the self-loop
+      // weight from that scan for both updates below.
+      const double self_loop_weight = neigh_comm(node);
 
-      remove(node, old_comm, neigh_weight[old_comm]);
+      remove(node, old_comm, neigh_weight[old_comm], self_loop_weight);
 
       unsigned int i=0;
       for ( i=0 ; i<neigh_last ; i++) {
 	unsigned int best_comm     = neigh_pos[i];
 	float best_nblinks  = neigh_weight[neigh_pos[i]];
 	if (best_comm==comm) {
-	  insert(node, best_comm, best_nblinks);
+	  insert(node, best_comm, best_nblinks, self_loop_weight);
 	  break;
 	}
       }
       if (i==neigh_last)
-	insert(node, comm, 0);
+	insert(node, comm, 0, self_loop_weight);
     }
   }
   finput.close();
 }
-
-// inline void
-// Community::remove(int node, int comm, double dnodecomm) {
-//   assert(node>=0 && node<size);
-
-//   tot[comm] -= g.weighted_degree(node);
-//   in[comm]  -= 2*dnodecomm + g.nb_selfloops(node);
-//   n2c[node]  = -1;
-// }
-
-// inline void
-// Community::insert(int node, int comm, double dnodecomm) {
-//   assert(node>=0 && node<size);
-
-//   tot[comm] += g.weighted_degree(node);
-//   in[comm]  += 2*dnodecomm + g.nb_selfloops(node);
-//   n2c[node]=comm;
-// }
 
 void
 Community::display() {
@@ -137,7 +121,7 @@ Community::modularity() {
   return q;
 }
 
-void
+double
 Community::neigh_comm(unsigned int node) {
   for (unsigned int i=0 ; i<neigh_last ; i++)
     neigh_weight[neigh_pos[i]]=-1;
@@ -151,19 +135,31 @@ Community::neigh_comm(unsigned int node) {
   neigh_weight[neigh_pos[0]]=0;
   neigh_last=1;
 
+  double self_loop_weight = 0.;
+  bool self_loop_found = false;
   for (unsigned int i=0 ; i<deg ; i++) {
     unsigned int neigh        = *(p.first+i);
-    unsigned int neigh_comm   = n2c[neigh];
     double neigh_w = (g.weights.size()==0)?1.:*(p.second+i);
-    
-    if (neigh!=node) {
-      if (neigh_weight[neigh_comm]==-1) {
-	    neigh_weight[neigh_comm]=0.;
-	    neigh_pos[neigh_last++]=neigh_comm;
+
+    if (neigh==node) {
+      // nb_selfloops() returned the first matching edge, so retain that
+      // behavior if a malformed input happens to contain duplicate self-loops.
+      if (!self_loop_found) {
+        self_loop_weight = neigh_w;
+        self_loop_found = true;
       }
-      neigh_weight[neigh_comm]+=neigh_w;
+      continue;
     }
+
+    unsigned int neigh_comm = n2c[neigh];
+    if (neigh_weight[neigh_comm]==-1) {
+      neigh_weight[neigh_comm]=0.;
+      neigh_pos[neigh_last++]=neigh_comm;
+    }
+    neigh_weight[neigh_comm]+=neigh_w;
   }
+
+  return self_loop_weight;
 }
 
 void
@@ -323,9 +319,11 @@ Community::one_level() {
       double w_degree = g.weighted_degree(node);
 
       // computation of all neighboring communities of current node
-      neigh_comm(node);
+      // Capture the self-loop during this required adjacency scan so remove()
+      // and insert() do not each scan the same edges again.
+      const double self_loop_weight = neigh_comm(node);
       // remove node from its current community
-      remove(node, node_comm, neigh_weight[node_comm]);
+      remove(node, node_comm, neigh_weight[node_comm], self_loop_weight);
 
       // compute the nearest community for node
       // default choice for future insertion is the former community
@@ -342,7 +340,7 @@ Community::one_level() {
       }
 
       // insert node in the nearest community
-      insert(node, best_comm, best_nblinks);
+      insert(node, best_comm, best_nblinks, self_loop_weight);
      
       if (best_comm!=node_comm)
         nb_moves++;
