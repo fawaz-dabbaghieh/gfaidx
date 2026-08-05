@@ -23,10 +23,9 @@ function fail(message) {
     exit 1
 }
 
-function walk_to_p_segments(walk,    i, c, orient, node_name, out, first) {
+function print_p_segments(walk,    i, c, orient, node_name, first) {
     orient = ""
     node_name = ""
-    out = ""
     first = 1
 
     if (walk == "") {
@@ -40,7 +39,10 @@ function walk_to_p_segments(walk,    i, c, orient, node_name, out, first) {
                 if (node_name == "") {
                     fail("empty node name in W walk on input line " NR)
                 }
-                out = out (first ? "" : ",") node_name (orient == ">" ? "+" : "-")
+                # Stream each converted step so a very long W walk is not
+                # duplicated as another full-size string in AWK memory.
+                printf "%s%s%s", (first ? "" : ","), node_name, \
+                    (orient == ">" ? "+" : "-")
                 first = 0
             }
             orient = c
@@ -56,9 +58,8 @@ function walk_to_p_segments(walk,    i, c, orient, node_name, out, first) {
     if (orient == "" || node_name == "") {
         fail("malformed W walk on input line " NR)
     }
-    out = out (first ? "" : ",") node_name (orient == ">" ? "+" : "-")
-
-    return out
+    printf "%s%s%s", (first ? "" : ","), node_name, \
+        (orient == ">" ? "+" : "-")
 }
 
 $1 == "H" {
@@ -97,9 +98,10 @@ $1 == "W" {
         fail("duplicate converted path name '" path_name "' on input line " NR)
     }
     seen_path_names[path_name] = 1
-    segments = walk_to_p_segments($7)
 
-    printf "P%s%s%s*", OFS, path_name, OFS segments OFS
+    printf "P%s%s%s", OFS, path_name, OFS
+    print_p_segments($7)
+    printf "%s*", OFS
     if (NF > 7) {
         for (i = 8; i <= NF; ++i) {
             printf "%s%s", OFS, $i
