@@ -34,6 +34,10 @@ Main tasks:
   - [`gfaidx index_path_checkpoints`](#gfaidx-index_path_checkpoints)
   - [`gfaidx get_path`](#gfaidx-get_path)
   - [Build `.lnx` for existing indexes](#build-lnx-for-existing-indexes)
+- [Coordinate indexing examples](#coordinate-indexing-examples)
+  - [rGFA with `SN`, `SO`, and `SR` tags](#rgfa-with-sn-so-and-sr-tags)
+  - [GFA with `P` lines](#gfa-with-p-lines)
+  - [GFA with `W` lines](#gfa-with-w-lines)
 - [How the path index works](#how-the-path-index-works)
 - [Utility scripts](#utility-scripts)
 - [Python helpers](#python-helpers)
@@ -351,16 +355,17 @@ Important options:
   walks from their stored `SeqStart`. This fallback requires `.lnx`, because the
   path steps in `.pdx` need rank-aligned node lengths to derive cumulative
   coordinates.
-- `--print_path_names`
+- `--list_coordinates`, `--print_path_names`
   print every P/W record available through `.pdx`, plus any `.cdx`-only rGFA
-  tracks, then exit. The output is TSV with columns `source`, `reference`,
-  `haplotype`, `sequence`, `start`, `end`, `entries`, and
-  `coordinate_access`. The final column is `cdx` for accelerated tracks,
-  `on_the_fly` for paths calculated from `.pdx` and `.lnx`, or `unavailable`
-  when the required lengths or W coordinates are absent. A missing `.cdx` is
-  not an error.
+  tracks, then exit. `--print_path_names` is retained as a compatibility alias;
+  `--list_coordinates` is clearer when the index contains rGFA segment tracks.
+  The output is TSV with columns `source`, `reference`, `haplotype`, `sequence`,
+  `start`, `end`, `entries`, and `coordinate_access`. The final column is `cdx`
+  for accelerated tracks, `on_the_fly` for paths calculated from `.pdx` and
+  `.lnx`, or `unavailable` when the required lengths or W coordinates are
+  absent. A missing `.cdx` is not an error when usable P/W records remain.
 - `--no_header`
-  omit the TSV header when used with `--print_path_names`
+  omit the TSV header when listing coordinate tracks
 
 Example:
 
@@ -371,7 +376,7 @@ gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
   --reference CHM13 --all_haplotypes
 
-gfaidx get_region chr22.gfa.gz --print_path_names
+gfaidx get_region chr22.gfa.gz --list_coordinates
 ```
 
 #### How `--all_haplotypes` preserves paths
@@ -696,6 +701,146 @@ Defaults:
 
 Use `--ndx`, `--out`, or `--force` if the files were renamed or the output
 should be replaced.
+
+## Coordinate indexing examples
+
+Coordinate indexing depends on how the input GFA represents genomic sequence.
+Start by building the main graph and path indexes:
+
+```bash
+gfaidx index_gfa graph.gfa graph.indexed.gfa.gz
+```
+
+The commands below use the companion name
+`graph.indexed.gfa.gz.cdx`. Keeping that name lets `get_region` find the
+coordinate index automatically.
+
+### rGFA with `SN`, `SO`, and `SR` tags
+
+In an rGFA, reference coordinates are stored on `S` lines:
+
+```text
+S	node1	ACGT	SN:Z:chr1	SO:i:100	SR:i:0
+```
+
+`index_coordinates` automatically selects `SR:i:0` segments and groups them by
+their `SN` value. Do not provide `--reference` for this mode:
+
+```bash
+gfaidx index_coordinates \
+  graph.indexed.gfa.gz \
+  graph.indexed.gfa.gz.cdx
+```
+
+List the available `SN` coordinate tracks and their indexed bounds:
+
+```bash
+gfaidx get_region graph.indexed.gfa.gz --list_coordinates
+```
+
+Rows with `source` equal to `S` came from rGFA segment tags. Query using the
+exact value in the `sequence` column:
+
+```bash
+gfaidx get_region \
+  graph.indexed.gfa.gz \
+  chr1:1000000-1100000 \
+  chr1.region.gfa \
+  --max_nodes 100000
+```
+
+A pure rGFA does not record complete sample paths. Its reference nodes can seed
+the default BFS extraction, but `--all_haplotypes` cannot reconstruct
+haplotypes that are not represented by `P` or `W` records. Do not use
+`index_gfa --no_paths` for this workflow: `get_region` currently uses the
+otherwise empty `.pdx` node table to convert coordinate ranks back to node
+names.
+
+### GFA with `P` lines
+
+`P` lines do not carry genomic start and end fields. gfaidx can give selected
+paths a 0-based path-local coordinate system by summing their segment lengths.
+This requires `*` overlaps; paths with overlap CIGARs are rejected because node
+lengths alone do not define their coordinates.
+
+First list the indexed paths:
+
+```bash
+gfaidx get_path graph.indexed.gfa.gz --print_path_names > paths.tsv
+```
+
+Keep the required `P` rows in a selection file. For example:
+
+```bash
+awk -F '\t' \
+  '$1 == "P" && ($2 == "CHM13#0#chr1" || $2 == "GRCh38#0#chr1")' \
+  paths.tsv > coordinate_paths.tsv
+```
+
+Build `.cdx` from that selection:
+
+```bash
+gfaidx index_coordinates \
+  graph.indexed.gfa.gz \
+  graph.indexed.gfa.gz.cdx \
+  --path_names_file coordinate_paths.tsv
+```
+
+Inspect the indexed ranges and query a selected path by its name:
+
+```bash
+gfaidx get_region graph.indexed.gfa.gz --list_coordinates
+gfaidx get_region \
+  graph.indexed.gfa.gz \
+  CHM13#0#chr1:1000000-1100000 \
+  chr1.region.gfa
+```
+
+Unselected P paths remain queryable on the fly when matching `.pdx` and `.lnx`
+files are available, but selecting frequently queried paths for `.cdx` avoids
+recomputing their coordinate positions.
+
+### GFA with `W` lines
+
+`W` records already contain a sample, haplotype, sequence name, and concrete
+`SeqStart`/`SeqEnd` coordinates. If the GFA header identifies reference samples
+with `RS:Z`, coordinate indexing without a selection file indexes those
+reference walks. Use `--reference` to select one reference sample:
+
+```bash
+gfaidx index_coordinates \
+  graph.indexed.gfa.gz \
+  graph.indexed.gfa.gz.cdx \
+  --reference CHM13
+```
+
+To select individual walks instead, print all P/W records and retain the desired
+`W` rows:
+
+```bash
+gfaidx get_path graph.indexed.gfa.gz --print_path_names > paths.tsv
+awk -F '\t' \
+  '$1 == "W" && $2 == "CHM13" && $4 == "chr1"' \
+  paths.tsv > coordinate_walks.tsv
+gfaidx index_coordinates \
+  graph.indexed.gfa.gz \
+  graph.indexed.gfa.gz.cdx \
+  --path_names_file coordinate_walks.tsv
+```
+
+List and query the resulting coordinate namespace:
+
+```bash
+gfaidx get_region graph.indexed.gfa.gz --list_coordinates
+gfaidx get_region \
+  graph.indexed.gfa.gz \
+  chr1:1000000-1100000 \
+  chr1.region.gfa \
+  --reference CHM13
+```
+
+When only one reference namespace contains the requested sequence,
+`--reference` may be omitted from the query.
 
 ## How the path index works
 

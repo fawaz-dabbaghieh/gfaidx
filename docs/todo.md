@@ -108,14 +108,14 @@ Suggested first benchmark:
 
 ### Allow `get_region --print_path_names` With A `.cdx` But No `.pdx`
 
-**Status:** deferred
+**Status:** completed
 
 Graphs indexed with `index_gfa --no_paths` do not have a `.pdx`, but
 `index_coordinates` can still build a useful `.cdx` from rGFA `S` records.
-Currently, `get_region --print_path_names` rejects the request when `.pdx` is
-missing, so these `.cdx`-only coordinate tracks cannot be listed.
+The listing path now opens `.pdx` and `.cdx` independently, so these
+`.cdx`-only coordinate tracks remain visible.
 
-Required behavior:
+Implemented behavior:
 
 - when both `.pdx` and `.cdx` exist, list all P/W records from `.pdx`, annotate
   tracks accelerated by `.cdx`, and retain `.cdx`-only tracks
@@ -124,8 +124,11 @@ Required behavior:
 - when only `.cdx` exists, list its coordinate tracks without requiring `.pdx`
 - when neither exists, report that no path or coordinate index is available
 
-Required tests:
+Regression coverage:
 
 - build a graph with `index_gfa --no_paths`
 - build an rGFA S-derived `.cdx`
 - verify that `get_region --print_path_names` lists the `.cdx` tracks
+
+Implemented with the clearer `--list_coordinates` alias while retaining
+`--print_path_names` for compatibility.

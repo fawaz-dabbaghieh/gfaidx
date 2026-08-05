@@ -82,4 +82,14 @@ if(BUILD_TESTING)
                 $<TARGET_FILE:gfaidx>
                 ${CMAKE_SOURCE_DIR}/tests/data/subgraph_coordinate_paths.gfa
     )
+
+    # Verify actionable rGFA guidance and coordinate-track listing both with
+    # the compatibility flag and with a standalone .cdx but no .pdx.
+    add_test(
+        NAME rgfa_coordinate_listing
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_rgfa_coordinate_listing.sh
+                $<TARGET_FILE:gfaidx>
+                ${CMAKE_SOURCE_DIR}/tests/data/rgfa_coordinates.gfa
+    )
 endif()

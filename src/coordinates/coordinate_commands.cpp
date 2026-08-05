@@ -63,7 +63,7 @@ void write_coordinate_value(std::ostream& out, std::int64_t value) {
 
 void write_available_coordinate_paths(
     std::ostream& out,
-    const paths::PathIndexReader& path_index,
+    const paths::PathIndexReader* path_index,
     const CoordinateIndexReader* coordinate_index,
     bool on_the_fly_available,
     bool with_header) {
@@ -94,59 +94,61 @@ void write_available_coordinate_paths(
 
     std::vector<std::string> emitted_cdx_keys;
     emitted_cdx_keys.reserve(track_lookup.size());
-    for (std::uint32_t path_id = 0;
-         path_id < path_index.path_count();
-         ++path_id) {
-        const auto info = path_index.get_path_info(path_id);
-        const auto path_key = indexed_path_key(info);
-        const auto found = std::lower_bound(
-            track_lookup.begin(),
-            track_lookup.end(),
-            path_key,
-            [](const CoordinateTrackLookup& entry, const std::string& key) {
-                return entry.path_key < key;
-            });
-        const CoordinateTrackInfo* accelerated_track = nullptr;
-        if (found != track_lookup.end() && found->path_key == path_key) {
-            accelerated_track =
-                &coordinate_index->tracks()[found->track_index];
-            emitted_cdx_keys.push_back(path_key);
-        }
+    if (path_index != nullptr) {
+        for (std::uint32_t path_id = 0;
+             path_id < path_index->path_count();
+             ++path_id) {
+            const auto info = path_index->get_path_info(path_id);
+            const auto path_key = indexed_path_key(info);
+            const auto found = std::lower_bound(
+                track_lookup.begin(),
+                track_lookup.end(),
+                path_key,
+                [](const CoordinateTrackLookup& entry, const std::string& key) {
+                    return entry.path_key < key;
+                });
+            const CoordinateTrackInfo* accelerated_track = nullptr;
+            if (found != track_lookup.end() && found->path_key == path_key) {
+                accelerated_track =
+                    &coordinate_index->tracks()[found->track_index];
+                emitted_cdx_keys.push_back(path_key);
+            }
 
-        if (accelerated_track != nullptr) {
-            // Reuse the exact coordinate bounds already stored in .cdx.
-            const auto& track = *accelerated_track;
-            out << track.source_type << '\t'
-                << track.reference_name << '\t'
-                << track.haplotype << '\t'
-                << track.sequence_name << '\t'
-                << track.sequence_start << '\t'
-                << track.sequence_end << '\t'
-                << track.entry_count << "\tcdx\n";
-            continue;
-        }
+            if (accelerated_track != nullptr) {
+                // Reuse the exact coordinate bounds already stored in .cdx.
+                const auto& track = *accelerated_track;
+                out << track.source_type << '\t'
+                    << track.reference_name << '\t'
+                    << track.haplotype << '\t'
+                    << track.sequence_name << '\t'
+                    << track.sequence_start << '\t'
+                    << track.sequence_end << '\t'
+                    << track.entry_count << "\tcdx\n";
+                continue;
+            }
 
-        if (info.record_type == 'W') {
-            out << "W\t" << info.sample_id << '\t' << info.hap_index
-                << '\t' << info.seq_id << '\t';
-            write_coordinate_value(out, info.seq_start);
-            out << '\t';
-            write_coordinate_value(out, info.seq_end);
-            out << '\t' << info.step_count << '\t';
-            const bool has_walk_coordinates =
-                info.seq_start >= 0 && info.seq_end >= info.seq_start;
-            out << (on_the_fly_available && has_walk_coordinates
-                        ? "on_the_fly"
-                        : "unavailable")
-                << '\n';
-        } else {
-            // P paths use a 0-based local coordinate system. Their total end
-            // is not stored in .pdx and is deliberately left unknown here so
-            // printing names does not scan every path's node lengths.
-            out << "P\t\t0\t" << info.name << "\t0\t*\t"
-                << info.step_count << '\t'
-                << (on_the_fly_available ? "on_the_fly" : "unavailable")
-                << '\n';
+            if (info.record_type == 'W') {
+                out << "W\t" << info.sample_id << '\t' << info.hap_index
+                    << '\t' << info.seq_id << '\t';
+                write_coordinate_value(out, info.seq_start);
+                out << '\t';
+                write_coordinate_value(out, info.seq_end);
+                out << '\t' << info.step_count << '\t';
+                const bool has_walk_coordinates =
+                    info.seq_start >= 0 && info.seq_end >= info.seq_start;
+                out << (on_the_fly_available && has_walk_coordinates
+                            ? "on_the_fly"
+                            : "unavailable")
+                    << '\n';
+            } else {
+                // P paths use a 0-based local coordinate system. Their total end
+                // is not stored in .pdx and is deliberately left unknown here so
+                // printing names does not scan every path's node lengths.
+                out << "P\t\t0\t" << info.name << "\t0\t*\t"
+                    << info.step_count << '\t'
+                    << (on_the_fly_available ? "on_the_fly" : "unavailable")
+                    << '\n';
+            }
         }
     }
 
@@ -440,11 +442,15 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--print_path_names").default_value(false)
       .implicit_value(true)
-      .help("print coordinate-queryable P/W paths and optional .cdx acceleration status, then exit");
+      .help("print coordinate-queryable P/W paths and rGFA .cdx tracks, then exit");
+
+    parser.add_argument("--list_coordinates").default_value(false)
+      .implicit_value(true)
+      .help("alias for --print_path_names that lists all coordinate-queryable tracks");
 
     parser.add_argument("--no_header").default_value(false)
       .implicit_value(true)
-      .help("omit the TSV header when used with --print_path_names");
+      .help("omit the TSV header when listing coordinate tracks");
 
     parser.add_argument("--debug_trace").default_value(false)
       .implicit_value(true)
@@ -455,7 +461,9 @@ int run_get_region(const argparse::ArgumentParser& program) {
     try {
         const auto input_gz = program.get<std::string>("in_gz");
         const auto reference = program.get<std::string>("reference");
-        const bool print_path_names = program.get<bool>("print_path_names");
+        const bool list_coordinates =
+            program.get<bool>("print_path_names") ||
+            program.get<bool>("list_coordinates");
         const bool no_paths = program.get<bool>("no_paths");
         const bool with_coords = program.get<bool>("with_coords");
         const bool all_haplotypes = program.get<bool>("all_haplotypes");
@@ -472,19 +480,29 @@ int run_get_region(const argparse::ArgumentParser& program) {
         if (pdx_path.empty()) pdx_path = utils::companion_path(input_gz, ".pdx");
         if (lnx_path.empty()) lnx_path = utils::companion_path(input_gz, ".lnx");
         if (pcx_path.empty()) pcx_path = utils::companion_path(input_gz, ".pcx");
-        if (print_path_names) {
-            if (!file_exists(pdx_path.c_str())) {
+        if (list_coordinates) {
+            const bool has_pdx = file_exists(pdx_path.c_str());
+            const bool has_cdx = file_exists(cdx_path.c_str());
+            if (!has_pdx && !has_cdx) {
                 throw std::runtime_error(
-                    "Path index required to list coordinate-queryable paths "
-                    "does not exist: " + pdx_path);
+                    "No path or coordinate index is available. Expected " +
+                    pdx_path + " or " + cdx_path +
+                    ". Build rGFA/reference coordinates with: gfaidx "
+                    "index_coordinates " + input_gz + " " + cdx_path);
             }
-            paths::PathIndexReader path_index(pdx_path);
+
+            std::unique_ptr<paths::PathIndexReader> path_index;
+            if (has_pdx) {
+                path_index =
+                    std::make_unique<paths::PathIndexReader>(pdx_path);
+            }
             std::unique_ptr<CoordinateIndexReader> coordinate_index;
-            if (file_exists(cdx_path.c_str())) {
+            if (has_cdx) {
                 coordinate_index =
                     std::make_unique<CoordinateIndexReader>(cdx_path);
-                if (coordinate_index->node_count() !=
-                    path_index.node_count()) {
+                if (path_index != nullptr &&
+                    coordinate_index->node_count() !=
+                        path_index->node_count()) {
                     throw std::runtime_error(
                         ".cdx and .pdx node counts differ; rebuild them "
                         "against the same .ndx");
@@ -492,7 +510,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
             }
             write_available_coordinate_paths(
                 std::cout,
-                path_index,
+                path_index.get(),
                 coordinate_index.get(),
                 file_exists(lnx_path.c_str()),
                 !program.get<bool>("no_header"));
@@ -506,13 +524,18 @@ int run_get_region(const argparse::ArgumentParser& program) {
         const auto region_arg = program.get<std::string>("region");
         const auto output_gfa = program.get<std::string>("out_gfa");
         if (region_arg.empty() || output_gfa.empty()) {
-            throw std::runtime_error("get_region requires <sequence:start-end> and <out_gfa> unless --print_path_names is used");
+            throw std::runtime_error(
+                "get_region requires <sequence:start-end> and <out_gfa> "
+                "unless --list_coordinates or --print_path_names is used");
         }
 
         const auto region = parse_region(region_arg);
         if (!file_exists(pdx_path.c_str())) {
-            throw std::runtime_error("Path index required for coordinate rank lookup does not exist: " +
-                                     pdx_path);
+            throw std::runtime_error(
+                "Path index required for rank-to-node-name conversion does "
+                "not exist: " + pdx_path +
+                ". get_region currently requires the .pdx node table even "
+                "for an rGFA .cdx query; build index_gfa without --no_paths");
         }
         if (with_coords && lnx_explicit && !file_exists(lnx_path.c_str())) {
             throw std::runtime_error("Node length index does not exist: " + lnx_path);
@@ -522,6 +545,17 @@ int run_get_region(const argparse::ArgumentParser& program) {
         }
 
         paths::PathIndexReader path_index(pdx_path);
+        if (!file_exists(cdx_path.c_str()) &&
+            path_index.path_count() == 0) {
+            throw std::runtime_error(
+                "No coordinate index was found at " + cdx_path +
+                ", and " + pdx_path +
+                " contains no P or W records. For an rGFA, build the SR:i:0 "
+                "coordinate index with: gfaidx index_coordinates " +
+                input_gz + " " + cdx_path +
+                ". Then inspect its queryable sequences with: gfaidx "
+                "get_region " + input_gz + " --list_coordinates");
+        }
 
         std::vector<std::uint32_t> ranks;
         std::vector<paths::SubpathRun> exact_reference_path_runs;
