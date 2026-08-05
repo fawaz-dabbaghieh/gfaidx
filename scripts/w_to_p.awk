@@ -11,8 +11,8 @@
 # - H-line VN:Z tags are changed to VN:Z:1.0.
 # - All non-W lines are printed unchanged.
 #
-# Important: the :start-end suffix preserves the source W interval in the path
-# name, but GFA P paths and ODGI still number positions locally from zero.
+# Important: gfaidx recognizes the :start-end suffix as a source coordinate
+# interval. GFA itself and ODGI still number positions on each P path from zero.
 
 BEGIN {
     FS = OFS = "\t"

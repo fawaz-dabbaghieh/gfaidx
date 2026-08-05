@@ -7,12 +7,16 @@
 #include <vector>
 
 #include "indexer/node_length_index.h"
+#include "paths/p_path_coordinates.h"
 
 namespace gfaidx::coordinates {
 namespace {
 
 struct CandidatePath {
     std::uint32_t path_id{};
+    std::uint64_t coordinate_start{};
+    std::uint64_t expected_end{};
+    bool has_expected_end{false};
 };
 
 struct StepCoordinateTable {
@@ -78,27 +82,36 @@ StepCoordinateTable build_step_coordinate_table(
     return table;
 }
 
-void append_overlapping_nodes(const paths::PathIndexReader& path_index,
-                              const indexer::NodeLengthIndexReader& lengths,
-                              const CandidatePath& candidate,
-                              std::uint64_t begin,
-                              std::uint64_t end,
-                              PathCoordinateQueryResult& result) {
-    const auto info = path_index.get_path_info(candidate.path_id);
-    const auto coordinate_base = info.record_type == 'W'
-        ? static_cast<std::uint64_t>(info.seq_start)
-        : 0;
+struct CandidateSpan {
+    std::uint64_t start{};
+    std::uint64_t end{};
+};
 
-    // Build one path-local start-coordinate table so the expensive path scan is
-    // done once, then use binary searches to isolate the requested interval.
-    const auto table = build_step_coordinate_table(path_index, lengths, info, coordinate_base);
-    if (info.record_type == 'W' &&
-        table.path_end != static_cast<std::uint64_t>(info.seq_end)) {
-        throw std::runtime_error("W path span does not match segment lengths: " +
-                                 path_label(info));
+CandidateSpan append_overlapping_nodes(
+    const paths::PathIndexReader& path_index,
+    const indexer::NodeLengthIndexReader& lengths,
+    const CandidatePath& candidate,
+    std::uint64_t begin,
+    std::uint64_t end,
+    PathCoordinateQueryResult& result) {
+    const auto info = path_index.get_path_info(candidate.path_id);
+
+    // Build one start-coordinate table from the selected fragment base so the
+    // expensive path scan is done once, then use binary searches to isolate the
+    // requested interval.
+    const auto table = build_step_coordinate_table(path_index,
+                                                   lengths,
+                                                   info,
+                                                   candidate.coordinate_start);
+    if (candidate.has_expected_end &&
+        table.path_end != candidate.expected_end) {
+        throw std::runtime_error(
+            std::string(1, info.record_type) +
+            " path span does not match segment lengths: " + path_label(info));
     }
-    if (table.starts.empty() || end <= coordinate_base || begin >= table.path_end) {
-        return;
+    if (table.starts.empty() || end <= candidate.coordinate_start ||
+        begin >= table.path_end) {
+        return CandidateSpan{candidate.coordinate_start, table.path_end};
     }
 
     auto high_it = std::lower_bound(table.starts.begin(), table.starts.end(), end);
@@ -115,7 +128,9 @@ void append_overlapping_nodes(const paths::PathIndexReader& path_index,
         ++low;
     }
 
-    if (low >= high) return;
+    if (low >= high) {
+        return CandidateSpan{candidate.coordinate_start, table.path_end};
+    }
 
     // Preserve the exact path occurrence selected by the coordinate binary
     // search. Repeated node ids elsewhere on the same path must not widen it.
@@ -127,6 +142,7 @@ void append_overlapping_nodes(const paths::PathIndexReader& path_index,
     for (std::size_t i = low; i < high; ++i) {
         result.node_ranks.push_back(table.node_ranks[i]);
     }
+    return CandidateSpan{candidate.coordinate_start, table.path_end};
 }
 
 std::vector<CandidatePath> find_candidate_paths(
@@ -137,19 +153,39 @@ std::vector<CandidatePath> find_candidate_paths(
     std::uint64_t end) {
 
     std::vector<CandidatePath> p_candidates;
-    std::uint32_t path_id = 0;
-    if (path_index.lookup_path_id(std::string(sequence_name), path_id)) {
-        const auto info = path_index.get_path_info(path_id);
-        if (info.record_type == 'P') {
-            p_candidates.push_back(CandidatePath{path_id});
-        }
-    }
-
     std::vector<CandidatePath> w_candidates;
     std::vector<std::string> overlapping_references;
     bool saw_matching_walk_without_coordinates = false;
     for (std::uint32_t id = 0; id < path_index.path_count(); ++id) {
         const auto info = path_index.get_path_info(id);
+        if (info.record_type == 'P') {
+            const auto parsed =
+                paths::parse_p_path_coordinate_name(info.name);
+            // The raw name addresses one exact P record, while the suffix-free
+            // name addresses every coordinate fragment in that namespace.
+            if (info.name != sequence_name &&
+                parsed.coordinate_name != sequence_name) {
+                continue;
+            }
+            if (!info.overlap_field.empty() && info.overlap_field != "*") {
+                throw std::runtime_error(
+                    "Cannot query coordinates on P path '" +
+                    std::string(info.name) +
+                    "' because its overlap field is not '*'");
+            }
+            if (parsed.has_coordinates &&
+                (end <= parsed.start || begin >= parsed.end)) {
+                continue;
+            }
+            p_candidates.push_back(CandidatePath{
+                id,
+                parsed.start,
+                parsed.end,
+                parsed.has_coordinates,
+            });
+            continue;
+        }
+
         if (info.record_type != 'W' || info.seq_id != sequence_name) continue;
         if (!reference_name.empty() && info.sample_id != reference_name) continue;
         if (!has_concrete_walk_coordinates(info)) {
@@ -160,7 +196,12 @@ std::vector<CandidatePath> find_candidate_paths(
         const auto walk_start = static_cast<std::uint64_t>(info.seq_start);
         const auto walk_end = static_cast<std::uint64_t>(info.seq_end);
         if (end <= walk_start || begin >= walk_end) continue;
-        w_candidates.push_back(CandidatePath{id});
+        w_candidates.push_back(CandidatePath{
+            id,
+            walk_start,
+            walk_end,
+            true,
+        });
         add_unique_reference(overlapping_references, info.sample_id);
     }
 
@@ -215,26 +256,31 @@ PathCoordinateQueryResult query_path_coordinates_on_the_fly(
     // Sort them so coordinate-selected reference runs remain deterministic.
     std::sort(candidates.begin(), candidates.end(),
               [&](const CandidatePath& lhs, const CandidatePath& rhs) {
-                  const auto lhs_info = path_index.get_path_info(lhs.path_id);
-                  const auto rhs_info = path_index.get_path_info(rhs.path_id);
-                  const auto lhs_start = lhs_info.record_type == 'W'
-                      ? lhs_info.seq_start
-                      : 0;
-                  const auto rhs_start = rhs_info.record_type == 'W'
-                      ? rhs_info.seq_start
-                      : 0;
-                  if (lhs_start != rhs_start) return lhs_start < rhs_start;
+                  if (lhs.coordinate_start != rhs.coordinate_start) {
+                      return lhs.coordinate_start < rhs.coordinate_start;
+                  }
                   return lhs.path_id < rhs.path_id;
               });
     PathCoordinateQueryResult result;
     result.matched_path_count = candidates.size();
+    bool have_previous_span = false;
+    CandidateSpan previous_span;
     for (const auto& candidate : candidates) {
-        append_overlapping_nodes(path_index,
-                                 lengths,
-                                 candidate,
-                                 begin,
-                                 end,
-                                 result);
+        const auto span = append_overlapping_nodes(path_index,
+                                                   lengths,
+                                                   candidate,
+                                                   begin,
+                                                   end,
+                                                   result);
+        // Multiple P records can form adjacent coordinate fragments, but two
+        // records covering the same base are an ambiguous coordinate namespace.
+        if (have_previous_span && span.start < previous_span.end) {
+            throw std::runtime_error(
+                "Overlapping P/W coordinate fragments for sequence '" +
+                std::string(sequence_name) + "'");
+        }
+        previous_span = span;
+        have_previous_span = true;
     }
 
     std::sort(result.node_ranks.begin(), result.node_ranks.end());

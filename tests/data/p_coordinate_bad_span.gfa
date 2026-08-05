@@ -1,0 +1,7 @@
+H	VN:Z:1.0
+S	A	AA
+S	B	CC
+S	C	GG
+L	A	+	B	+	0M
+L	B	+	C	+	0M
+P	ref#0#chr1:100-107	A+,B+,C+	*

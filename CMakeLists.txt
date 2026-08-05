@@ -43,6 +43,7 @@ add_executable(gfaidx
         src/paths/get_path_command.cpp
         src/paths/index_path_checkpoints_command.cpp
         src/paths/index_paths_command.cpp
+        src/paths/p_path_coordinates.cpp
         src/paths/path_coordinate_checkpoints.cpp
         src/paths/path_index.cpp
         src/paths/walk_coords.cpp
@@ -102,5 +103,20 @@ if(BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/scripts/w_to_p.awk
                 ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_input.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_expected.gfa
+    )
+
+    # Verify terminal P-name coordinate intervals in both CDX and PDX/LNX
+    # lookup paths, including fragmented tracks and coordinate-bearing output.
+    add_test(
+        NAME p_path_coordinates
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_p_path_coordinates.sh
+                $<TARGET_FILE:gfaidx>
+                ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_paths.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_path_names.tsv
+                ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_bad_span.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_bad_span_names.tsv
+                ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_overlapping_paths.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_overlapping_path_names.tsv
     )
 endif()

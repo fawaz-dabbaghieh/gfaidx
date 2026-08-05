@@ -1,0 +1,14 @@
+H	VN:Z:1.0
+S	A	AA
+S	B	CC
+S	C	GG
+S	D	TT
+S	E	AC
+S	F	GT
+L	A	+	B	+	0M
+L	B	+	C	+	0M
+L	C	+	D	+	0M
+L	D	+	E	+	0M
+L	E	+	F	+	0M
+P	ref#0#chr1:100-106	A+,B+,C+	*
+P	ref#0#chr1:105-111	D+,E+,F+	*

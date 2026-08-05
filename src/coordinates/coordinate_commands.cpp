@@ -15,6 +15,7 @@
 #include "coordinates/path_haplotype_query.h"
 #include "coordinates/path_coordinate_query.h"
 #include "fs/fs_helpers.h"
+#include "paths/p_path_coordinates.h"
 #include "paths/path_index.h"
 #include "utils/Timer.h"
 #include "utils/cli_helpers.h"
@@ -52,6 +53,26 @@ struct CoordinateTrackLookup {
     std::string path_key;
     std::size_t track_index{};
 };
+
+std::string_view coordinate_sequence_name(const CoordinateTrackInfo& track) {
+    // Keep the raw P name in .cdx for exact .pdx identity, but present and query
+    // its terminal :start-end suffix as one fragment of the base namespace.
+    if (track.source_type == 'P') {
+        return paths::parse_p_path_coordinate_name(track.sequence_name)
+            .coordinate_name;
+    }
+    return track.sequence_name;
+}
+
+bool coordinate_track_uses_current_p_semantics(
+    const CoordinateTrackInfo& track) {
+    if (track.source_type != 'P') return true;
+    const auto parsed =
+        paths::parse_p_path_coordinate_name(track.sequence_name);
+    return !parsed.has_coordinates ||
+           (track.sequence_start == parsed.start &&
+            track.sequence_end == parsed.end);
+}
 
 void write_coordinate_value(std::ostream& out, std::int64_t value) {
     if (value >= 0) {
@@ -109,8 +130,13 @@ void write_available_coordinate_paths(
                 });
             const CoordinateTrackInfo* accelerated_track = nullptr;
             if (found != track_lookup.end() && found->path_key == path_key) {
-                accelerated_track =
-                    &coordinate_index->tracks()[found->track_index];
+                const auto& candidate =
+                    coordinate_index->tracks()[found->track_index];
+                // An older .cdx may have stored a suffixed P path from zero.
+                // Leave it unaccelerated so queries use the corrected fallback.
+                if (coordinate_track_uses_current_p_semantics(candidate)) {
+                    accelerated_track = &candidate;
+                }
                 emitted_cdx_keys.push_back(path_key);
             }
 
@@ -120,7 +146,7 @@ void write_available_coordinate_paths(
                 out << track.source_type << '\t'
                     << track.reference_name << '\t'
                     << track.haplotype << '\t'
-                    << track.sequence_name << '\t'
+                    << coordinate_sequence_name(track) << '\t'
                     << track.sequence_start << '\t'
                     << track.sequence_end << '\t'
                     << track.entry_count << "\tcdx\n";
@@ -141,11 +167,19 @@ void write_available_coordinate_paths(
                             : "unavailable")
                     << '\n';
             } else {
-                // P paths use a 0-based local coordinate system. Their total end
-                // is not stored in .pdx and is deliberately left unknown here so
-                // printing names does not scan every path's node lengths.
-                out << "P\t\t0\t" << info.name << "\t0\t*\t"
-                    << info.step_count << '\t'
+                // A terminal coordinate suffix supplies exact bounds without a
+                // step scan. Unsuffixed paths retain the local start of zero and
+                // an unknown end because .pdx does not store their total length.
+                const auto parsed =
+                    paths::parse_p_path_coordinate_name(info.name);
+                out << "P\t\t0\t" << parsed.coordinate_name << '\t'
+                    << parsed.start << '\t';
+                if (parsed.has_coordinates) {
+                    out << parsed.end;
+                } else {
+                    out << '*';
+                }
+                out << '\t' << info.step_count << '\t'
                     << (on_the_fly_available ? "on_the_fly" : "unavailable")
                     << '\n';
             }
@@ -171,10 +205,14 @@ void write_available_coordinate_paths(
             out << track.source_type << '\t'
                 << track.reference_name << '\t'
                 << track.haplotype << '\t'
-                << track.sequence_name << '\t'
+                << coordinate_sequence_name(track) << '\t'
                 << track.sequence_start << '\t'
                 << track.sequence_end << '\t'
-                << track.entry_count << "\tcdx\n";
+                << track.entry_count << '\t'
+                << (coordinate_track_uses_current_p_semantics(track)
+                        ? "cdx"
+                        : "stale_cdx")
+                << '\n';
         }
     }
 }

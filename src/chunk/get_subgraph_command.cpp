@@ -528,8 +528,9 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
         return 0;
     }
 
-    // W records use SeqStart/SeqEnd fields, and coordinate-indexed P records
-    // use path-local offsets in their output name. Both need node lengths.
+    // W records use SeqStart/SeqEnd fields. P records use an encoded name
+    // interval when present and otherwise use path-local offsets. Both need
+    // node lengths.
     bool has_coordinate_run = false;
     if (with_walk_coordinates) {
         for (const auto& run : *runs) {

@@ -9,6 +9,7 @@
 
 #include "fs/fs_helpers.h"
 #include "indexer/node_hash_index.h"
+#include "paths/p_path_coordinates.h"
 #include "paths/path_index.h"
 
 namespace gfaidx::coordinates {
@@ -484,7 +485,8 @@ void append_selected_paths_from_path_index(const std::string& path_index_path,
     }
 
     // The selection file is explicit: W records keep their original coordinate
-    // interval, while P records get a path-local 0-based coordinate system.
+    // interval, while P records use a terminal :start-end suffix when present
+    // and otherwise retain the path-local 0-based coordinate system.
     for (const auto path_id : selected_path_ids) {
         const auto info = path_index.get_path_info(path_id);
         if (info.record_type == 'W') {
@@ -527,13 +529,21 @@ void append_selected_paths_from_path_index(const std::string& path_index_path,
             track.source_type = 'P';
             track.sequence_name = std::string(info.name);
             track.haplotype = 0;
-            track.sequence_start = 0;
+            const auto parsed =
+                paths::parse_p_path_coordinate_name(info.name);
+            track.sequence_start = parsed.start;
             track.sequence_end = append_entries_from_indexed_steps(path_index,
                                                                    path_id,
                                                                    info.name,
-                                                                   0,
+                                                                   track.sequence_start,
                                                                    node_lengths,
                                                                    track.entries);
+            if (parsed.has_coordinates &&
+                track.sequence_end != parsed.end) {
+                throw std::runtime_error(
+                    "Coordinate-bearing P path span is inconsistent with "
+                    "segment lengths: " + std::string(info.name));
+            }
             tracks.push_back(std::move(track));
         } else {
             throw std::runtime_error("Selected .pdx record is neither P nor W: " +
@@ -786,15 +796,26 @@ bool build_coordinate_index(const std::string& input_gfa,
 
     // Sorting metadata makes queries deterministic and keeps fragments for the
     // same reference sequence adjacent without requiring a lookup map on disk.
-    std::sort(tracks.begin(), tracks.end(), [](const auto& lhs, const auto& rhs) {
+    const auto coordinate_sequence_name = [](const BuildTrack& track) {
+        return track.source_type == 'P'
+            ? paths::parse_p_path_coordinate_name(track.sequence_name)
+                  .coordinate_name
+            : std::string_view(track.sequence_name);
+    };
+    std::sort(tracks.begin(), tracks.end(), [&](const auto& lhs, const auto& rhs) {
         if (lhs.reference_name != rhs.reference_name) {
             return lhs.reference_name < rhs.reference_name;
         }
-        if (lhs.sequence_name != rhs.sequence_name) {
-            return lhs.sequence_name < rhs.sequence_name;
+        const auto lhs_sequence = coordinate_sequence_name(lhs);
+        const auto rhs_sequence = coordinate_sequence_name(rhs);
+        if (lhs_sequence != rhs_sequence) {
+            return lhs_sequence < rhs_sequence;
         }
         if (lhs.haplotype != rhs.haplotype) return lhs.haplotype < rhs.haplotype;
-        return lhs.sequence_start < rhs.sequence_start;
+        if (lhs.sequence_start != rhs.sequence_start) {
+            return lhs.sequence_start < rhs.sequence_start;
+        }
+        return lhs.sequence_name < rhs.sequence_name;
     });
 
     // The GFA W specification requires fragments for one sample/haplotype/
@@ -804,12 +825,14 @@ bool build_coordinate_index(const std::string& input_gfa,
         const auto& previous = tracks[i - 1];
         const auto& current = tracks[i];
         if (previous.reference_name == current.reference_name &&
-            previous.sequence_name == current.sequence_name &&
+            coordinate_sequence_name(previous) ==
+                coordinate_sequence_name(current) &&
             previous.haplotype == current.haplotype &&
             current.sequence_start < previous.sequence_end) {
             throw std::runtime_error("Overlapping reference-coordinate track fragments for '" +
                                      current.reference_name + ":" +
-                                     current.sequence_name + "'");
+                                     std::string(coordinate_sequence_name(current)) +
+                                     "'");
         }
     }
 
@@ -1003,13 +1026,21 @@ CoordinateQueryResult CoordinateIndexReader::query_region(
         throw std::runtime_error("Coordinate query end must be greater than start");
     }
 
+    const auto track_matches_sequence =
+        [&](const CoordinateTrackInfo& track) {
+            if (track.sequence_name == sequence_name) return true;
+            return track.source_type == 'P' &&
+                   paths::parse_p_path_coordinate_name(track.sequence_name)
+                           .coordinate_name == sequence_name;
+        };
+
     // When the caller omits a reference, accept exactly one reference namespace
     // for the requested sequence and reject ambiguous multi-reference queries.
     std::string inferred_reference;
     bool have_inferred_reference = false;
     if (reference_name.empty()) {
         for (const auto& track : tracks_) {
-            if (track.sequence_name != sequence_name) continue;
+            if (!track_matches_sequence(track)) continue;
             if (!have_inferred_reference) {
                 inferred_reference = track.reference_name;
                 have_inferred_reference = true;
@@ -1025,10 +1056,22 @@ CoordinateQueryResult CoordinateIndexReader::query_region(
     CoordinateQueryResult result;
     bool found_track = false;
     for (const auto& track : tracks_) {
-        if (track.reference_name != reference_name || track.sequence_name != sequence_name) {
+        if (track.reference_name != reference_name ||
+            !track_matches_sequence(track)) {
             continue;
         }
         found_track = true;
+        if (track.source_type == 'P') {
+            const auto parsed =
+                paths::parse_p_path_coordinate_name(track.sequence_name);
+            if (parsed.has_coordinates &&
+                (track.sequence_start != parsed.start ||
+                 track.sequence_end != parsed.end)) {
+                throw std::runtime_error(
+                    "Coordinate track for P path '" + track.sequence_name +
+                    "' uses obsolete path-local coordinates; rebuild the .cdx");
+            }
+        }
         if (track.entry_count == 0 || end <= track.sequence_start || begin >= track.sequence_end) {
             continue;
         }

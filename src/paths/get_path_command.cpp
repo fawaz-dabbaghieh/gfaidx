@@ -246,7 +246,7 @@ void configure_get_path_parser(argparse::ArgumentParser& parser) {
 
     parser.add_argument("--with_walk_coords").default_value(false)
       .implicit_value(true)
-      .help("emit W subwalks with exact SeqStart/SeqEnd and P subpaths with path-local coordinate names");
+      .help("emit W subwalks with exact SeqStart/SeqEnd and P subpaths with encoded or path-local coordinate names");
 }
 
 int run_get_path(const argparse::ArgumentParser& program) {
@@ -421,8 +421,8 @@ int run_get_path(const argparse::ArgumentParser& program) {
             return 1;
         }
 
-        // W records have SeqStart/SeqEnd fields. P records can use path-local
-        // coordinates in their output names when a length source is available.
+        // W records have SeqStart/SeqEnd fields. P records can use an encoded
+        // name interval, or local coordinates when no interval is present.
         bool has_walk_run = false;
         bool has_p_run = false;
         if (with_walk_coords) {

@@ -1,5 +1,6 @@
 #include "paths/walk_coords.h"
 
+#include <limits>
 #include <memory>
 #include <ostream>
 #include <stdexcept>
@@ -8,6 +9,7 @@
 
 #include "fs/Reader.h"
 #include "fs/fs_helpers.h"
+#include "paths/p_path_coordinates.h"
 
 namespace gfaidx::paths {
 namespace {
@@ -73,17 +75,6 @@ bool parse_s_line_name_and_length(std::string_view line,
 
 bool p_path_has_no_overlaps(std::string_view overlap_field) {
     return overlap_field.empty() || overlap_field == "*";
-}
-
-std::string p_coordinate_subpath_name(std::string_view path_name,
-                                      std::uint64_t start,
-                                      std::uint64_t end) {
-    // P paths selected for coordinate indexing are path-local by default. When
-    // the common pangenome name shape sample#hap#seq is present, appending
-    // :start-end makes the resulting path name coordinate-addressable.
-    return std::string(path_name) + ":" +
-           std::to_string(start) + "-" +
-           std::to_string(end);
 }
 
 struct CoordinateSlice {
@@ -172,6 +163,31 @@ bool build_coordinate_slice(const PathIndexReader& index,
         if (out.end > static_cast<std::uint64_t>(info.seq_end)) {
             warn_if_requested(warn, "W-line '" + std::string(info.name) +
                                     "' has segment lengths beyond SeqEnd, falling back to subwalk output without coordinates");
+            out = CoordinateSlice{};
+            return false;
+        }
+    } else {
+        const auto parsed = parse_p_path_coordinate_name(info.name);
+        if (out.start > std::numeric_limits<std::uint64_t>::max() -
+                            parsed.start ||
+            out.end > std::numeric_limits<std::uint64_t>::max() -
+                          parsed.start) {
+            warn_if_requested(
+                warn,
+                "P-line '" + std::string(info.name) +
+                    "' coordinate offset overflows uint64, falling back to "
+                    "subpath output without coordinates");
+            out = CoordinateSlice{};
+            return false;
+        }
+        out.start += parsed.start;
+        out.end += parsed.start;
+        if (parsed.has_coordinates && out.end > parsed.end) {
+            warn_if_requested(
+                warn,
+                "P-line '" + std::string(info.name) +
+                    "' has segment lengths beyond its encoded end, falling "
+                    "back to subpath output without coordinates");
             out = CoordinateSlice{};
             return false;
         }
@@ -379,6 +395,19 @@ PathCoordCacheEntry& get_or_build_path_coord_cache(
             entry.prefix_lengths.clear();
             return entry;
         }
+    } else {
+        const auto parsed =
+            parse_p_path_coordinate_name(entry.info.name);
+        if (parsed.has_coordinates &&
+            entry.prefix_lengths.back() != parsed.end - parsed.start) {
+            warn_if_requested(
+                warn,
+                "P-line '" + std::string(entry.info.name) +
+                    "' has an encoded span inconsistent with segment "
+                    "lengths, falling back to subpath output without coordinates");
+            entry.prefix_lengths.clear();
+            return entry;
+        }
     }
 
     entry.usable = true;
@@ -411,9 +440,20 @@ void write_p_subpath_with_coords(std::ostream& out,
                                  const PathCoordCacheEntry& entry,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count) {
-    const auto sub_start = entry.prefix_lengths[start_step];
-    const auto sub_end = entry.prefix_lengths[start_step + step_count];
-    const auto output_name = p_coordinate_subpath_name(entry.info.name, sub_start, sub_end);
+    const auto parsed = parse_p_path_coordinate_name(entry.info.name);
+    if (entry.prefix_lengths[start_step] >
+            std::numeric_limits<std::uint64_t>::max() - parsed.start ||
+        entry.prefix_lengths[start_step + step_count] >
+            std::numeric_limits<std::uint64_t>::max() - parsed.start) {
+        throw std::runtime_error(
+            "P subpath coordinate offset overflows uint64: " +
+            std::string(entry.info.name));
+    }
+    const auto sub_start = parsed.start + entry.prefix_lengths[start_step];
+    const auto sub_end =
+        parsed.start + entry.prefix_lengths[start_step + step_count];
+    const auto output_name =
+        format_p_path_coordinate_name(entry.info.name, sub_start, sub_end);
 
     out << "P\t" << output_name << '\t';
     for (std::uint64_t i = start_step; i < start_step + step_count; ++i) {
@@ -467,7 +507,9 @@ bool write_p_subpath_with_coords_bounded(std::ostream& out,
         return false;
     }
 
-    out << "P\t" << p_coordinate_subpath_name(info.name, slice.start, slice.end) << '\t';
+    out << "P\t"
+        << format_p_path_coordinate_name(info.name, slice.start, slice.end)
+        << '\t';
     write_p_segments_from_steps(out, index, slice.steps);
     out << "\t*";
     if (!info.tags.empty()) {

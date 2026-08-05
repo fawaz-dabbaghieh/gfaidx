@@ -66,9 +66,9 @@ void write_w_subpath_with_coords(std::ostream& out,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count);
 
-// Emit a P subpath whose path name carries path-local coordinates, e.g.
-// CHM13#0#chr1:1830045-1840123. This assumes the original P path has no
-// overlap/CIGAR field, matching coordinate-indexing rules for P records.
+// Emit a P subpath whose name carries coordinates. A source :start-end suffix
+// supplies the coordinate base; P names without one remain path-local from zero.
+// This assumes the original P path has no overlap/CIGAR field.
 void write_p_subpath_with_coords(std::ostream& out,
                                  const PathIndexReader& index,
                                  const PathCoordCacheEntry& entry,

@@ -551,8 +551,9 @@ For repeated region queries, storing lengths once may be worth it.
 ## One Important Caveat About `P` Lines
 
 > **Status: deliberately expanded.** `gfaidx` now supports P paths as 0-based
-> path-local coordinate namespaces when their overlap field is `*`. Paths with
-> overlaps are not given inferred coordinates.
+> path-local coordinate namespaces when their overlap field is `*`. A terminal
+> `:start-end` name suffix can instead provide a nonzero coordinate interval.
+> Paths with overlaps are not given inferred coordinates.
 
 Coordinate indexing should primarily target:
 

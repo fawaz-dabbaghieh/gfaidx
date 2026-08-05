@@ -282,8 +282,8 @@ Options:
 - `--path_names_file <path>`
   tab-separated file in the same format emitted by
   `gfaidx get_path graph.gfa.gz --print_path_names`; selected `W` rows keep their
-  W coordinates, while selected `P` rows are indexed as path-local coordinates
-  starting at 0 and advancing by segment length. P paths with non-`*` overlaps
+  W coordinates. A selected `P` name ending in `:start-end` uses that 0-based,
+  half-open interval; other P paths start at 0. P paths with non-`*` overlaps
   are rejected because their coordinate lengths would be ambiguous.
 - `--progress_every <N>`
   report input progress every `N` lines; `0` disables progress logging
@@ -343,18 +343,20 @@ Important options:
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
   emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates and
-  returned no-overlap `P` subpaths with path-local coordinate names such as
-  `CHM13#0#chr1:1830045-1840123`. The command uses the resolved `.pdx` for path
-  metadata, `.lnx` for node lengths, and `.pcx` to start near the requested
-  path step instead of scanning from step zero. If `.pcx` is absent, it uses
-  the previous bounded path-prefix scan. If `.lnx` is absent, it falls back to
+  returned no-overlap `P` subpaths with coordinate names such as
+  `CHM13#0#chr1:1830045-1840123`. An existing terminal interval supplies the
+  source coordinate base and is replaced by the extracted interval; otherwise
+  P coordinates are path-local from 0. The command uses the resolved `.pdx` for
+  path metadata, `.lnx` for node lengths, and `.pcx` to start near the requested
+  path step instead of scanning from step zero. If `.pcx` is absent, it uses the
+  previous bounded path-prefix scan. If `.lnx` is absent, it falls back to
   scanning indexed GFA `S` lines; if validation fails, it falls back to ordinary
   subpath output and logs a warning.
 - On-the-fly `.pdx` coordinate lookup
-  handles `P` paths as path-local coordinates starting at 0 and handles `W`
-  walks from their stored `SeqStart`. This fallback requires `.lnx`, because the
-  path steps in `.pdx` need rank-aligned node lengths to derive cumulative
-  coordinates.
+  recognizes a terminal `:start-end` interval on a P name and otherwise starts
+  that P path at 0. It handles `W` walks from their stored `SeqStart`. This
+  fallback requires `.lnx`, because the path steps in `.pdx` need rank-aligned
+  node lengths to derive cumulative coordinates.
 - `--list_coordinates`, `--print_path_names`
   print every P/W record available through `.pdx`, plus any `.cdx`-only rGFA
   tracks, then exit. `--print_path_names` is retained as a compatibility alias;
@@ -758,10 +760,24 @@ names.
 
 ### GFA with `P` lines
 
-`P` lines do not carry genomic start and end fields. gfaidx can give selected
-paths a 0-based path-local coordinate system by summing their segment lengths.
-This requires `*` overlaps; paths with overlap CIGARs are rejected because node
-lengths alone do not define their coordinates.
+`P` lines do not have dedicated genomic start and end fields. By default,
+gfaidx gives a P path a 0-based path-local coordinate system by summing its
+segment lengths. When the path name ends in `:start-end`, such as
+`GRCh38#0#chr1:1830045-1840123`, gfaidx instead treats that suffix as the
+path's 0-based, half-open interval and queries it through the suffix-free
+namespace `GRCh38#0#chr1`. The encoded span must equal the summed segment
+lengths. This requires `*` overlaps; paths with overlap CIGARs are rejected
+because node lengths alone do not define their coordinates.
+
+Multiple P records may provide adjacent or disjoint fragments of one namespace:
+
+```text
+P  GRCh38#0#chr1:100-200  ...
+P  GRCh38#0#chr1:200-300  ...
+```
+
+A query such as `GRCh38#0#chr1:150-250` uses both fragments. Overlapping
+fragments with the same base namespace are rejected as ambiguous.
 
 First list the indexed paths:
 
@@ -894,11 +910,10 @@ odgi build -g output.gfa -o output.og
 ```
 
 The `:start-end` suffix is part of the converted path name. It preserves where
-the W fragment came from, but it does not change P-path coordinates: ODGI
-numbers every imported P path locally from zero. Therefore, a fragment named
-`GRCh38#0#chr1:1830045-1840123` has ODGI path offsets starting at `0`, not
-`1830045`. Original chromosome-coordinate extraction requires a complete path
-starting at zero; ODGI does not reconstruct a chromosome-wide coordinate
+the W fragment came from. gfaidx recognizes this naming convention and uses the
+encoded interval as the P coordinate range. ODGI still numbers every imported P
+path locally from zero, so the same converted path has ODGI offsets starting at
+`0`, not `1830045`. ODGI does not reconstruct a chromosome-wide coordinate
 system from separate W fragments.
 
 ## Python helpers
