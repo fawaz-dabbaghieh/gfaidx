@@ -1,0 +1,8 @@
+H	VN:Z:1.0	RS:Z:GRCh38
+S	1	AA
+S	2	CC
+S	3	GG
+L	1	+	2	-	0M
+P	GRCh38#0#chr1:10-16	1+,2-,3+	*	TP:Z:reference
+P	HG002#1#contigA	2+,3+	*
+P	existing	1+,2+	*	XX:Z:kept

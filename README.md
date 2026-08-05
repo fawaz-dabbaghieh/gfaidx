@@ -874,11 +874,32 @@ python3 scripts/pdx_size_breakdown.py graph.pdx
 
 ### `scripts/w_to_p.awk`
 
-Convert `W` lines to lossy `P` lines for testing and visualization. Non-`W` lines are passed through unchanged.
+Convert GFA 1.1 `W` lines to GFA 1.0 `P` lines for tools such as ODGI,
+which imports GFA 1.0 paths but does not import `W` records. The converted path
+name preserves the W metadata and source interval:
+
+```text
+W  GRCh38  0  chr1  1830045  1840123  ...
+P  GRCh38#0#chr1:1830045-1840123  ...
+```
+
+The script also changes an H-line `VN:Z` tag to `VN:Z:1.0`, converts `>`/`<`
+walk orientations to `+`/`-`, preserves optional W tags, and passes all other
+records through unchanged. When both W coordinates are `*`, the converter uses
+`sample#haplotype#sequence` without a coordinate suffix.
 
 ```bash
 awk -f scripts/w_to_p.awk input.gfa > output.gfa
+odgi build -g output.gfa -o output.og
 ```
+
+The `:start-end` suffix is part of the converted path name. It preserves where
+the W fragment came from, but it does not change P-path coordinates: ODGI
+numbers every imported P path locally from zero. Therefore, a fragment named
+`GRCh38#0#chr1:1830045-1840123` has ODGI path offsets starting at `0`, not
+`1830045`. Original chromosome-coordinate extraction requires a complete path
+starting at zero; ODGI does not reconstruct a chromosome-wide coordinate
+system from separate W fragments.
 
 ## Python helpers
 

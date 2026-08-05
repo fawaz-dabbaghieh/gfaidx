@@ -92,4 +92,15 @@ if(BUILD_TESTING)
                 $<TARGET_FILE:gfaidx>
                 ${CMAKE_SOURCE_DIR}/tests/data/rgfa_coordinates.gfa
     )
+
+    # Check the standalone GFA 1.1 W-to-GFA 1.0 P conversion used for ODGI
+    # interoperability without requiring ODGI itself in the test environment.
+    add_test(
+        NAME w_to_p
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_w_to_p.sh
+                ${CMAKE_SOURCE_DIR}/scripts/w_to_p.awk
+                ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_input.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_expected.gfa
+    )
 endif()
