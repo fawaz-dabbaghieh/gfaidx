@@ -18,7 +18,7 @@ region_queries.tsv    one row per coordinate-interval query
 scripts/measure.py    runs one command, records wall time + process-tree peak RSS
 scripts/graph_stats.py counts S/L/P/W records in an output GFA
 scripts/collect_results.py  joins metrics into the final tables
-scripts/w_to_p.awk    W-line to P-line converter (from the gfaidx repo)
+scripts/w_to_p.py     chunked W-line to P-line converter (from the gfaidx repo)
 results/              everything generated
 ```
 
@@ -187,7 +187,7 @@ column set per tool rather than translating:
 - **gbz-base** takes **absolute** contig coordinates: `--sample CHM13
   --contig chr22 --interval 20000000..20010000`.
 - **odgi** takes **path-local** offsets appended to the full GFA path name. When
-  `w_to_p.awk` produces a name like `CHM13#0#chr22:0-51324926`, the odgi
+  `w_to_p.py` produces a name like `CHM13#0#chr22:0-51324926`, the odgi
   argument is `CHM13#0#chr22:0-51324926:20000000-20010000` — everything before
   the final `:start-end` is the path name. odgi does not interpret the name's
   own coordinate suffix.

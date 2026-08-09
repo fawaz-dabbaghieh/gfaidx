@@ -417,10 +417,12 @@ rule collect_results:
 
 rule w_to_p:
     # odgi build accepts a W-line GFA but emits a graph with zero paths, so the
-    # conversion is required rather than cosmetic. It is measured like any other
-    # preparation step and attributed to odgi.
+    # conversion is required rather than cosmetic. The Python converter handles
+    # chromosome-scale walks in step chunks, and this measured preparation cost
+    # remains attributed to odgi.
     input:
-        gfa=graph_gfa
+        gfa=graph_gfa,
+        converter=str(SCRIPTS / "w_to_p.py")
     output:
         gfa=f"{RESULTS}/inputs/{{graph}}/{{graph}}.p_lines.gfa",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/w_to_p.json",
@@ -430,7 +432,7 @@ rule w_to_p:
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- awk -f {SCRIPTS}/w_to_p.awk {input.gfa}
+          -- {PYTHON} {input.converter:q} {input.gfa:q}
         """
 
 
