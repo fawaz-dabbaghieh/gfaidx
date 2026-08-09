@@ -1,37 +1,50 @@
-# Default configuration for the gfaidx/vg/odgi benchmark workflow.
+# Configuration for the gfaidx / vg / odgi / gbz-base benchmark.
 #
-# Paths are interpreted relative to the repository root unless they are already
-# absolute. Keep generated files under benchmark/results so the workflow stays
-# separate from the older benchmarks/ directory.
+# Manifest paths are resolved next to the Snakefile. Graph paths in graphs.tsv
+# are resolved against data_root unless they are absolute.
 
-graphs_tsv: benchmark/graphs.tsv
-node_queries_tsv: benchmark/node_queries.tsv
-region_queries_tsv: benchmark/region_queries.tsv
-results_dir: benchmark/results
+data_root: /home/user3/gfaidx_benchmark
+results_dir: results
 
-# Snakemake will also enforce its own --cores setting. These values are passed
-# to tools with thread-aware commands where the tool supports it.
+graphs_tsv: graphs.tsv
+node_queries_tsv: node_queries.tsv
+region_queries_tsv: region_queries.tsv
+
+# Threads passed to tools that accept -t. Keep at 1 for comparable
+# single-threaded timings; Snakemake --cores controls job-level parallelism.
 threads: 1
 
-# Context values used for vg/odgi node-neighborhood queries. gfaidx is then run
-# with --max_nodes equal to the node count produced by each source tool.
-node_contexts: [0, 1, 2, 5, 10]
+# Node-neighborhood context sweeps.
+#
+# node_contexts_steps: context as a number of expansion steps (vg -c, odgi -c).
+# node_contexts_bases: context as a base-pair budget (vg -c -L, odgi -L,
+#   gbz-base --context). This second track exists because gbz-base only
+#   expresses context in bp.
+#
+# gfaidx has neither semantics: it bounds a BFS by node count, so for every
+# (query, context, source tool) the workflow reruns gfaidx with --max_nodes set
+# to the node count that source tool produced.
+node_contexts_steps: [1, 10, 100, 1000, 5000, 10000]
+node_contexts_bases: [1000, 10000, 100000, 1000000, 5000000, 10000000]
 
-# Process-tree RSS sampling interval in seconds. Smaller values catch shorter
-# memory spikes at the cost of slightly more sampling overhead.
-sample_interval_seconds: 0.10
+# Process-tree RSS sampling interval in seconds.
+sample_interval_seconds: 0.05
 
 tools:
-  gfaidx: build/gfaidx
+  # Point this at the native gfaidx executable to benchmark. It may also be a
+  # command available on PATH.
+  gfaidx: /home/user3/tools/gfaidx/build/gfaidx
   vg: vg
   odgi: odgi
+  gbz_base: /home/user3/tools/gbz-base/target/release/gbz-base
   python: python3
 
 gfaidx:
-  index_extra: "--progress_every 0"
+  # Chunking parameters from the project notes.
+  index_extra: "--progress_every 0 --checkpoint_steps 1024 --max_chunk_nodes 10000 --min_chunk_nodes 1000"
   coordinate_extra: "--progress_every 0"
-  get_subgraph_extra: ""
-  get_region_extra: ""
+  get_subgraph_extra: "--with_coords"
+  get_region_extra: "--with_coords --all_haplotypes"
 
 vg:
   convert_extra: ""
@@ -42,3 +55,17 @@ odgi:
   pathindex_extra: ""
   stepindex_extra: ""
   extract_extra: ""
+
+gbz:
+  # --max-node 0 disables GBZ segment chopping. By default vg gbwt chops
+  # segments longer than 1024 bp, which adds nodes (2,791,965 vs 2,782,249 on
+  # chr22) and renumbers the whole ID space to 1..N, so `gbz-base query --node
+  # <original id>` fails with "the graph does not contain handle". With chopping
+  # off, the GBZ keeps the input IDs (53303057..56138482) and gbz-base can be
+  # queried with the same node IDs as vg and gfaidx.
+  #
+  # If you need a default-chopped GBZ instead, add `--translation FILE` to dump
+  # the segment-to-node table and translate query nodes through it.
+  gbwt_extra: "--max-node 0"
+  construct_extra: ""
+  query_extra: ""

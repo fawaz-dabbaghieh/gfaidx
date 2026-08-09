@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Record versions of the tools used by the benchmark."""
+"""Record versions of the tools used by the benchmark.
+
+Extended from the upstream gfaidx version to also cover gbz-base.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gfaidx", required=True)
     parser.add_argument("--vg", required=True)
     parser.add_argument("--odgi", required=True)
+    parser.add_argument("--gbz-base", required=True, dest="gbz_base")
     return parser.parse_args()
 
 
@@ -35,6 +39,7 @@ def main() -> int:
         "gfaidx": [args.gfaidx, "--version"],
         "vg": [args.vg, "version"],
         "odgi": [args.odgi, "version"],
+        "gbz-base": [args.gbz_base, "--version"],
     }
 
     out_path = Path(args.out)

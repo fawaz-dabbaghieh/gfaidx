@@ -1,4 +1,16 @@
-# Fill one row per node-neighborhood query.
-# context values are taken from config.yaml: node_contexts.
-graph	query_id	node_id	notes
-hprc_minigraph_chm13	s100000_chr8	s100000	random real minigraph node; SN=chr8 SO=62408685 LN=175 SR=0
+# One row per node-neighborhood query. Context values come from config.yaml
+# (node_contexts_steps and node_contexts_bases).
+#
+# node_id         the ORIGINAL id in chr22.gfa. Used directly by vg, gbz-base
+#                 and gfaidx, all of which preserve the input ID space.
+# odgi_ref_locus  "<path name>,<path offset>" identifying the SAME locus on a
+#                 reference path. odgi only runs on an -O optimized graph, whose
+#                 IDs are compacted to 1..N, so the odgi_node_map rule uses
+#                 `odgi position -p <locus> -v` to translate this locus into
+#                 odgi's node ID. Path offsets here are path-local, which for
+#                 CHM13#0#chr22 (walk starts at 0) equals the absolute offset.
+graph	query_id	node_id	odgi_ref_locus	notes
+hprc_chr22_w	chm13_10mb	53404858	CHM13#0#chr22:0-51324926,10000013	CHM13 chr22 ~10.0 Mb (walk step 523265)
+hprc_chr22_w	chm13_20mb	56076523	CHM13#0#chr22:0-51324926,20000007	CHM13 chr22 ~20.0 Mb (walk step 824623)
+hprc_chr22_w	chm13_30mb	53922020	CHM13#0#chr22:0-51324926,30000215	CHM13 chr22 ~30.0 Mb (walk step 1024220)
+hprc_chr22_w	chm13_40mb	54084452	CHM13#0#chr22:0-51324926,40000266	CHM13 chr22 ~40.0 Mb (walk step 1197340)

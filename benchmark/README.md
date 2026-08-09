@@ -1,216 +1,214 @@
-# gfaidx / vg / odgi Benchmark
+# gfaidx / vg / odgi / gbz-base benchmark
 
-This directory contains a Snakemake workflow for benchmarking `gfaidx` against
-`vg` and `odgi` on comparable graph-indexing and subgraph-extraction tasks.
+Snakemake workflow that takes a GFA graph and measures wall time and peak RSS
+for every indexing and extraction step of four genome-graph tools, then emits
+comparison tables.
 
-The workflow is deliberately conservative about interpretation. The tools do
-not expose identical query semantics, so the pipeline records output graph
-statistics and uses matched output node counts when comparing `gfaidx` against
-`vg` or `odgi`.
+Started from `benchmark/` in the gfaidx repository and extended with gbz-base, a
+base-pair context track, and a measured W-line to P-line conversion.
 
-## What Is Compared
+## Layout
 
-Indexing:
-
-- `gfaidx`: `index_gfa`, then `index_coordinates`
-- `vg`: `vg convert -g -x` directly to `.xg`
-- `odgi`: `odgi build` to `.og`, plus optional `odgi pathindex` to `.xp`
-  and `odgi stepindex` to `.stpidx`
-
-The main query-ready index size is:
-
-- `gfaidx`: `.gfa.gz + .idx + .ndx + .lnx + .pdx + .pcx + .cdx`
-- `vg`: `.xg`
-- `odgi`: `.og + .xp + .stpidx` when path-side indexes are enabled, or only
-  `.og` for graphs marked as pathless
-
-Node-neighborhood extraction:
-
-- `vg find -x graph.xg -n NODE -c CONTEXT`
-- `odgi extract -i graph.og -n NODE -c CONTEXT`
-- `gfaidx get_subgraph ... --max_nodes N`
-
-For node queries, `N` is not chosen directly. The workflow first runs the source
-tool (`vg` or `odgi`), counts the number of `S` lines in its output after
-conversion to GFA, then runs `gfaidx` with `--max_nodes` set to that count. This
-creates two comparisons:
-
-- `vg_context_vs_gfaidx_cap`
-- `odgi_context_vs_gfaidx_cap`
-
-Coordinate-region extraction:
-
-- `vg find -x graph.xg -p path:start-end`
-- `odgi extract -i graph.og -r path:start-end`
-- `gfaidx get_region graph.gfa.gz sequence:start-end --max_nodes N`
-- direct `gfaidx get_region` using the manifest-provided `gfaidx_max_nodes`
-
-For matched region queries, `N` is again taken from the source-tool output node
-count. The workflow also runs a direct `gfaidx` coordinate query for every
-region row. This keeps rGFA/minigraph coordinate extraction benchmarked even
-when `vg` or `odgi` cannot express the query because the graph has no P/W paths.
-Skipped source-tool region tasks are reported as `NA` in the final query table.
-The output node sets are not expected to be identical because `vg`/`odgi` path
-range extraction and `gfaidx` interval-seeded BFS are different operations. The
-benchmark is therefore about runtime, memory, disk footprint, and output scale.
-
-## Requirements
-
-Install or make available:
-
-- Snakemake 9 or newer
-- `gfaidx`
-- `vg`
-- `odgi`
-- Python 3
-
-Tool paths are configured in `config.yaml`. On this machine, Snakemake is
-available in the `extgfa` conda environment:
-
-```bash
-conda run -n extgfa snakemake --version
 ```
-
-## Configure Graphs
-
-Edit `graphs.tsv`. Paths may be absolute or relative to the repository root.
-
-Required columns:
-
-- `graph`: file-safe graph ID used in output paths
-- `gfa`: input GFA
-
-Optional columns:
-
-- `gfaidx_path_names_file`: filtered output from
-  `gfaidx get_path <indexed-graph.gfa.gz> --print_path_names`
-- `gfaidx_reference`: reference sample for `gfaidx index_coordinates`
-- `odgi_path_indexes`: defaults to `1`; set to `0` for graphs with no P/W
-  paths so the workflow skips `.xp` and `.stpidx`
-- `*_extra`: per-graph extra options for each indexing command
-
-Example:
-
-```text
-graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
-chr22	test_graphs/hprc_chr22/chr22.gfa	benchmark/path_names/chr22.paths.tsv	CHM13	1
-```
-
-If both `gfaidx_path_names_file` and `gfaidx_reference` are present, the path
-names file takes precedence for coordinate indexing.
-
-Some rGFA/minigraph inputs have segment coordinate tags but no P/W path records.
-For those graphs, set `odgi_path_indexes` to `0`. ODGI can still build the
-`.og`, but some ODGI builds abort when `odgi pathindex` is run on a pathless
-graph.
-
-## Configure Node Queries
-
-Edit `node_queries.tsv`:
-
-```text
-graph	query_id	node_id	notes
-chr22	n1	123456	pilot node
-```
-
-The context values used for `vg` and `odgi` are in `config.yaml`:
-
-```yaml
-node_contexts: [0, 1, 2, 5, 10]
-```
-
-For each context, the workflow runs `vg` and `odgi`, counts output nodes, then
-runs `gfaidx` with the matched `--max_nodes` value.
-
-## Configure Region Queries
-
-Edit `region_queries.tsv`:
-
-```text
-graph	query_id	gfaidx_region	gfaidx_reference	gfaidx_max_nodes	vg_region	odgi_region	notes
-chr22	r1	chr22:0-1000000	CHM13	10000	CHM13#0#chr22:0-1000000	CHM13#0#chr22:0-1000000	pilot interval
-```
-
-`gfaidx_max_nodes` controls the direct `gfaidx` coordinate run. For matched
-comparisons, `gfaidx` still uses the node count produced by the source tool.
-
-Use the path names as each tool sees them. Leave `vg_region` or `odgi_region`
-empty, `NA`, `N/A`, or `.` when that tool cannot run the coordinate query for
-the graph. Those rows are skipped in the DAG and reported as `NA` in
-`query_metrics.tsv`. Validate path names before large runs:
-
-```bash
-gfaidx get_path graph.gfa.gz --print_path_names
-vg find -x graph.xg -I
-odgi paths -i graph.og -L
+Snakefile             the workflow
+config.yaml           tool paths, context sweeps, extra CLI options
+graphs.tsv            one row per input graph
+node_queries.tsv      one row per node-neighborhood query
+region_queries.tsv    one row per coordinate-interval query
+scripts/measure.py    runs one command, records wall time + process-tree peak RSS
+scripts/graph_stats.py counts S/L/P/W records in an output GFA
+scripts/collect_results.py  joins metrics into the final tables
+scripts/w_to_p.awk    W-line to P-line converter (from the gfaidx repo)
+results/              everything generated
 ```
 
 ## Run
 
-From the repository root:
-
 ```bash
-conda run -n extgfa snakemake -s benchmark/Snakefile --cores 1 -n
+conda activate gfaidx_bench
+cd /home/user2/fawaz/benchmark
+snakemake -s Snakefile --cores 1
 ```
 
-If Snakemake cannot write to the default user cache directory, point the cache
-inside the repository:
+All tool executables are taken from the `tools` section of `config.yaml`.
+Set `tools.gfaidx` to the gfaidx binary you want to benchmark (an absolute
+path is recommended); the default configuration uses the native build at
+`/home/user3/gfaidx/build/gfaidx`.
 
-```bash
-XDG_CACHE_HOME="$PWD/benchmark/.cache" \
-  conda run -n extgfa snakemake -s benchmark/Snakefile --cores 1 -n
+Use `--cores 1`. Running jobs concurrently makes the wall-time and peak-RSS
+numbers meaningless, since the tools then compete for CPU and memory bandwidth.
+
+## What is measured
+
+Indexing, one row per command in `results/tables/index_metrics.tsv`:
+
+| tool | steps |
+| --- | --- |
+| gfaidx | `index_gfa`, then `index_coordinates` (`.cdx`) |
+| vg | `vg convert -g -x` to `.xg` |
+| odgi | `w_to_p` conversion, `odgi build` to `.og`, `odgi build -O` to `.opt.og`, `odgi pathindex` to `.xp`, `odgi stepindex` to `.stpidx` |
+| gbz-base | `vg gbwt -g` to `.gbz`, then `gbz-base construct` to `.gbz.db` |
+
+`results/tables/index_sizes.tsv` reports every index file plus a `TOTAL` row per
+tool, so the on-disk footprint comparison is explicit about what it counts. Note
+that odgi's total covers both `.og` and `.opt.og`: all queries run on the
+optimized graph, and the plain one is kept for the build-cost comparison, so
+odgi's *query-ready* footprint is `.opt.og + .xp + .stpidx`.
+GBZ construction is attributed to gbz-base because gbz-base consumes a GBZ and
+vg is only the available builder.
+
+Extraction, one row per command in `results/tables/query_metrics.tsv`, with a
+per-query tool pivot in `results/tables/query_comparison.tsv`. There are three
+tracks:
+
+**`node_steps`** — context as a number of expansion steps.
+
+- `vg find -x g.xg -n NODE -c K`
+- `odgi extract -i g.og -n NODE -c K`
+- gfaidx, matched (see below)
+
+**`node_bases`** — context as a base-pair budget. This track exists because
+gbz-base only expresses context in bp, and it is the only track where all four
+tools appear.
+
+- `vg find -x g.xg -n NODE -c BP -L`
+- `odgi extract -i g.og -n NODE -L BP`
+- `gbz-base query --node NODE --context BP g.gbz.db`
+- gfaidx, matched
+
+**`region`** — coordinate intervals.
+
+- `vg find -x g.xg -p PATH:START-END`
+- `odgi extract -i g.og -r PATH:START-END`
+- `gbz-base query --sample S --contig C --interval START..END g.gbz.db`
+- `gfaidx get_region g.gfa.gz SEQ:START-END --reference S --max_nodes N`
+  (run both "direct" with the manifest cap and matched to each source tool)
+
+### How gfaidx is made comparable
+
+gfaidx has neither step nor bp context: `get_subgraph` bounds a BFS by node
+count. So for every (query, context, source tool) the workflow runs the source
+tool first, counts `S` lines in its output, and reruns gfaidx with
+`--max_nodes` set to that count. That yields `gfaidx_matched_vg`,
+`gfaidx_matched_odgi`, and `gfaidx_matched_gbz` rows sitting at the same output
+scale as the tool they are matched to.
+
+The outputs are not expected to contain identical node sets — path-range
+extraction and interval-seeded BFS are different operations. The comparison is
+about time, memory, index footprint, and output scale at matched node counts.
+
+## Three findings that shaped the design
+
+**odgi requires `-O`, and therefore requires a node-ID mapping.** `odgi extract`
+(both `-n` and `-r`) and `odgi pathindex` all refuse a graph whose node IDs are
+not compacted:
+
+```
+[odgi::extract] error: the node IDs are not compacted.
+    Please run 'odgi sort' using -O, --optimize to optimize the graph.
+error [xp]: Graph to index is not optimized. Please run 'odgi sort' using -O.
 ```
 
-Run the benchmark:
+Any real HPRC graph trips this. chr22 here has 2,782,249 nodes with IDs spanning
+53,303,057..56,138,482 — a range of 2,835,426, so there are gaps and the ID space
+is not compacted. `-O` renumbers to `1..N`.
+
+Note the check is about *compactness*, not about starting at 1: a small test
+graph whose IDs formed a contiguous block (2891 IDs spanning exactly 2891 values,
+offset to start at 53303057) passed `extract -n` without `-O`. That is why this
+has to be verified on the real graph rather than a toy one.
+
+The other three tools preserve the input ID space:
+
+| path | node IDs |
+| --- | --- |
+| `vg convert -g -x` | preserved |
+| `vg gbwt -g` to GBZ, then `gbz-base query` | preserved |
+| `gfaidx index_gfa` | preserved |
+| `odgi build` (no `-O`) | preserved, but unusable for queries |
+| `odgi build -O` | compacted to `1..N` |
+
+So vg, gbz-base and gfaidx are queried with original node IDs, and odgi needs a
+translation. The `odgi_node_map` rule builds it the reliable way — through a
+coordinate both ID spaces agree on:
 
 ```bash
-conda run -n extgfa snakemake -s benchmark/Snakefile --cores 8
+odgi position -i graph.opt.og -p 'CHM13#0#chr22:0-51324926,20000007' -v
 ```
 
-Use a custom config:
+That returns odgi's node at the same reference locus as the original node ID.
+`node_queries.tsv` therefore carries both `node_id` (original, for vg/gbz-base/
+gfaidx) and `odgi_ref_locus` (for odgi). The mapping is setup, and is not
+included in any query timing.
+
+Consequence for interpretation: for node queries all four tools start from the
+same *locus*, but odgi reports its own node IDs in its output. Node **counts**
+are comparable; node **identity** across odgi and the rest is not, without
+inverting the map. Region queries are unaffected, since those are specified by
+coordinates rather than IDs.
+
+**GBZ does renumber nodes by default, because it chops long segments.** The
+project notes suspected GBZ renumbers from 1, and it does — but the cause is
+segment chopping, not a deliberate relabelling. `vg gbwt` splits segments longer
+than `--max-node` (default 1024 bp), which changes the node set and renumbers the
+whole ID space:
+
+| GBZ build | nodes | node ID range |
+| --- | --- | --- |
+| `vg gbwt -g` (default, chops at 1024 bp) | 2,791,965 | 1..2,791,965 |
+| `vg gbwt --max-node 0 -g` (no chopping) | 2,782,249 | 53,303,057..56,138,482 |
+| `vg convert -g -x` (`.xg`, for reference) | 2,782,249 | 53,303,057..56,138,482 |
+
+With the default, `gbz-base query --node 53404858` fails outright:
+
+```
+Error: not found: The graph does not contain handle 106809716
+```
+
+This workflow therefore passes `--max-node 0` (set in `config.yaml` under
+`gbz.gbwt_extra`), which makes the GBZ keep the input ID space so gbz-base can be
+queried with the same node IDs as vg and gfaidx. The alternative, if a
+default-chopped GBZ is wanted, is `vg gbwt --translation FILE` to dump the
+segment-to-node table and translate query nodes through it.
+
+Note this is a deliberate deviation from stock GBZ construction, made so the
+node-seeded comparison is possible at all; it should be stated in the paper.
+
+**odgi silently drops W-line paths.** `odgi build` on a W-line GFA exits 0 and
+produces a graph with **zero paths** rather than erroring. The `w_to_p`
+conversion is therefore required for correctness, not convenience, and it is a
+measured step attributed to odgi.
+
+## Region dialects
+
+The three tools disagree about coordinates, so `region_queries.tsv` carries one
+column set per tool rather than translating:
+
+- **gbz-base** takes **absolute** contig coordinates: `--sample CHM13
+  --contig chr22 --interval 20000000..20010000`.
+- **odgi** takes **path-local** offsets appended to the full GFA path name. When
+  `w_to_p.awk` produces a name like `CHM13#0#chr22:0-51324926`, the odgi
+  argument is `CHM13#0#chr22:0-51324926:20000000-20010000` — everything before
+  the final `:start-end` is the path name. odgi does not interpret the name's
+  own coordinate suffix.
+- **vg** takes path-local offsets too, but renames subrange W lines with
+  brackets: a W line starting at a nonzero offset becomes
+  `CHM13#0#chr6[31350872-31363898]`, and that bracketed form is what `-p` needs.
+  A W line starting at 0 keeps the plain name.
+
+For CHM13 chr22 the walk starts at 0, so path-local and absolute offsets
+coincide and all four dialects address the same interval. That is a property of
+this graph, not a general one. Confirm names before adding queries:
 
 ```bash
-conda run -n extgfa snakemake -s benchmark/Snakefile \
-  --configfile benchmark/config.yaml \
-  --cores 8
+vg paths -x g.xg -L | head
+odgi paths -i g.og -L | head
+gfaidx get_region g.gfa.gz --print_path_names
 ```
 
-## Outputs
+## Adding work
 
-Generated files are written under `benchmark/results/`.
-
-Important tables:
-
-- `benchmark/results/tables/tool_versions.tsv`
-- `benchmark/results/tables/index_metrics.tsv`
-- `benchmark/results/tables/query_metrics.tsv`
-
-Logs:
-
-- `benchmark/results/logs/`
-
-Raw metric JSON files:
-
-- `benchmark/results/metrics/`
-
-Indexes:
-
-- `benchmark/results/indexes/gfaidx/`
-- `benchmark/results/indexes/vg/`
-- `benchmark/results/indexes/odgi/`
-
-Query outputs:
-
-- `benchmark/results/queries/`
-
-## Notes
-
-- Query output statistics are counted from GFA. Native `vg` and `odgi` outputs
-  are converted to GFA after the timed command, and that conversion is not
-  included in query runtime.
-- The benchmark does not assume that source-tool and `gfaidx` outputs contain
-  identical node sets. It records node, edge, path, and walk counts so results
-  can be interpreted at the same output scale.
-- Keep graph IDs and query IDs file-safe. Avoid slashes and whitespace.
-- For stable measurements, run repeated full workflows on an otherwise idle
-  machine and keep thread counts fixed.
+Append rows to the manifests; no Snakefile edit is needed. Context sweeps live
+in `config.yaml` (`node_contexts_steps`, `node_contexts_bases`). Every recorded
+command is stored verbatim in the metrics JSON and copied into the tables, and
+`results/tables/tool_versions.tsv` records the version of each tool.
