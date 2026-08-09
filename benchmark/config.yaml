@@ -7,8 +7,7 @@ data_root: /home/user3/gfaidx_benchmark
 results_dir: results
 
 graphs_tsv: graphs.tsv
-node_queries_tsv: node_queries.tsv
-region_queries_tsv: region_queries.tsv
+loci_tsv: loci.tsv
 
 # Threads passed to tools that accept -t. Keep at 1 for comparable
 # single-threaded timings; Snakemake --cores controls job-level parallelism.
@@ -43,8 +42,11 @@ gfaidx:
   # Chunking parameters from the project notes.
   index_extra: "--progress_every 0 --checkpoint_steps 1024 --max_chunk_nodes 10000 --min_chunk_nodes 1000"
   coordinate_extra: "--progress_every 0"
-  get_subgraph_extra: "--with_coords"
-  get_region_extra: "--with_coords --all_haplotypes"
+  # Required query semantics are added by the Snakefile: node queries always
+  # use --with_coords and --max_nodes, while interval queries always use
+  # --with_coords and --all_haplotypes.
+  get_subgraph_extra: ""
+  get_region_extra: ""
 
 vg:
   convert_extra: ""

@@ -6,7 +6,7 @@ import argparse
 import os
 import re
 import sys
-from typing import BinaryIO, List, Set
+from typing import BinaryIO, List, Optional, Set
 
 
 # The bytes regular expression scans node-name contents in compiled code. Python
@@ -66,9 +66,20 @@ def convert_walk(output: BinaryIO, walk: memoryview, line_number: int) -> None:
         output.write(b",".join(converted_steps))
 
 
-def convert_gfa(input_handle: BinaryIO, output: BinaryIO) -> None:
-    """Stream GFA records while keeping at most one complete input line."""
+def convert_gfa(
+    input_handle: BinaryIO,
+    output: BinaryIO,
+    mapping_output: Optional[BinaryIO] = None,
+) -> None:
+    """Stream GFA records and optionally record every W-to-P name mapping."""
     seen_path_names: Set[bytes] = set()
+
+    if mapping_output is not None:
+        # This small side table lets downstream tools resolve a W coordinate to
+        # the exact P name emitted here without duplicating the naming rules.
+        mapping_output.write(
+            b"sample\thaplotype\tseq_id\tseq_start\tseq_end\twalk_name\tp_path_name\n"
+        )
 
     for line_number, line in enumerate(input_handle, 1):
         # Locate the logical line end without copying a chromosome-scale W line.
@@ -166,6 +177,15 @@ def convert_gfa(input_handle: BinaryIO, output: BinaryIO) -> None:
             )
         seen_path_names.add(path_name)
 
+        if mapping_output is not None:
+            walk_name = b"#".join((sample, haplotype, sequence))
+            mapping_output.write(
+                b"\t".join(
+                    (sample, haplotype, sequence, start, end, walk_name, path_name)
+                )
+            )
+            mapping_output.write(b"\n")
+
         walk_start = tabs[5] + 1
         tags_start = line.find(b"\t", walk_start, content_end)
         walk_end = content_end if tags_start < 0 else tags_start
@@ -191,6 +211,11 @@ def parse_args() -> argparse.Namespace:
         default="-",
         help="plain-text output GFA; defaults to stdout",
     )
+    parser.add_argument(
+        "--mapping-out",
+        default="",
+        help="optional TSV receiving the exact W-record to P-path name mapping",
+    )
     return parser.parse_args()
 
 
@@ -202,16 +227,25 @@ def main() -> int:
         and os.path.abspath(args.input_gfa) == os.path.abspath(args.output_gfa)
     ):
         raise ConversionError("input and output GFA paths must differ")
+    if args.mapping_out and args.input_gfa != "-":
+        if os.path.abspath(args.input_gfa) == os.path.abspath(args.mapping_out):
+            raise ConversionError("input GFA and mapping output paths must differ")
+    if args.mapping_out and args.output_gfa != "-":
+        if os.path.abspath(args.output_gfa) == os.path.abspath(args.mapping_out):
+            raise ConversionError("GFA and mapping output paths must differ")
 
     input_handle = sys.stdin.buffer if args.input_gfa == "-" else open(args.input_gfa, "rb")
     output_handle = sys.stdout.buffer if args.output_gfa == "-" else open(args.output_gfa, "wb")
+    mapping_handle = open(args.mapping_out, "wb") if args.mapping_out else None
     try:
-        convert_gfa(input_handle, output_handle)
+        convert_gfa(input_handle, output_handle, mapping_handle)
     finally:
         if input_handle is not sys.stdin.buffer:
             input_handle.close()
         if output_handle is not sys.stdout.buffer:
             output_handle.close()
+        if mapping_handle is not None:
+            mapping_handle.close()
     return 0
 
 

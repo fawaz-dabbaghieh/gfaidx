@@ -40,13 +40,13 @@ NODE_TRACKS = ("node_steps", "node_bases")
 # Which tools can appear in each track at all. Used to distinguish a cell that is
 # structurally not applicable ("NA") from one that is genuinely absent because the
 # job has not run or failed (left empty). gbz-base has no step-context query, and
-# gfaidx_direct is a coordinate-only run, so neither can appear in node_steps.
+# Exact all-haplotype extraction is a coordinate-only run, while the matched
+# gfaidx variants are used only for node-context comparisons.
 TRACK_TOOLS = {
     "node_steps": {"vg", "odgi", "gfaidx_matched_vg", "gfaidx_matched_odgi"},
     "node_bases": {"vg", "odgi", "gbz", "gfaidx_matched_vg", "gfaidx_matched_odgi",
                    "gfaidx_matched_gbz"},
-    "region": {"vg", "odgi", "gbz", "gfaidx_direct", "gfaidx_matched_vg",
-               "gfaidx_matched_odgi", "gfaidx_matched_gbz"},
+    "region": {"vg", "odgi", "gbz", "gfaidx_all_haplotypes"},
 }
 
 
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--region-queries",
         default="",
-        help="region_queries.tsv, used to label region rows with their interval",
+        help="loci.tsv (or legacy region TSV), used to label region rows",
     )
     parser.add_argument("--index-out", required=True)
     parser.add_argument(
@@ -154,6 +154,12 @@ def region_labels(path_value: str) -> dict[tuple[str, str], str]:
     import csv as _csv
     for row in _csv.DictReader(lines, delimiter="\t"):
         label = (row.get("gbz_interval") or "").strip() or (row.get("gfaidx_region") or "").strip()
+        if not label:
+            seq_id = (row.get("seq_id") or "").strip()
+            start = (row.get("region_start") or "").strip()
+            end = (row.get("region_end") or "").strip()
+            if seq_id and start and end:
+                label = f"{seq_id}:{start}-{end}"
         if label:
             labels[(row["graph"], row["query_id"])] = label
     return labels
@@ -172,6 +178,10 @@ def collect_queries(results: Path, labels: dict | None = None,
         rel = path.relative_to(metrics_root).parts
         track, tool, graph = rel[0], rel[1], rel[2]
         if graphs is not None and graph not in graphs:
+            continue
+        # Ignore metrics left by an older workflow layout in a reused results
+        # directory; only the query variants defined for this track are valid.
+        if tool not in TRACK_TOOLS.get(track, set()):
             continue
         if track in NODE_TRACKS:
             query = rel[3]

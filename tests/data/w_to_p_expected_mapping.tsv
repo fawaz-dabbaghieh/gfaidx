@@ -1,0 +1,3 @@
+sample	haplotype	seq_id	seq_start	seq_end	walk_name	p_path_name
+GRCh38	0	chr1	10	16	GRCh38#0#chr1	GRCh38#0#chr1:10-16
+HG002	1	contigA	*	*	HG002#1#contigA	HG002#1#contigA

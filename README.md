@@ -908,6 +908,9 @@ records through unchanged. When both W coordinates are `*`, the converter uses
 # Recommended for large chromosome-scale walks
 python3 scripts/w_to_p.py input.gfa output.gfa
 
+# Also record every W identity and its exact generated P name
+python3 scripts/w_to_p.py input.gfa output.gfa --mapping-out w_to_p.tsv
+
 # Portable AWK alternative for smaller files
 awk -f scripts/w_to_p.awk input.gfa > output.gfa
 odgi build -g output.gfa -o output.og

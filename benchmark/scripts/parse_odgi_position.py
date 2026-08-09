@@ -28,7 +28,10 @@ def node_id_from(text: str) -> str:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        for field in line.split("\t"):
+        # With path-to-graph translation the target ODGI graph position is the
+        # final TSV field. Reading right-to-left avoids mistaking a numeric path
+        # name for the compacted node ID.
+        for field in reversed(line.split("\t")):
             field = field.strip()
             # The graph position field looks like "1234,17,+".
             head = field.split(",")[0]

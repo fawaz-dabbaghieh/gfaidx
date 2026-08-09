@@ -7,13 +7,9 @@
 #   - a measured W-line -> P-line conversion step, because odgi build accepts a
 #     W-line GFA but silently produces zero paths
 #
-# Node IDs: vg, gbz-base and gfaidx all preserve the input ID space, so they are
-# queried with the original GFA node IDs. odgi does not: `odgi extract` and
-# `odgi pathindex` both refuse a graph whose IDs are not compacted, which is the
-# case for any real HPRC graph (chr22 here has IDs 53303057..56138482 with gaps).
-# odgi therefore runs on an -O optimized graph with IDs 1..N, and the
-# odgi_node_map rule translates each query node into that ID space via a shared
-# reference path position. See README.md.
+# Query loci are supplied only as absolute W coordinates. Untimed setup rules
+# resolve the original VG/gfaidx/GBZ node ID, the compacted ODGI node ID, and
+# every tool-specific path coordinate before the measured queries begin.
 
 configfile: "config.yaml"
 
@@ -69,17 +65,23 @@ def data_path(value):
     return str(path if path.is_absolute() else DATA_ROOT / path)
 
 
-def read_tsv(path_value):
-    """Read a TSV manifest, skipping blank lines and comments.
-
-    Manifests live next to this Snakefile; data_root is only a fallback.
-    """
+def manifest_path(path_value):
+    """Resolve a manifest next to the Snakefile, then against data_root."""
     raw = str(path_value)
     path = Path(raw)
     if not path.is_absolute():
         path = BENCH_DIR / raw
         if not path.exists():
             path = Path(data_path(raw))
+    return path
+
+
+def read_tsv(path_value):
+    """Read a TSV manifest, skipping blank lines and comments.
+
+    Manifests live next to this Snakefile; data_root is only a fallback.
+    """
+    path = manifest_path(path_value)
     if not path.exists():
         return []
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -128,18 +130,48 @@ def join_options(*parts):
 GRAPH_ROWS = read_tsv(config.get("graphs_tsv", "graphs.tsv"))
 GRAPHS = {row["graph"]: row for row in GRAPH_ROWS}
 
-NODE_QUERIES = read_tsv(config.get("node_queries_tsv", "node_queries.tsv"))
-REGION_QUERIES = read_tsv(config.get("region_queries_tsv", "region_queries.tsv"))
-NODE_BY_ID = {(r["graph"], r["query_id"]): r for r in NODE_QUERIES}
-REGION_BY_ID = {(r["graph"], r["query_id"]): r for r in REGION_QUERIES}
+LOCI_PATH = manifest_path(config.get("loci_tsv", "loci.tsv"))
+LOCI = read_tsv(config.get("loci_tsv", "loci.tsv"))
+LOCUS_BY_ID = {(row["graph"], row["query_id"]): row for row in LOCI}
+
+
+def locus_has_node(row):
+    """Return whether this locus requests node-neighborhood benchmarks."""
+    return is_available(row.get("node_position", ""))
+
+
+def locus_has_region(row):
+    """Return whether this locus requests coordinate-region benchmarks."""
+    return is_available(row.get("region_start", "")) or is_available(row.get("region_end", ""))
+
+
+NODE_QUERIES = [row for row in LOCI if locus_has_node(row)]
+REGION_QUERIES = [row for row in LOCI if locus_has_region(row)]
 
 
 def require_known_graphs():
     """Fail early when query manifests refer to missing graph IDs."""
     known = set(GRAPHS)
-    for row in NODE_QUERIES + REGION_QUERIES:
+    seen = set()
+    for row in LOCI:
         if row["graph"] not in known:
             raise ValueError(f"query {row['query_id']} refers to unknown graph {row['graph']}")
+        key = (row["graph"], row["query_id"])
+        if key in seen:
+            raise ValueError(f"duplicate locus key {row['graph']}/{row['query_id']}")
+        seen.add(key)
+        for field in ("sample", "haplotype", "seq_id"):
+            if not clean(row.get(field, "")):
+                raise ValueError(f"locus {row['query_id']} has no {field}")
+        if not locus_has_node(row) and not locus_has_region(row):
+            raise ValueError(f"locus {row['query_id']} defines no node position or region")
+        if locus_has_region(row) and not (
+            is_available(row.get("region_start", ""))
+            and is_available(row.get("region_end", ""))
+        ):
+            raise ValueError(
+                f"locus {row['query_id']} must provide both region_start and region_end"
+            )
 
 
 require_known_graphs()
@@ -161,30 +193,25 @@ def odgi_path_indexes_enabled(graph):
 
 
 def gfaidx_reference_arg(graph):
-    """Return the --reference argument for gfaidx coordinate indexing."""
+    """Return an explicit coordinate-track selection for gfaidx indexing."""
+    path_names = clean(GRAPHS[graph].get("gfaidx_path_names_file", ""))
+    if path_names:
+        return f"--path_names_file {shlex.quote(data_path(path_names))}"
     reference = clean(GRAPHS[graph].get("gfaidx_reference", ""))
+    if not reference:
+        samples = sorted({
+            clean(row["sample"])
+            for row in LOCI
+            if row["graph"] == graph
+        })
+        if len(samples) == 1:
+            reference = samples[0]
+        elif len(samples) > 1:
+            raise ValueError(
+                f"graph {graph} has loci from multiple samples; set "
+                "gfaidx_path_names_file in graphs.tsv"
+            )
     return f"--reference {shlex.quote(reference)}" if reference else ""
-
-
-def gfaidx_region_reference(wildcards):
-    """Return the per-query --reference argument for gfaidx get_region."""
-    query = REGION_BY_ID[(wildcards.graph, wildcards.query)]
-    reference = clean(query.get("gfaidx_reference", "")) or clean(
-        GRAPHS[wildcards.graph].get("gfaidx_reference", "")
-    )
-    return f"--reference {shlex.quote(reference)}" if reference else ""
-
-
-def vg_region_bed(wildcards):
-    """Return one BED row for a VG path query, preserving colons in its name."""
-    region = clean(REGION_BY_ID[(wildcards.graph, wildcards.query)]["vg_region"])
-    path, separator, interval = region.rpartition(":")
-    start, dash, end = interval.partition("-")
-    if not (path and separator and dash and start.isdigit() and end.isdigit()):
-        raise ValueError(
-            f"invalid vg_region for {wildcards.graph}/{wildcards.query}: {region!r}"
-        )
-    return f"{path}\t{start}\t{end}"
 
 # --------------------------------------------------------------------------
 # Path helpers
@@ -197,6 +224,11 @@ def p_lines_gfa(graph):
     if supplied:
         return data_path(supplied)
     return str(RESULTS / "inputs" / graph / f"{graph}.p_lines.gfa")
+
+
+def w_to_p_mapping(graph):
+    """Return the explicit W-record to converted-P-name mapping."""
+    return RESULTS / "inputs" / graph / f"{graph}.w_to_p.tsv"
 
 
 def odgi_input_gfa(wildcards):
@@ -227,9 +259,38 @@ def odgi_og_opt(graph):
     return RESULTS / "indexes" / "odgi" / graph / f"{graph}.opt.og"
 
 
+def vg_path_names_file(graph):
+    """Return VG's actual imported path-name listing."""
+    return RESULTS / "maps" / "vg" / graph / "path_names.txt"
+
+
+def odgi_path_names_file(graph):
+    """Return ODGI's actual converted P-path name listing."""
+    return RESULTS / "maps" / "odgi" / graph / "path_names.txt"
+
+
+def locus_resolution_file(graph, query):
+    """Return one locus's resolved coordinate JSON."""
+    return RESULTS / "maps" / "loci" / graph / f"{query}.json"
+
+
+def original_node_map_file(graph, query):
+    """Return the original node ID selected at one W coordinate."""
+    return RESULTS / "maps" / "nodes" / "original" / graph / f"{query}.node_id"
+
+
 def odgi_node_map_file(graph, query):
     """File holding one query's node ID translated into odgi's ID space."""
     return RESULTS / "maps" / "odgi" / graph / f"{query}.node_id"
+
+
+def gfaidx_coordinate_inputs(graph):
+    """Add an explicit path-selection file as a tracked input when provided."""
+    inputs = gfaidx_sidecars(graph)
+    path_names = clean(GRAPHS[graph].get("gfaidx_path_names_file", ""))
+    if path_names:
+        inputs["path_names"] = data_path(path_names)
+    return inputs
 
 
 def gbz_file(graph):
@@ -282,10 +343,29 @@ def region_metrics(tool, graph, query):
 
 
 def source_region_available(row, source):
-    """Return whether one source tool can express a region query."""
-    if source == "gbz":
-        return is_available(row.get("gbz_sample", "")) and is_available(row.get("gbz_interval", ""))
-    return is_available(row.get(f"{source}_region", ""))
+    """Every concrete W locus is resolved for each region-capable tool."""
+    return locus_has_region(row)
+
+
+def locus_resolver_args(wildcards):
+    """Quote one loci.tsv row for resolve_locus.py."""
+    row = LOCUS_BY_ID[(wildcards.graph, wildcards.query)]
+    args = [
+        "--graph", wildcards.graph,
+        "--query-id", wildcards.query,
+        "--sample", clean(row["sample"]),
+        "--haplotype", clean(row["haplotype"]),
+        "--seq-id", clean(row["seq_id"]),
+        "--notes", clean(row.get("notes", "")),
+    ]
+    if locus_has_node(row):
+        args += ["--node-position", clean(row["node_position"])]
+    if locus_has_region(row):
+        args += [
+            "--region-start", clean(row["region_start"]),
+            "--region-end", clean(row["region_end"]),
+        ]
+    return shlex.join(args)
 
 
 # --------------------------------------------------------------------------
@@ -319,7 +399,11 @@ for graph in GRAPHS:
 
 for row in NODE_QUERIES:
     graph, query = row["graph"], row["query_id"]
-    TARGETS.append(odgi_node_map_file(graph, query))
+    TARGETS += [
+        locus_resolution_file(graph, query),
+        original_node_map_file(graph, query),
+        odgi_node_map_file(graph, query),
+    ]
     for track, contexts in TRACK_CONTEXTS.items():
         for context in contexts:
             for source in TRACK_SOURCES[track]:
@@ -332,9 +416,10 @@ for row in NODE_QUERIES:
 
 for row in REGION_QUERIES:
     graph, query = row["graph"], row["query_id"]
+    TARGETS.append(locus_resolution_file(graph, query))
     TARGETS += [
-        region_metrics("gfaidx_direct", graph, query),
-        region_gfa("gfaidx_direct", graph, query).with_suffix(".stats.json"),
+        region_metrics("gfaidx_all_haplotypes", graph, query),
+        region_gfa("gfaidx_all_haplotypes", graph, query).with_suffix(".stats.json"),
     ]
     for source in REGION_SOURCES:
         if not source_region_available(row, source):
@@ -342,12 +427,14 @@ for row in REGION_QUERIES:
         TARGETS += [
             region_metrics(source, graph, query),
             region_gfa(source, graph, query).with_suffix(".stats.json"),
-            region_metrics(f"gfaidx_matched_{source}", graph, query),
-            region_gfa(f"gfaidx_matched_{source}", graph, query).with_suffix(".stats.json"),
         ]
 
+# Deduplicate setup artifacts when one locus requests both node and region work.
+TARGETS = list(dict.fromkeys(TARGETS))
+TARGETS.append(RESULTS / "maps" / "resolved_loci.tsv")
 
-localrules: all, tool_versions, collect_results, html_report
+
+localrules: all, tool_versions, collect_loci, collect_results, html_report
 
 
 rule all:
@@ -396,18 +483,36 @@ rule collect_results:
         query=TABLES / "query_metrics.tsv",
         comparison=TABLES / "query_comparison.tsv",
     params:
-        region_queries=lambda w: str(BENCH_DIR / config.get("region_queries_tsv", "region_queries.tsv")),
+        loci=lambda w: str(LOCI_PATH),
         graphs=lambda w: " ".join(shlex.quote(graph) for graph in GRAPHS),
     shell:
         """
         {PYTHON} {SCRIPTS}/collect_results.py \
           --results-dir {RESULTS} \
-          --region-queries {params.region_queries} \
+          --region-queries {params.loci} \
           --graphs {params.graphs} \
           --index-out {output.index} \
           --index-sizes-out {output.sizes} \
           --query-out {output.query} \
           --comparison-out {output.comparison}
+        """
+
+
+rule collect_loci:
+    # Keep the automatically derived names and both node-ID spaces in one table
+    # so every benchmark query can be audited after the run.
+    input:
+        resolutions=[str(locus_resolution_file(row["graph"], row["query_id"])) for row in LOCI],
+        original_nodes=[str(original_node_map_file(row["graph"], row["query_id"])) for row in NODE_QUERIES],
+        odgi_nodes=[str(odgi_node_map_file(row["graph"], row["query_id"])) for row in NODE_QUERIES],
+    output:
+        tsv=RESULTS / "maps" / "resolved_loci.tsv"
+    params:
+        graphs=lambda w: " ".join(shlex.quote(graph) for graph in GRAPHS),
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/collect_loci.py \
+          --results-dir {RESULTS} --graphs {params.graphs} --out {output.tsv}
         """
 
 
@@ -425,6 +530,7 @@ rule w_to_p:
         converter=str(SCRIPTS / "w_to_p.py")
     output:
         gfa=f"{RESULTS}/inputs/{{graph}}/{{graph}}.p_lines.gfa",
+        mapping=f"{RESULTS}/inputs/{{graph}}/{{graph}}.w_to_p.tsv",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/w_to_p.json",
         log=f"{RESULTS}/logs/index/odgi/{{graph}}/w_to_p.log",
     shell:
@@ -432,7 +538,8 @@ rule w_to_p:
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {PYTHON} {input.converter:q} {input.gfa:q}
+          -- {PYTHON} {input.converter:q} {input.gfa:q} \
+             --mapping-out {output.mapping:q}
         """
 
 
@@ -466,7 +573,7 @@ rule gfaidx_index:
 
 rule gfaidx_coordinates:
     input:
-        unpack(lambda w: gfaidx_sidecars(w.graph))
+        unpack(lambda w: gfaidx_coordinate_inputs(w.graph))
     output:
         cdx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.cdx",
         metrics=f"{RESULTS}/metrics/index/gfaidx/{{graph}}/index_coordinates.json",
@@ -590,23 +697,92 @@ rule odgi_build_optimized:
         """
 
 
-rule odgi_node_map:
-    # Translate one original node ID into the optimized graph's ID space, by way
-    # of a reference path position that both ID spaces agree on. This is the node
-    # ID mapping the project notes called for; it is needed only for odgi.
-    #
-    # Not timed as part of any query: it is setup, not work under test.
+rule vg_path_names:
+    # Record the names VG actually imported. In particular, VG gives nonzero W
+    # subranges a bracket suffix that differs from ODGI's converted P name.
+    input:
+        xg=lambda w: vg_xg(w.graph)
+    output:
+        paths=f"{RESULTS}/maps/vg/{{graph}}/path_names.txt",
+        log=f"{RESULTS}/logs/maps/vg/{{graph}}/path_names.log",
+    shell:
+        """
+        {VG} paths -x {input.xg} -L > {output.paths} 2> {output.log}
+        """
+
+
+rule odgi_path_names:
+    # Verify the exact P names present after W conversion and ODGI optimization.
     input:
         og=lambda w: odgi_og_opt(w.graph)
+    output:
+        paths=f"{RESULTS}/maps/odgi/{{graph}}/path_names.txt",
+        log=f"{RESULTS}/logs/maps/odgi/{{graph}}/path_names.log",
+    shell:
+        """
+        {ODGI} paths -i {input.og} -L > {output.paths} 2> {output.log}
+        """
+
+
+rule resolve_locus:
+    # Join the user-facing absolute W coordinates to the converter's exact P
+    # name and to the path names actually loaded by VG and ODGI.
+    input:
+        mapping=lambda w: w_to_p_mapping(w.graph),
+        vg_paths=lambda w: vg_path_names_file(w.graph),
+        odgi_paths=lambda w: odgi_path_names_file(w.graph),
+    output:
+        json=f"{RESULTS}/maps/loci/{{graph}}/{{query}}.json"
+    params:
+        args=locus_resolver_args,
+    shell:
+        """
+        {PYTHON} {SCRIPTS}/resolve_locus.py \
+          --mapping {input.mapping:q} \
+          --vg-paths {input.vg_paths:q} \
+          --odgi-paths {input.odgi_paths:q} \
+          {params.args} --out {output.json:q}
+        """
+
+
+rule original_node_map:
+    # Resolve the original graph node at the selected path coordinate through
+    # VG, which preserves numeric GFA node IDs. This setup is intentionally not
+    # measured as part of any extraction query.
+    input:
+        xg=lambda w: vg_xg(w.graph),
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
+    output:
+        node_id=f"{RESULTS}/maps/nodes/original/{{graph}}/{{query}}.node_id",
+        native=f"{RESULTS}/maps/nodes/original/{{graph}}/{{query}}.position.vg",
+        gfa=f"{RESULTS}/maps/nodes/original/{{graph}}/{{query}}.position.gfa",
+        log=f"{RESULTS}/logs/maps/nodes/original/{{graph}}/{{query}}.log",
+    shell:
+        """
+        region="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key vg_node_region)"
+        {VG} find -x {input.xg} -p "$region" > {output.native} 2> {output.log}
+        {VG} view -g {output.native} > {output.gfa} 2>> {output.log}
+        {PYTHON} {SCRIPTS}/parse_seed_node.py \
+          --gfa {output.gfa} --out {output.node_id} 2>> {output.log}
+        """
+
+
+rule odgi_node_map:
+    # Translate the same path coordinate into ODGI's compacted node-ID space.
+    # This is setup rather than measured query work.
+    input:
+        og=lambda w: odgi_og_opt(w.graph),
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
         node_id=f"{RESULTS}/maps/odgi/{{graph}}/{{query}}.node_id",
         position=f"{RESULTS}/maps/odgi/{{graph}}/{{query}}.position.tsv",
         log=f"{RESULTS}/logs/maps/odgi/{{graph}}/{{query}}.log",
-    params:
-        locus=lambda w: NODE_BY_ID[(w.graph, w.query)]["odgi_ref_locus"],
     shell:
         """
-        {ODGI} position -i {input.og} -p {params.locus:q} -v \
+        locus="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key odgi_node_position)"
+        {ODGI} position -i {input.og} -p "$locus" -v \
           > {output.position} 2> {output.log}
         {PYTHON} {SCRIPTS}/parse_odgi_position.py \
           --input {output.position} --out {output.node_id} 2>> {output.log}
@@ -672,22 +848,23 @@ def odgi_context_flags(wildcards):
 
 rule vg_node_query:
     input:
-        xg=lambda w: vg_xg(w.graph)
+        xg=lambda w: vg_xg(w.graph),
+        node_map=lambda w: original_node_map_file(w.graph, w.query),
     output:
         native=f"{RESULTS}/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/subgraph.vg",
         metrics=f"{RESULTS}/metrics/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}.json",
         log=f"{RESULTS}/logs/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}.log",
     threads: THREADS
     params:
-        node=lambda w: NODE_BY_ID[(w.graph, w.query)]["node_id"],
         context=vg_context_flags,
         extra=lambda w: extra("vg", "find_extra"),
     shell:
         """
+        node="$(cat {input.node_map})"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.native} --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} find -x {input.xg} -n {params.node} {params.context} {params.extra}
+          -- {VG} find -x {input.xg} -n "$node" {params.context} {params.extra}
         """
 
 
@@ -736,21 +913,22 @@ rule gbz_node_query:
     # gbz-base context is a base-pair budget, so this only applies to node_bases.
     # It writes GFA on stdout, so no conversion step is needed.
     input:
-        db=lambda w: gbz_db(w.graph)
+        db=lambda w: gbz_db(w.graph),
+        node_map=lambda w: original_node_map_file(w.graph, w.query),
     output:
         gfa=f"{RESULTS}/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
         metrics=f"{RESULTS}/metrics/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}.json",
         log=f"{RESULTS}/logs/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}.log",
     threads: THREADS
     params:
-        node=lambda w: NODE_BY_ID[(w.graph, w.query)]["node_id"],
         extra=lambda w: extra("gbz", "query_extra"),
     shell:
         """
+        node="$(cat {input.node_map})"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {GBZ} query --node {params.node} --context {wildcards.context} \
+          -- {GBZ} query --node "$node" --context {wildcards.context} \
              {input.db} {params.extra}
         """
 
@@ -761,6 +939,7 @@ rule gfaidx_node_matched:
     # becomes --max_nodes, which puts both tools at the same output scale.
     input:
         unpack(lambda w: gfaidx_sidecars(w.graph)),
+        node_map=lambda w: original_node_map_file(w.graph, w.query),
         source_stats=lambda w: node_gfa(w.track, w.source, w.graph, w.query, w.context).with_suffix(".stats.json"),
     output:
         gfa=f"{RESULTS}/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
@@ -768,18 +947,18 @@ rule gfaidx_node_matched:
         log=f"{RESULTS}/logs/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}.log",
     threads: THREADS
     params:
-        node=lambda w: NODE_BY_ID[(w.graph, w.query)]["node_id"],
         extra=lambda w: extra("gfaidx", "get_subgraph_extra"),
     shell:
         """
+        node="$(cat {input.node_map})"
         max_nodes="$({PYTHON} {SCRIPTS}/json_value.py --input {input.source_stats} --key nodes --minimum 1)"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --sample-interval {SAMPLE_INTERVAL} \
-          -- {GFAIDX} get_subgraph {input.gz} {params.node} {output.gfa} \
+          -- {GFAIDX} get_subgraph {input.gz} "$node" {output.gfa} \
              --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
              --lnx {input.lnx} --pcx {input.pcx} \
-             --max_nodes "$max_nodes" {params.extra}
+             --max_nodes "$max_nodes" --with_coords {params.extra}
         """
 
 
@@ -789,21 +968,23 @@ rule gfaidx_node_matched:
 
 rule vg_region_query:
     input:
-        xg=lambda w: vg_xg(w.graph)
+        xg=lambda w: vg_xg(w.graph),
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
         native=f"{RESULTS}/queries/region/vg/{{graph}}/{{query}}/subgraph.vg",
         metrics=f"{RESULTS}/metrics/queries/region/vg/{{graph}}/{{query}}.json",
         log=f"{RESULTS}/logs/queries/region/vg/{{graph}}/{{query}}.log",
     threads: THREADS
     params:
-        region=lambda w: REGION_BY_ID[(w.graph, w.query)]["vg_region"],
         extra=lambda w: extra("vg", "find_extra"),
     shell:
         """
+        region="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key vg_region)"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.native} --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} find -x {input.xg} -p {params.region:q} {params.extra}
+          -- {VG} find -x {input.xg} -p "$region" {params.extra}
         """
 
 
@@ -818,21 +999,23 @@ rule vg_region_to_gfa:
 
 rule odgi_region_query:
     input:
-        og=lambda w: odgi_og_opt(w.graph)
+        og=lambda w: odgi_og_opt(w.graph),
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
         native=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/subgraph.og",
         metrics=f"{RESULTS}/metrics/queries/region/odgi/{{graph}}/{{query}}.json",
         log=f"{RESULTS}/logs/queries/region/odgi/{{graph}}/{{query}}.log",
     threads: THREADS
     params:
-        region=lambda w: REGION_BY_ID[(w.graph, w.query)]["odgi_region"],
         extra=lambda w: extra("odgi", "extract_extra"),
     shell:
         """
+        region="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key odgi_region)"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --sample-interval {SAMPLE_INTERVAL} \
-          -- {ODGI} extract -i {input.og} -r {params.region:q} \
+          -- {ODGI} extract -i {input.og} -r "$region" \
              -o {output.native} -t {threads} {params.extra}
         """
 
@@ -848,77 +1031,60 @@ rule odgi_region_to_gfa:
 
 rule gbz_region_query:
     input:
-        db=lambda w: gbz_db(w.graph)
+        db=lambda w: gbz_db(w.graph),
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
         gfa=f"{RESULTS}/queries/region/gbz/{{graph}}/{{query}}/subgraph.gfa",
         metrics=f"{RESULTS}/metrics/queries/region/gbz/{{graph}}/{{query}}.json",
         log=f"{RESULTS}/logs/queries/region/gbz/{{graph}}/{{query}}.log",
     threads: THREADS
     params:
-        sample=lambda w: REGION_BY_ID[(w.graph, w.query)]["gbz_sample"],
-        contig=lambda w: REGION_BY_ID[(w.graph, w.query)]["gbz_contig"],
-        interval=lambda w: REGION_BY_ID[(w.graph, w.query)]["gbz_interval"],
         extra=lambda w: extra("gbz", "query_extra"),
     shell:
         """
+        sample="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key gbz_sample)"
+        contig="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key gbz_contig)"
+        interval="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key gbz_interval)"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {GBZ} query --sample {params.sample} --contig {params.contig} \
-             --interval {params.interval} {input.db} {params.extra}
+          -- {GBZ} query --sample "$sample" --contig "$contig" \
+             --interval "$interval" {input.db} {params.extra}
         """
 
 
-rule gfaidx_region_direct:
+rule gfaidx_region_all_haplotypes:
+    # Coordinate intervals use exact path-supported selection. This is a
+    # different operation from the node-count-bounded BFS used by get_subgraph,
+    # so no --max_nodes value is supplied or matched to another tool.
     input:
         unpack(lambda w: gfaidx_sidecars(w.graph)),
         cdx=lambda w: str(gfaidx_prefix(w.graph)) + ".cdx",
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/region/gfaidx_direct/{{graph}}/{{query}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_direct/{{graph}}/{{query}}.json",
-        log=f"{RESULTS}/logs/queries/region/gfaidx_direct/{{graph}}/{{query}}.log",
+        gfa=f"{RESULTS}/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}.json",
+        log=f"{RESULTS}/logs/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}.log",
     threads: THREADS
     params:
-        region=lambda w: REGION_BY_ID[(w.graph, w.query)]["gfaidx_region"],
-        reference=gfaidx_region_reference,
-        max_nodes=lambda w: clean(REGION_BY_ID[(w.graph, w.query)].get("gfaidx_max_nodes", "")) or "10000",
         extra=lambda w: extra("gfaidx", "get_region_extra"),
     shell:
         """
+        region="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key gfaidx_region)"
+        reference="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key sample)"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --sample-interval {SAMPLE_INTERVAL} \
-          -- {GFAIDX} get_region {input.gz} {params.region} {output.gfa} \
+          -- {GFAIDX} get_region {input.gz} "$region" {output.gfa} \
              --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} \
              --pdx {input.pdx} --lnx {input.lnx} --pcx {input.pcx} \
-             --max_nodes {params.max_nodes} {params.reference} {params.extra}
-        """
-
-
-rule gfaidx_region_matched:
-    input:
-        unpack(lambda w: gfaidx_sidecars(w.graph)),
-        cdx=lambda w: str(gfaidx_prefix(w.graph)) + ".cdx",
-        source_stats=lambda w: region_gfa(w.source, w.graph, w.query).with_suffix(".stats.json"),
-    output:
-        gfa=f"{RESULTS}/queries/region/gfaidx_matched_{{source}}/{{graph}}/{{query}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_matched_{{source}}/{{graph}}/{{query}}.json",
-        log=f"{RESULTS}/logs/queries/region/gfaidx_matched_{{source}}/{{graph}}/{{query}}.log",
-    threads: THREADS
-    params:
-        region=lambda w: REGION_BY_ID[(w.graph, w.query)]["gfaidx_region"],
-        reference=gfaidx_region_reference,
-        extra=lambda w: extra("gfaidx", "get_region_extra"),
-    shell:
-        """
-        max_nodes="$({PYTHON} {SCRIPTS}/json_value.py --input {input.source_stats} --key nodes --minimum 1)"
-        {PYTHON} {SCRIPTS}/measure.py \
-          --metrics {output.metrics} --log {output.log} \
-          --sample-interval {SAMPLE_INTERVAL} \
-          -- {GFAIDX} get_region {input.gz} {params.region} {output.gfa} \
-             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} \
-             --pdx {input.pdx} --lnx {input.lnx} --pcx {input.pcx} \
-             --max_nodes "$max_nodes" {params.reference} {params.extra}
+             --reference "$reference" --with_coords --all_haplotypes \
+             {params.extra}
         """
 
 

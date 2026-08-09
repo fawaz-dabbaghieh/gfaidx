@@ -99,7 +99,9 @@ def fmt_gib(kb) -> str:
 
 def tool_color(tool: str) -> str:
     """Return the accent colour for a tool or tool variant."""
-    base = tool.replace("gfaidx_matched_", "").replace("gfaidx_direct", "gfaidx")
+    base = tool.replace("gfaidx_matched_", "").replace(
+        "gfaidx_all_haplotypes", "gfaidx"
+    )
     if tool.startswith("gfaidx"):
         base = "gfaidx"
     return TOOL_COLORS.get(base, "#64748b")
@@ -319,18 +321,19 @@ records what each tool natively supports:</p>
 tools appear, and it exists because gbz-base expresses context solely in bp.</li>
 <li><strong>region</strong> — coordinate intervals: <code>vg find -p</code>,
 <code>odgi extract -r</code>, <code>gbz-base query --interval</code>,
-<code>gfaidx get_region</code>.</li>
+<code>gfaidx get_region --all_haplotypes --with_coords</code>.</li>
 </ul>
-<p>gfaidx has neither context semantics — <code>get_subgraph</code> bounds a BFS by node
-count — so for every (query, context, source tool) the source tool runs first, its output
-<code>S</code> lines are counted, and gfaidx is rerun with <code>--max_nodes</code> set to
-that count. Those rows appear as <code>gfaidx_matched_&lt;tool&gt;</code> and sit at the same
-output scale as the tool they are matched to.</p>
+<p>For the two node-context tracks, <code>gfaidx get_subgraph</code> bounds a BFS by node
+count rather than steps or bases. For every (query, context, source tool), the source tool
+runs first, its output <code>S</code> lines are counted, and gfaidx is run with
+<code>--max_nodes</code> set to that count. These rows appear as
+<code>gfaidx_matched_&lt;tool&gt;</code>. Region queries are not node-count matched: gfaidx
+runs exact path-supported all-haplotype extraction for the requested interval.</p>
 <div class="note">
 <p><strong>How to read these numbers.</strong> Outputs are <em>not</em> expected to contain
-identical node sets: path-range extraction and interval-seeded BFS are different
-operations. The comparison is about wall time, peak RSS, index footprint, and output scale
-at matched node counts — not about output equality.</p>
+identical node sets: each tool uses its own path-range or exact path-supported extraction
+semantics. The comparison is about wall time, peak RSS, index footprint, and output scale;
+matched node counts apply only to the node-context tracks, not the region track.</p>
 <p>For node queries all tools start from the same <em>locus</em>, but odgi reports its own
 compacted node IDs, so node <em>counts</em> are comparable across tools while node
 <em>identity</em> is not, without inverting the odgi map.</p>
@@ -514,7 +517,8 @@ cd /home/user2/fawaz/benchmark
 snakemake -s Snakefile --cores 1
 python3 scripts/make_report.py --results results --out report.html</code></pre>
 <p>Context sweeps live in <code>config.yaml</code>; queries live in
-<code>node_queries.tsv</code> and <code>region_queries.tsv</code>. Every command is stored
+<code>loci.tsv</code>, while resolved tool coordinates and node IDs are recorded in
+<code>results/maps/resolved_loci.tsv</code>. Every command is stored
 verbatim in <code>results/metrics/**.json</code> and copied into
 <code>results/tables/*.tsv</code>, which are the machine-readable source for this page.</p>""")
 

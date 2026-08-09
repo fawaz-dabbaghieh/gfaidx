@@ -1,214 +1,356 @@
 # gfaidx / vg / odgi / gbz-base benchmark
 
-Snakemake workflow that takes a GFA graph and measures wall time and peak RSS
-for every indexing and extraction step of four genome-graph tools, then emits
-comparison tables.
+This Snakemake workflow compares indexing and subgraph extraction with gfaidx,
+VG, ODGI, and gbz-base. It records wall time, peak memory, output size, index
+size, graph statistics, tool versions, commands, and logs.
 
-Started from `benchmark/` in the gfaidx repository and extended with gbz-base, a
-base-pair context track, and a measured W-line to P-line conversion.
+The workflow accepts query loci as absolute coordinates on GFA `W` records. It
+automatically resolves the original graph node ID, ODGI's compacted node ID,
+and the different path-coordinate syntax used by each tool.
 
-## Layout
+## Contents
 
+- [Requirements](#requirements)
+- [Files](#files)
+- [Configure the tools](#configure-the-tools)
+- [Add a new graph](#add-a-new-graph)
+- [Describe query loci](#describe-query-loci)
+- [How automatic locus resolution works](#how-automatic-locus-resolution-works)
+- [Run the workflow](#run-the-workflow)
+- [Outputs](#outputs)
+- [What is measured](#what-is-measured)
+- [Comparison details](#comparison-details)
+- [Known tool differences](#known-tool-differences)
+
+## Requirements
+
+Install Snakemake 9 and the four benchmarked tools:
+
+- `gfaidx`
+- `vg`
+- `odgi`
+- `gbz-base`
+- `python3`
+
+The tools do not have to be installed in the same environment. Absolute binary
+paths can be configured in `config.yaml`.
+
+Run one benchmark job at a time. Concurrent indexing or query jobs compete for
+CPU, memory, and storage bandwidth and make the measurements difficult to
+compare.
+
+## Files
+
+```text
+benchmark/Snakefile                 workflow rules
+benchmark/config.yaml               tools, results directory, and context sizes
+benchmark/graphs.tsv                one row per input graph
+benchmark/loci.tsv                  W-coordinate loci to benchmark
+benchmark/scripts/measure.py        time and process-tree peak-RSS measurement
+benchmark/scripts/w_to_p.py         W-to-P conversion used for ODGI
+benchmark/scripts/resolve_locus.py  coordinate and path-name resolver
+benchmark/scripts/collect_results.py final result tables
+benchmark/results/                  default generated output directory
+benchmark/report.html               default self-contained HTML report
 ```
-Snakefile             the workflow
-config.yaml           tool paths, context sweeps, extra CLI options
-graphs.tsv            one row per input graph
-node_queries.tsv      one row per node-neighborhood query
-region_queries.tsv    one row per coordinate-interval query
-scripts/measure.py    runs one command, records wall time + process-tree peak RSS
-scripts/graph_stats.py counts S/L/P/W records in an output GFA
-scripts/collect_results.py  joins metrics into the final tables
-scripts/w_to_p.py     chunked W-line to P-line converter (from the gfaidx repo)
-results/              everything generated
+
+`node_queries.tsv` and `region_queries.tsv` are no longer needed. Their
+tool-specific fields are generated from `loci.tsv`.
+
+## Configure the tools
+
+Edit the `tools` section of `benchmark/config.yaml`:
+
+```yaml
+tools:
+  gfaidx: /absolute/path/to/gfaidx
+  vg: /absolute/path/to/vg
+  odgi: /absolute/path/to/odgi
+  gbz_base: /absolute/path/to/gbz-base
+  python: python3
 ```
 
-## Run
+Also set the input and output roots:
+
+```yaml
+data_root: /data/genome_graphs
+results_dir: results_big_graph
+
+graphs_tsv: graphs.tsv
+loci_tsv: loci.tsv
+threads: 1
+```
+
+Relative graph paths in `graphs.tsv` are resolved under `data_root`. A relative
+`results_dir` is created under `benchmark/`, regardless of the directory from
+which Snakemake is launched.
+
+The context sweeps are also configured here:
+
+```yaml
+node_contexts_steps: [1, 10, 100, 1000]
+node_contexts_bases: [1000, 10000, 100000, 1000000]
+```
+
+Large contexts can produce very large subgraphs. Start with a smaller set when
+testing a new whole-chromosome graph.
+
+## Add a new graph
+
+Add one row to `benchmark/graphs.tsv`. The important columns are:
+
+| Column | Meaning |
+| --- | --- |
+| `graph` | File-safe identifier used in result paths |
+| `gfa` | Absolute path, or path relative to `data_root` |
+| `gfaidx_path_names_file` | Optional filtered `get_path --print_path_names` output |
+| `gfaidx_reference` | Optional W sample to coordinate-index |
+| `odgi_path_indexes` | `1` for graphs with W/P paths; `0` for pathless graphs |
+| remaining `*_extra` columns | Optional per-graph command-line arguments |
+
+Example:
+
+```tsv
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
+hprc_chr1	/data/hprc_chr1.gfa		CHM13	1
+```
+
+If all loci for the graph use one W sample, `gfaidx_reference` may be left
+empty and the workflow selects that sample automatically. When loci use
+multiple samples, provide `gfaidx_path_names_file` containing every W track
+that should be coordinate-indexed.
+
+The selected W sample must be imported by VG as a reference path. Usually it is
+listed in the GFA header's `RS:Z` tag. If it is not, add an appropriate option,
+for example `--ref-sample CHM13`, to the row's `vg_convert_extra` field and
+confirm that the installed VG version supports it.
+
+For automatic W-locus resolution, let this workflow perform its own W-to-P
+conversion. Supplying a separately converted ODGI GFA with different P naming
+rules can make the generated W-to-P mapping disagree with the ODGI graph.
+
+## Describe query loci
+
+Edit `benchmark/loci.tsv`:
+
+```tsv
+graph	query_id	sample	haplotype	seq_id	node_position	region_start	region_end	notes
+hprc_chr1	chr1_148m	CHM13	0	chr1	148000000	148000000	148010000	10 kb locus
+```
+
+The W identity is the combination of `sample`, `haplotype`, and `seq_id`. For a
+record such as:
+
+```gfa
+W	CHM13	0	chr1	1000000	249000000	...
+```
+
+the corresponding locus fields are `CHM13`, `0`, and `chr1`. All positions in
+`loci.tsv` are zero-based **absolute W coordinates**, so users do not subtract
+`SeqStart` and do not construct VG or ODGI path names.
+
+The query columns behave as follows:
+
+| Column | Meaning |
+| --- | --- |
+| `node_position` | Optional single coordinate used for node-context queries |
+| `region_start` / `region_end` | Optional half-open interval used for region queries |
+
+At least one query type must be present. Examples:
+
+```tsv
+# Node query only
+hprc_chr1	node_50m	CHM13	0	chr1	50000000			Node contexts
+
+# Region query only
+hprc_chr1	region_50m_100kb	CHM13	0	chr1		50000000	50100000	100 kb region
+
+# Both query types at one locus
+hprc_chr1	locus_148m	CHM13	0	chr1	148000000	148000000	148010000	Node and region
+```
+
+For a representative benchmark, use several reproducible positions distributed
+across the W track and several region widths. Avoid selecting only one unusually
+simple or unusually complex locus.
+
+Each row must fit completely inside one concrete W record. If a reference is
+split into several W fragments, the resolver automatically chooses the fragment
+containing the requested coordinates. A region spanning two fragments is
+rejected and should be represented by separate rows. W records whose
+`SeqStart`/`SeqEnd` are `*` cannot support absolute-coordinate loci.
+
+## How automatic locus resolution works
+
+The mapping is setup work and is not included in query timings:
+
+1. `w_to_p.py` converts W records to P records for ODGI.
+2. The same conversion writes:
+   ```text
+   results_dir/inputs/<graph>/<graph>.w_to_p.tsv
+   ```
+   This table records the W identity, W interval, and exact generated P name.
+3. The workflow asks VG and ODGI to list the paths they actually indexed.
+4. `resolve_locus.py` selects the W fragment containing the absolute locus,
+   verifies its VG and ODGI paths, and calculates path-local offsets.
+5. A single-position `vg find` lookup obtains the original graph node ID used
+   by VG, gfaidx, and the unchopped GBZ.
+6. `odgi position` translates the same path coordinate into the compacted ODGI
+   node-ID space.
+
+The final audit table is:
+
+```text
+results_dir/maps/resolved_loci.tsv
+```
+
+It contains absolute and local positions, W/P/VG path names, original node IDs,
+ODGI node IDs, and every generated region argument. Check this table before
+interpreting benchmark results.
+
+Resolution stops with an error if a W record is missing, coordinates are out of
+range, paths are ambiguous, VG did not import the selected path, ODGI did not
+contain the generated P path, or a single-position lookup does not identify
+exactly one node.
+
+## Run the workflow
+
+From the repository root:
 
 ```bash
-conda activate gfaidx_bench
-cd /home/user2/fawaz/benchmark
-snakemake -s Snakefile --cores 1
+conda activate extgfa
+
+# Validate manifests and inspect commands without running them.
+snakemake \
+  --snakefile benchmark/Snakefile \
+  --configfile benchmark/config.yaml \
+  --cores 1 \
+  --dry-run \
+  --printshellcmds
+
+# Run the benchmark serially.
+snakemake \
+  --snakefile benchmark/Snakefile \
+  --configfile benchmark/config.yaml \
+  --cores 1 \
+  --printshellcmds
 ```
 
-All tool executables are taken from the `tools` section of `config.yaml`.
-Set `tools.gfaidx` to the gfaidx binary you want to benchmark (an absolute
-path is recommended); the default configuration uses the native build at
-`/home/user3/gfaidx/build/gfaidx`.
+To use a separate configuration:
 
-Use `--cores 1`. Running jobs concurrently makes the wall-time and peak-RSS
-numbers meaningless, since the tools then compete for CPU and memory bandwidth.
+```bash
+snakemake \
+  --snakefile benchmark/Snakefile \
+  --configfile /path/to/config.big_graph.yaml \
+  --cores 1
+```
+
+Generate a DAG image with Graphviz:
+
+```bash
+snakemake --snakefile benchmark/Snakefile \
+  --configfile benchmark/config.yaml --dag |
+dot -Tpng > benchmark/dag.png
+```
+
+## Outputs
+
+With `results_dir: results_big_graph`, generated data are written under:
+
+```text
+benchmark/results_big_graph/
+```
+
+Important outputs:
+
+```text
+tables/index_metrics.tsv       indexing time and memory
+tables/index_sizes.tsv         index file sizes and per-tool totals
+tables/query_metrics.tsv       long-form query results
+tables/query_comparison.tsv    side-by-side query comparison
+tables/tool_versions.tsv       executable versions
+maps/resolved_loci.tsv         automatically resolved query coordinates and IDs
+metrics/                       raw JSON measurements and exact commands
+logs/                          stdout/stderr logs
+indexes/                       generated tool indexes
+queries/                       extracted graphs
+```
+
+The self-contained report is written to `benchmark/report.html`.
 
 ## What is measured
 
-Indexing, one row per command in `results/tables/index_metrics.tsv`:
+Indexing steps:
 
-| tool | steps |
+| Tool | Steps |
 | --- | --- |
-| gfaidx | `index_gfa`, then `index_coordinates` (`.cdx`) |
-| vg | `vg convert -g -x` to `.xg` |
-| odgi | `w_to_p` conversion, `odgi build` to `.og`, `odgi build -O` to `.opt.og`, `odgi pathindex` to `.xp`, `odgi stepindex` to `.stpidx` |
-| gbz-base | `vg gbwt -g` to `.gbz`, then `gbz-base construct` to `.gbz.db` |
+| gfaidx | `index_gfa`, then `index_coordinates` |
+| VG | `vg convert -g -x` to `.xg` |
+| ODGI | measured W-to-P conversion, `.og`, optimized `.opt.og`, `.xp`, `.stpidx` |
+| gbz-base | `vg gbwt` to `.gbz`, then `gbz-base construct` |
 
-`results/tables/index_sizes.tsv` reports every index file plus a `TOTAL` row per
-tool, so the on-disk footprint comparison is explicit about what it counts. Note
-that odgi's total covers both `.og` and `.opt.og`: all queries run on the
-optimized graph, and the plain one is kept for the build-cost comparison, so
-odgi's *query-ready* footprint is `.opt.og + .xp + .stpidx`.
-GBZ construction is attributed to gbz-base because gbz-base consumes a GBZ and
-vg is only the available builder.
+Query tracks:
 
-Extraction, one row per command in `results/tables/query_metrics.tsv`, with a
-per-query tool pivot in `results/tables/query_comparison.tsv`. There are three
-tracks:
+- `node_steps`: VG and ODGI expansion by graph steps, plus node-count-matched
+  `gfaidx get_subgraph --with_coords`.
+- `node_bases`: VG, ODGI, and gbz-base expansion by bases, plus node-count-matched
+  `gfaidx get_subgraph --with_coords`.
+- `region`: coordinate extraction by VG, ODGI, and gbz-base, compared with one
+  exact `gfaidx get_region --all_haplotypes --with_coords` run.
 
-**`node_steps`** — context as a number of expansion steps.
+W-to-P conversion is attributed to ODGI because it is required for ODGI to
+retain W walks as paths. Locus resolution and node-ID translation are setup and
+are not timed as extraction operations.
 
-- `vg find -x g.xg -n NODE -c K`
-- `odgi extract -i g.og -n NODE -c K`
-- gfaidx, matched (see below)
+## Comparison details
 
-**`node_bases`** — context as a base-pair budget. This track exists because
-gbz-base only expresses context in bp, and it is the only track where all four
-tools appear.
+For node-context queries, gfaidx bounds BFS by node count rather than steps or
+bases. For every source query, the workflow counts output S lines and reruns
+`get_subgraph --with_coords` with that count as `--max_nodes`. These rows are
+named `gfaidx_matched_vg`, `gfaidx_matched_odgi`, and
+`gfaidx_matched_gbz`.
 
-- `vg find -x g.xg -n NODE -c BP -L`
-- `odgi extract -i g.og -n NODE -L BP`
-- `gbz-base query --node NODE --context BP g.gbz.db`
-- gfaidx, matched
+Coordinate-interval queries use different semantics. They run gfaidx once with
+`get_region --all_haplotypes --with_coords`; they do not pass `--max_nodes` and
+do not create node-count-matched gfaidx variants.
 
-**`region`** — coordinate intervals.
+The outputs need not contain identical node sets because path-range extraction,
+step context, base context, and node-count-bounded BFS have different semantics.
+The benchmark compares time, memory, index footprint, and output scale while
+recording the exact commands and output graph statistics.
 
-- `vg find -x g.xg -p PATH:START-END`
-- `odgi extract -i g.og -r PATH:START-END`
-- `gbz-base query --sample S --contig C --interval START..END g.gbz.db`
-- `gfaidx get_region g.gfa.gz SEQ:START-END --reference S --max_nodes N`
-  (run both "direct" with the manifest cap and matched to each source tool)
+## Known tool differences
 
-### How gfaidx is made comparable
+### ODGI node IDs
 
-gfaidx has neither step nor bp context: `get_subgraph` bounds a BFS by node
-count. So for every (query, context, source tool) the workflow runs the source
-tool first, counts `S` lines in its output, and reruns gfaidx with
-`--max_nodes` set to that count. That yields `gfaidx_matched_vg`,
-`gfaidx_matched_odgi`, and `gfaidx_matched_gbz` rows sitting at the same output
-scale as the tool they are matched to.
+ODGI queries require an optimized graph whose IDs are compacted to `1..N`.
+Those IDs do not match the input GFA. The workflow resolves an ODGI ID through
+the same path coordinate used to find the original graph node and records both
+IDs in `maps/resolved_loci.tsv`.
 
-The outputs are not expected to contain identical node sets — path-range
-extraction and interval-seeded BFS are different operations. The comparison is
-about time, memory, index footprint, and output scale at matched node counts.
+### ODGI and W records
 
-## Three findings that shaped the design
+ODGI does not retain W records as paths in this workflow's direct GFA import.
+The measured `w_to_p.py` preparation step creates coordinate-named P records.
+The generated W-to-P table prevents the resolver from reconstructing or
+guessing those names independently.
 
-**odgi requires `-O`, and therefore requires a node-ID mapping.** `odgi extract`
-(both `-n` and `-r`) and `odgi pathindex` all refuse a graph whose node IDs are
-not compacted:
+### VG W names
 
-```
-[odgi::extract] error: the node IDs are not compacted.
-    Please run 'odgi sort' using -O, --optimize to optimize the graph.
-error [xp]: Graph to index is not optimized. Please run 'odgi sort' using -O.
-```
+VG normally keeps a zero-start W name as `sample#haplotype#sequence` and gives a
+nonzero subrange a bracketed name such as
+`sample#haplotype#sequence[start-end]`. The resolver checks the actual VG path
+list instead of trusting the naming rule alone.
 
-Any real HPRC graph trips this. chr22 here has 2,782,249 nodes with IDs spanning
-53,303,057..56,138,482 — a range of 2,835,426, so there are gaps and the ID space
-is not compacted. `-O` renumbers to `1..N`.
+### Path-local and absolute coordinates
 
-Note the check is about *compactness*, not about starting at 1: a small test
-graph whose IDs formed a contiguous block (2891 IDs spanning exactly 2891 values,
-offset to start at 53303057) passed `extract -n` without `-O`. That is why this
-has to be verified on the real graph rather than a toy one.
+gfaidx and gbz-base queries use the absolute W coordinate namespace. VG and
+ODGI path queries use local offsets beginning at zero for each imported W/P
+record. `resolve_locus.py` performs this subtraction using the matching W
+record's `SeqStart`.
 
-The other three tools preserve the input ID space:
+### GBZ node chopping
 
-| path | node IDs |
-| --- | --- |
-| `vg convert -g -x` | preserved |
-| `vg gbwt -g` to GBZ, then `gbz-base query` | preserved |
-| `gfaidx index_gfa` | preserved |
-| `odgi build` (no `-O`) | preserved, but unusable for queries |
-| `odgi build -O` | compacted to `1..N` |
-
-So vg, gbz-base and gfaidx are queried with original node IDs, and odgi needs a
-translation. The `odgi_node_map` rule builds it the reliable way — through a
-coordinate both ID spaces agree on:
-
-```bash
-odgi position -i graph.opt.og -p 'CHM13#0#chr22:0-51324926,20000007' -v
-```
-
-That returns odgi's node at the same reference locus as the original node ID.
-`node_queries.tsv` therefore carries both `node_id` (original, for vg/gbz-base/
-gfaidx) and `odgi_ref_locus` (for odgi). The mapping is setup, and is not
-included in any query timing.
-
-Consequence for interpretation: for node queries all four tools start from the
-same *locus*, but odgi reports its own node IDs in its output. Node **counts**
-are comparable; node **identity** across odgi and the rest is not, without
-inverting the map. Region queries are unaffected, since those are specified by
-coordinates rather than IDs.
-
-**GBZ does renumber nodes by default, because it chops long segments.** The
-project notes suspected GBZ renumbers from 1, and it does — but the cause is
-segment chopping, not a deliberate relabelling. `vg gbwt` splits segments longer
-than `--max-node` (default 1024 bp), which changes the node set and renumbers the
-whole ID space:
-
-| GBZ build | nodes | node ID range |
-| --- | --- | --- |
-| `vg gbwt -g` (default, chops at 1024 bp) | 2,791,965 | 1..2,791,965 |
-| `vg gbwt --max-node 0 -g` (no chopping) | 2,782,249 | 53,303,057..56,138,482 |
-| `vg convert -g -x` (`.xg`, for reference) | 2,782,249 | 53,303,057..56,138,482 |
-
-With the default, `gbz-base query --node 53404858` fails outright:
-
-```
-Error: not found: The graph does not contain handle 106809716
-```
-
-This workflow therefore passes `--max-node 0` (set in `config.yaml` under
-`gbz.gbwt_extra`), which makes the GBZ keep the input ID space so gbz-base can be
-queried with the same node IDs as vg and gfaidx. The alternative, if a
-default-chopped GBZ is wanted, is `vg gbwt --translation FILE` to dump the
-segment-to-node table and translate query nodes through it.
-
-Note this is a deliberate deviation from stock GBZ construction, made so the
-node-seeded comparison is possible at all; it should be stated in the paper.
-
-**odgi silently drops W-line paths.** `odgi build` on a W-line GFA exits 0 and
-produces a graph with **zero paths** rather than erroring. The `w_to_p`
-conversion is therefore required for correctness, not convenience, and it is a
-measured step attributed to odgi.
-
-## Region dialects
-
-The three tools disagree about coordinates, so `region_queries.tsv` carries one
-column set per tool rather than translating:
-
-- **gbz-base** takes **absolute** contig coordinates: `--sample CHM13
-  --contig chr22 --interval 20000000..20010000`.
-- **odgi** takes **path-local** offsets appended to the full GFA path name. When
-  `w_to_p.py` produces a name like `CHM13#0#chr22:0-51324926`, the odgi
-  argument is `CHM13#0#chr22:0-51324926:20000000-20010000` — everything before
-  the final `:start-end` is the path name. odgi does not interpret the name's
-  own coordinate suffix.
-- **vg** takes path-local offsets too, but renames subrange W lines with
-  brackets: a W line starting at a nonzero offset becomes
-  `CHM13#0#chr6[31350872-31363898]`, and that bracketed form is what `-p` needs.
-  A W line starting at 0 keeps the plain name.
-
-For CHM13 chr22 the walk starts at 0, so path-local and absolute offsets
-coincide and all four dialects address the same interval. That is a property of
-this graph, not a general one. Confirm names before adding queries:
-
-```bash
-vg paths -x g.xg -L | head
-odgi paths -i g.og -L | head
-gfaidx get_region g.gfa.gz --print_path_names
-```
-
-## Adding work
-
-Append rows to the manifests; no Snakefile edit is needed. Context sweeps live
-in `config.yaml` (`node_contexts_steps`, `node_contexts_bases`). Every recorded
-command is stored verbatim in the metrics JSON and copied into the tables, and
-`results/tables/tool_versions.tsv` records the version of each tool.
+The default configuration passes `vg gbwt --max-node 0`, disabling segment
+chopping so GBZ keeps the original numeric node IDs. With default chopping, the
+node set and IDs change and node-seeded comparisons require VG's translation
+table.

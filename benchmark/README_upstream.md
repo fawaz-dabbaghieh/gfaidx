@@ -1,5 +1,8 @@
 # gfaidx / vg / odgi Benchmark
 
+> This is a historical copy of the earlier benchmark documentation. For the
+> current coordinate-first workflow, use `benchmark/README.md`.
+
 This directory contains a Snakemake workflow for benchmarking `gfaidx` against
 `vg` and `odgi` on comparable graph-indexing and subgraph-extraction tasks.
 

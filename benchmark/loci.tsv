@@ -1,0 +1,9 @@
+# One row identifies an absolute coordinate locus on a concrete GFA W record.
+# The pipeline resolves all VG/ODGI path names and both node-ID spaces.
+#
+# node_position is optional; when present it enables node-neighborhood queries.
+# region_start and region_end are optional as a pair; when present they enable
+# coordinate-region queries. One row may request both kinds of work.
+# Coordinates are zero-based absolute coordinates in the W SeqId namespace.
+graph	query_id	sample	haplotype	seq_id	node_position	region_start	region_end	notes
+hprc_v2_mc_chr1	chr1_148m_10kb	CHM13	0	chr1	148000000	148000000	148010000	CHM13 chr1 node and 10 kb interval

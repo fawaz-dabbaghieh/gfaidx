@@ -114,6 +114,22 @@ if(BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/scripts/w_to_p.py
                 ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_input.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_expected.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_expected_mapping.tsv
+    )
+
+    # Validate automatic benchmark-locus resolution without requiring VG or
+    # ODGI binaries in the unit-test environment.
+    add_test(
+        NAME benchmark_locus_resolution
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_benchmark_locus_resolution.sh
+                ${CMAKE_SOURCE_DIR}/benchmark/scripts/w_to_p.py
+                ${CMAKE_SOURCE_DIR}/benchmark/scripts/resolve_locus.py
+                ${CMAKE_SOURCE_DIR}/benchmark/scripts/parse_seed_node.py
+                ${CMAKE_SOURCE_DIR}/benchmark/scripts/collect_loci.py
+                ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_input.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/benchmark_vg_path_names.txt
+                ${CMAKE_SOURCE_DIR}/tests/data/benchmark_odgi_path_names.txt
     )
 
     # Verify terminal P-name coordinate intervals in both CDX and PDX/LNX
