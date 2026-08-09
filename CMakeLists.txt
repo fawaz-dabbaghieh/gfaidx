@@ -105,6 +105,17 @@ if(BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_expected.gfa
     )
 
+    # Keep the faster Python converter aligned with the portable AWK output and
+    # validate its stdin/stdout and malformed-input behavior.
+    add_test(
+        NAME w_to_p_python
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_w_to_p_python.sh
+                ${CMAKE_SOURCE_DIR}/scripts/w_to_p.py
+                ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_input.gfa
+                ${CMAKE_SOURCE_DIR}/tests/data/w_to_p_expected.gfa
+    )
+
     # Verify terminal P-name coordinate intervals in both CDX and PDX/LNX
     # lookup paths, including fragmented tracks and coordinate-bearing output.
     add_test(

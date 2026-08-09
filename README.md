@@ -888,7 +888,7 @@ Print a size breakdown for a `.pdx` file.
 python3 scripts/pdx_size_breakdown.py graph.pdx
 ```
 
-### `scripts/w_to_p.awk`
+### `scripts/w_to_p.py` and `scripts/w_to_p.awk`
 
 Convert GFA 1.1 `W` lines to GFA 1.0 `P` lines for tools such as ODGI,
 which imports GFA 1.0 paths but does not import `W` records. The converted path
@@ -899,15 +899,25 @@ W  GRCh38  0  chr1  1830045  1840123  ...
 P  GRCh38#0#chr1:1830045-1840123  ...
 ```
 
-The script also changes an H-line `VN:Z` tag to `VN:Z:1.0`, converts `>`/`<`
+The converters also change an H-line `VN:Z` tag to `VN:Z:1.0`, convert `>`/`<`
 walk orientations to `+`/`-`, preserves optional W tags, and passes all other
 records through unchanged. When both W coordinates are `*`, the converter uses
 `sample#haplotype#sequence` without a coordinate suffix.
 
 ```bash
+# Recommended for large chromosome-scale walks
+python3 scripts/w_to_p.py input.gfa output.gfa
+
+# Portable AWK alternative for smaller files
 awk -f scripts/w_to_p.awk input.gfa > output.gfa
 odgi build -g output.gfa -o output.og
 ```
+
+The Python converter uses a compiled bytes regular expression to find complete
+oriented steps and writes converted steps in bounded chunks. It still keeps one
+complete input W record in memory, but avoids the AWK implementation's
+character-by-character interpreted loop. Use `-` as either Python path to read
+stdin or write stdout.
 
 The `:start-end` suffix is part of the converted path name. It preserves where
 the W fragment came from. gfaidx recognizes this naming convention and uses the
