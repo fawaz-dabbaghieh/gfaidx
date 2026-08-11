@@ -17,6 +17,7 @@ and the different path-coordinate syntax used by each tool.
 - [Describe query loci](#describe-query-loci)
 - [How automatic locus resolution works](#how-automatic-locus-resolution-works)
 - [Run the workflow](#run-the-workflow)
+- [Plot the results](#plot-the-results)
 - [Outputs](#outputs)
 - [What is measured](#what-is-measured)
 - [Comparison details](#comparison-details)
@@ -251,6 +252,46 @@ snakemake --snakefile benchmark/Snakefile \
   --configfile benchmark/config.yaml --dag |
 dot -Tpng > benchmark/dag.png
 ```
+
+## Plot the results
+
+After the final TSV tables have been collected, generate summary and scaling
+plots with:
+
+```bash
+python3 benchmark/scripts/plot_results.py \
+  --results-dir benchmark/results
+```
+
+By default, the script writes PNG, PDF, and SVG figures under
+`benchmark/results/plots/`. It also accepts a directory containing copied TSV
+tables directly, rather than a complete Snakemake results tree. To request only
+PNG output or choose another destination:
+
+```bash
+python3 benchmark/scripts/plot_results.py \
+  --results-dir /path/to/results \
+  --output-dir /path/to/figures \
+  --formats png
+```
+
+The generated figures cover indexing time and memory, index components,
+interval scaling, interval output size, node-context scaling, and relative cost
+between each source tool and the corresponding gfaidx query. When interval rows
+use different start coordinates, the script connects them by interval length
+for each tool and adds a note that the trend crosses genomic loci. A nested
+interval sweep from one start coordinate remains preferable when designing new
+benchmarks. `plots.tsv` describes all generated files.
+
+`indexing_totals` and `index_size_totals` are the simple primary bar plots. They
+show one consistently colored value per tool. gfaidx time combines graph and
+coordinate indexing and its size sums every recorded gfaidx index; ODGI uses
+only `odgi build -O` and the resulting optimized `.og`. The detailed stacked
+`indexing_summary` retains the core step breakdown, while
+`indexing_summary_all_steps` is the supplementary view containing W-to-P
+preparation, both ODGI builds, and the ODGI path and step side indexes recorded
+by the workflow. `index_size_components` retains the corresponding full file
+breakdown.
 
 ## Outputs
 

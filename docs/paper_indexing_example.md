@@ -42,48 +42,48 @@ stored in `.pdx` instead of being copied into the indexed gzip.
 Save the following as `paper_example.gfa`:
 
 ```gfa
-H	VN:Z:1.1	RS:Z:REF
-S	A	AAAA
-S	B	CCC
-S	C	GGGGG
-S	D	TT
-S	E	AAAA
-S	F	CCCCC
-S	G	GG
-L	A	+	B	+	0M
-L	B	+	C	+	0M
-L	C	+	D	+	0M
-L	D	+	E	+	0M
-L	B	+	F	+	0M
-L	F	+	D	+	0M
-L	B	+	G	+	0M
-L	G	+	C	-	0M
-L	C	-	C	+	0M
-L	C	-	D	+	0M
-W	REF	0	chr1	100	118	>A>B>C>D>E
-W	HAP1	0	chr1	100	118	>A>B>F>D>E
-P	HAP2	A+,B+,G+,C-,C+,D+,E+	*
+H    VN:Z:1.1    RS:Z:REF
+S    A    AAAA
+S    B    CCC
+S    C    GGGGG
+S    D    TT
+S    E    AAAA
+S    F    CCCCC
+S    G    GG
+L    A    +    B    +    0M
+L    B    +    C    +    0M
+L    C    +    D    +    0M
+L    D    +    E    +    0M
+L    B    +    F    +    0M
+L    F    +    D    +    0M
+L    B    +    G    +    0M
+L    G    +    C    -    0M
+L    C    -    C    +    0M
+L    C    -    D    +    0M
+W    REF    0    chr1    100    118    >A>B>C>D>E
+W    HAP1    0    chr1    100    118    >A>B>F>D>E
+P    HAP2    A+,B+,G+,C-,C+,D+,E+    *
 ```
 
 The node lengths are:
 
 | Node | Sequence | Length |
-|---|---|---:|
-| A | `AAAA` | 4 |
-| B | `CCC` | 3 |
-| C | `GGGGG` | 5 |
-| D | `TT` | 2 |
-| E | `AAAA` | 4 |
-| F | `CCCCC` | 5 |
-| G | `GG` | 2 |
+| ---- | -------- | ------:|
+| A    | `AAAA`   | 4      |
+| B    | `CCC`    | 3      |
+| C    | `GGGGG`  | 5      |
+| D    | `TT`     | 2      |
+| E    | `AAAA`   | 4      |
+| F    | `CCCCC`  | 5      |
+| G    | `GG`     | 2      |
 
 The three indexed paths are:
 
-| Source record | Steps | Interpretation |
-|---|---|---|
-| `W REF 0 chr1 100 118` | `A B C D E` | Reference walk |
-| `W HAP1 0 chr1 100 118` | `A B F D E` | Replaces `C` with `F` |
-| `P HAP2` | `A B G C- C+ D E` | Inserts `G`, then traverses an inverted and forward copy of `C` |
+| Source record           | Steps             | Interpretation                                                  |
+| ----------------------- | ----------------- | --------------------------------------------------------------- |
+| `W REF 0 chr1 100 118`  | `A B C D E`       | Reference walk                                                  |
+| `W HAP1 0 chr1 100 118` | `A B F D E`       | Replaces `C` with `F`                                           |
+| `P HAP2`                | `A B G C- C+ D E` | Inserts `G`, then traverses an inverted and forward copy of `C` |
 
 All three paths begin with `A,B` and end with `D,E`. The middle of each path
 differs:
@@ -151,37 +151,37 @@ The uncompressed logical content of the members is:
 
 ```gfa
 # Member 0
-H	VN:Z:1.1	RS:Z:REF
-S	D	TT
-S	E	AAAA
-S	F	CCCCC
-L	D	+	E	+	0M
-L	F	+	D	+	0M
+H    VN:Z:1.1    RS:Z:REF
+S    D    TT
+S    E    AAAA
+S    F    CCCCC
+L    D    +    E    +    0M
+L    F    +    D    +    0M
 
 # Member 1
-S	A	AAAA
-S	B	CCC
-S	C	GGGGG
-S	G	GG
-L	A	+	B	+	0M
-L	B	+	C	+	0M
-L	B	+	G	+	0M
-L	G	+	C	-	0M
-L	C	-	C	+	0M
+S    A    AAAA
+S    B    CCC
+S    C    GGGGG
+S    G    GG
+L    A    +    B    +    0M
+L    B    +    C    +    0M
+L    B    +    G    +    0M
+L    G    +    C    -    0M
+L    C    -    C    +    0M
 
 # Member 2: shared links
-L	C	+	D	+	0M
-L	B	+	F	+	0M
-L	C	-	D	+	0M
+L    C    +    D    +    0M
+L    B    +    F    +    0M
+L    C    -    D    +    0M
 ```
 
 The `.idx` file maps each member to its compressed byte range:
 
 ```text
-#community_id	gz_offset	gz_size
-0	0	75
-1	75	74
-2	149	44
+#community_id    gz_offset    gz_size
+0    0    75
+1    75    74
+2    149    44
 ```
 
 These exact compressed sizes can change with compression settings. The
@@ -193,9 +193,7 @@ by `.pdx`.
 
 ## 4. Shared rank space: `.ndx` and `.lnx`
 
-### `.ndx`
-
-`.ndx` contains one fixed 16-byte record per node:
+### `.ndx` contains one fixed 16-byte record per node:
 
 ```text
 uint64 FNV-1a hash
@@ -209,19 +207,19 @@ array is its node rank. `.pdx`, `.lnx`, and `.cdx` use the same ranks.
 For this example:
 
 | Rank | Node | Community |
-|---:|---|---:|
-| 0 | C | 1 |
-| 1 | B | 1 |
-| 2 | A | 1 |
-| 3 | G | 1 |
-| 4 | F | 0 |
-| 5 | E | 0 |
-| 6 | D | 0 |
+| ----:| ---- | ---------:|
+| 0    | C    | 1         |
+| 1    | B    | 1         |
+| 2    | A    | 1         |
+| 3    | G    | 1         |
+| 4    | F    | 0         |
+| 5    | E    | 0         |
+| 6    | D    | 0         |
 
 The ranks do not follow the order of the `S` lines. They follow the sorted
 hash order in `.ndx`.
 
-### `.lnx`
+
 
 `.lnx` starts with a 24-byte header and then stores one rank-aligned `uint32`
 length per node. The example length array is:
@@ -239,15 +237,15 @@ gfaidx does not parse the complete array into a separate in-memory structure.
 
 The current `.pdx` is one binary file with six sections:
 
-| Section | Offset | Size | Representation |
-|---|---:|---:|---|
-| Header | 0 | 96 B | Fixed width, not compressed |
-| Path table | 96 | 384 B | 3 fixed 128-byte records, not compressed |
-| Node table | 480 | 224 B | 7 fixed 32-byte records, not compressed |
-| Step table | 704 | 68 B | **Bit-packed**, 4 bytes per step |
-| Posting table | 772 | 49 B | **Delta encoded and variable-length encoded** |
-| String blob | 821 | 64 B | Raw concatenated bytes, not compressed |
-| End of file | 885 | | |
+| Section       | Offset | Size  | Representation                                |
+| ------------- | ------:| -----:| --------------------------------------------- |
+| Header        | 0      | 96 B  | Fixed width, not compressed                   |
+| Path table    | 96     | 384 B | 3 fixed 128-byte records, not compressed      |
+| Node table    | 480    | 224 B | 7 fixed 32-byte records, not compressed       |
+| Step table    | 704    | 68 B  | **Bit-packed**, 4 bytes per step              |
+| Posting table | 772    | 49 B  | **Delta encoded and variable-length encoded** |
+| String blob   | 821    | 64 B  | Raw concatenated bytes, not compressed        |
+| End of file   | 885    |       |                                               |
 
 The `.pdx` file itself is not gzip-compressed. Compression is applied only to
 the posting table, while the step table uses fixed-width bit packing.
@@ -280,11 +278,11 @@ steps and 17 postings.
 Each path record is fixed at 128 bytes. It stores its type, string offsets,
 step range, and `P`- or `W`-specific metadata.
 
-| Path ID | Type | Internal lookup name | `step_begin` | `step_count` | Other metadata |
-|---:|---|---|---:|---:|---|
-| 0 | W | `REF\|0\|chr1\|100\|118` | 0 | 5 | sample=`REF`, hap=0, seq=`chr1`, start=100, end=118 |
-| 1 | W | `HAP1\|0\|chr1\|100\|118` | 5 | 5 | sample=`HAP1`, hap=0, seq=`chr1`, start=100, end=118 |
-| 2 | P | `HAP2` | 10 | 7 | overlap=`*`, W fields unused |
+| Path ID | Type | Internal lookup name      | `step_begin` | `step_count` | Other metadata                                       |
+| -------:| ---- | ------------------------- | ------------:| ------------:| ---------------------------------------------------- |
+| 0       | W    | `REF\|0\|chr1\|100\|118`  | 0            | 5            | sample=`REF`, hap=0, seq=`chr1`, start=100, end=118  |
+| 1       | W    | `HAP1\|0\|chr1\|100\|118` | 5            | 5            | sample=`HAP1`, hap=0, seq=`chr1`, start=100, end=118 |
+| 2       | P    | `HAP2`                    | 10           | 7            | overlap=`*`, W fields unused                         |
 
 `W` records do not contain a single path-name field in GFA. gfaidx constructs
 the internal key:
@@ -307,19 +305,19 @@ ABCDEFGREF|0|chr1|100|118REFchr1HAP1|0|chr1|100|118HAP1chr1HAP2*
 
 Selected offsets are:
 
-| Value | Offset | Length |
-|---|---:|---:|
-| node `A` | 0 | 1 |
-| node `B` | 1 | 1 |
-| node `C` | 2 | 1 |
-| `REF\|0\|chr1\|100\|118` | 7 | 18 |
-| sample `REF` | 25 | 3 |
-| sequence `chr1` | 28 | 4 |
-| `HAP1\|0\|chr1\|100\|118` | 32 | 19 |
-| sample `HAP1` | 51 | 4 |
-| second `chr1` | 55 | 4 |
-| path `HAP2` | 59 | 4 |
-| overlap `*` | 63 | 1 |
+| Value                     | Offset | Length |
+| ------------------------- | ------:| ------:|
+| node `A`                  | 0      | 1      |
+| node `B`                  | 1      | 1      |
+| node `C`                  | 2      | 1      |
+| `REF\|0\|chr1\|100\|118`  | 7      | 18     |
+| sample `REF`              | 25     | 3      |
+| sequence `chr1`           | 28     | 4      |
+| `HAP1\|0\|chr1\|100\|118` | 32     | 19     |
+| sample `HAP1`             | 51     | 4      |
+| second `chr1`             | 55     | 4      |
+| path `HAP2`               | 59     | 4      |
+| overlap `*`               | 63     | 1      |
 
 The blob avoids storing fixed-size character arrays, but it is not otherwise
 compressed or deduplicated. For example, `chr1` occurs twice.
@@ -337,11 +335,11 @@ This is fixed-width bit packing, not varint or delta encoding. It reduces the
 step record from an earlier two-field, 8-byte representation to 4 bytes while
 keeping direct random access by step rank.
 
-| Path ID | GFA steps | Node ranks | Packed values |
-|---:|---|---|---|
-| 0 | `A B C D E` | `2,1,0,6,5` | `00000002 00000001 00000000 00000006 00000005` |
-| 1 | `A B F D E` | `2,1,4,6,5` | `00000002 00000001 00000004 00000006 00000005` |
-| 2 | `A B G C- C+ D E` | `2,1,3,0,0,6,5` | `00000002 00000001 00000003 80000000 00000000 00000006 00000005` |
+| Path ID | GFA steps         | Node ranks      | Packed values                                                    |
+| -------:| ----------------- | --------------- | ---------------------------------------------------------------- |
+| 0       | `A B C D E`       | `2,1,0,6,5`     | `00000002 00000001 00000000 00000006 00000005`                   |
+| 1       | `A B F D E`       | `2,1,4,6,5`     | `00000002 00000001 00000004 00000006 00000005`                   |
+| 2       | `A B G C- C+ D E` | `2,1,3,0,0,6,5` | `00000002 00000001 00000003 80000000 00000000 00000006 00000005` |
 
 The reverse traversal of rank 0 is `0x80000000`; the forward traversal of the
 same node is `0x00000000`.
@@ -363,14 +361,14 @@ posting table. `posting_count` is the decoded number of `(path_id, step_rank)`
 occurrences.
 
 | Rank | Node | Name offset | Posting byte range | Decoded postings |
-|---:|---|---:|---|---:|
-| 0 | C | 2 | `[0,7)` | 3 |
-| 1 | B | 1 | `[7,16)` | 3 |
-| 2 | A | 0 | `[16,25)` | 3 |
-| 3 | G | 6 | `[25,28)` | 1 |
-| 4 | F | 5 | `[28,31)` | 1 |
-| 5 | E | 4 | `[31,40)` | 3 |
-| 6 | D | 3 | `[40,49)` | 3 |
+| ----:| ---- | -----------:| ------------------ | ----------------:|
+| 0    | C    | 2           | `[0,7)`            | 3                |
+| 1    | B    | 1           | `[7,16)`           | 3                |
+| 2    | A    | 0           | `[16,25)`          | 3                |
+| 3    | G    | 6           | `[25,28)`          | 1                |
+| 4    | F    | 5           | `[28,31)`          | 1                |
+| 5    | E    | 4           | `[31,40)`          | 3                |
+| 6    | D    | 3           | `[40,49)`          | 3                |
 
 This table gives node-level random access to postings. Looking up node `C`
 requires reading only bytes 0 through 6 of the posting table.
@@ -404,15 +402,15 @@ IDs are deltas.
 
 The complete posting table for this example is:
 
-| Node | Decoded `(path,step)` postings | Varint integers before byte encoding | Hex bytes |
-|---|---|---|---|
-| C | `(0,2), (2,3), (2,4)` | `0,1,2 \| 2,2,3,1` | `00 01 02 02 02 03 01` |
-| B | `(0,1), (1,1), (2,1)` | `0,1,1 \| 1,1,1 \| 1,1,1` | `00 01 01 01 01 01 01 01 01` |
-| A | `(0,0), (1,0), (2,0)` | `0,1,0 \| 1,1,0 \| 1,1,0` | `00 01 00 01 01 00 01 01 00` |
-| G | `(2,2)` | `2,1,2` | `02 01 02` |
-| F | `(1,2)` | `1,1,2` | `01 01 02` |
-| E | `(0,4), (1,4), (2,6)` | `0,1,4 \| 1,1,4 \| 1,1,6` | `00 01 04 01 01 04 01 01 06` |
-| D | `(0,3), (1,3), (2,5)` | `0,1,3 \| 1,1,3 \| 1,1,5` | `00 01 03 01 01 03 01 01 05` |
+| Node | Decoded `(path,step)` postings | Varint integers before byte encoding | Hex bytes                    |
+| ---- | ------------------------------ | ------------------------------------ | ---------------------------- |
+| C    | `(0,2), (2,3), (2,4)`          | `0,1,2 \| 2,2,3,1`                   | `00 01 02 02 02 03 01`       |
+| B    | `(0,1), (1,1), (2,1)`          | `0,1,1 \| 1,1,1 \| 1,1,1`            | `00 01 01 01 01 01 01 01 01` |
+| A    | `(0,0), (1,0), (2,0)`          | `0,1,0 \| 1,1,0 \| 1,1,0`            | `00 01 00 01 01 00 01 01 00` |
+| G    | `(2,2)`                        | `2,1,2`                              | `02 01 02`                   |
+| F    | `(1,2)`                        | `1,1,2`                              | `01 01 02`                   |
+| E    | `(0,4), (1,4), (2,6)`          | `0,1,4 \| 1,1,4 \| 1,1,6`            | `00 01 04 01 01 04 01 01 06` |
+| D    | `(0,3), (1,3), (2,5)`          | `0,1,3 \| 1,1,3 \| 1,1,5`            | `00 01 03 01 01 03 01 01 05` |
 
 Node `C` shows both delta types:
 
@@ -563,12 +561,12 @@ entry range:      5 entries
 The rank-aligned entries are:
 
 | Step | Start | End derived from next start | Node | Rank |
-|---:|---:|---:|---|---:|
-| 0 | 100 | 104 | A | 2 |
-| 1 | 104 | 107 | B | 1 |
-| 2 | 107 | 112 | C | 0 |
-| 3 | 112 | 114 | D | 6 |
-| 4 | 114 | 118, from track end | E | 5 |
+| ----:| -----:| ---------------------------:| ---- | ----:|
+| 0    | 100   | 104                         | A    | 2    |
+| 1    | 104   | 107                         | B    | 1    |
+| 2    | 107   | 112                         | C    | 0    |
+| 3    | 112   | 114                         | D    | 6    |
+| 4    | 114   | 118, from track end         | E    | 5    |
 
 The end of an entry is not stored directly. It is the next entry's start, or
 the track's `sequence_end` for the last entry.
@@ -587,10 +585,10 @@ coordinates without scanning all `S` lines in the indexed GFA.
 `--checkpoint_steps 2`, the example checkpoints are:
 
 | Path | Checkpointed cumulative lengths |
-|---|---|
-| REF | `0, 7, 14` |
-| HAP1 | `0, 7, 14` |
-| HAP2 | `0, 7, 14, 21` |
+| ---- | ------------------------------- |
+| REF  | `0, 7, 14`                      |
+| HAP1 | `0, 7, 14`                      |
+| HAP2 | `0, 7, 14, 21`                  |
 
 For example, the `HAP2` value 14 is the length before step 4:
 
@@ -626,9 +624,9 @@ gfaidx get_subgraph \
 The selected graph is:
 
 ```gfa
-S	A	AAAA
-S	B	CCC
-L	A	+	B	+	0M
+S    A    AAAA
+S    B    CCC
+L    A    +    B    +    0M
 ```
 
 ### 8.2 Find matching path runs
@@ -686,13 +684,13 @@ example uses `*`, so the assumption holds.
 The complete output is:
 
 ```gfa
-H	VN:Z:1.1	RS:Z:REF
-S	A	AAAA
-S	B	CCC
-L	A	+	B	+	0M
-W	REF	0	chr1	100	107	>A>B
-W	HAP1	0	chr1	100	107	>A>B
-P	HAP2:0-7	A+,B+	*
+H    VN:Z:1.1    RS:Z:REF
+S    A    AAAA
+S    B    CCC
+L    A    +    B    +    0M
+W    REF    0    chr1    100    107    >A>B
+W    HAP1    0    chr1    100    107    >A>B
+P    HAP2:0-7    A+,B+    *
 ```
 
 For `W`, the original `SeqId` is retained and the concrete `SeqStart/SeqEnd`
@@ -828,9 +826,9 @@ end = 4 + 17 = 21
 The emitted path records are:
 
 ```gfa
-W	REF	0	chr1	104	114	>B>C>D
-W	HAP1	0	chr1	104	114	>B>F>D
-P	HAP2:4-21	B+,G+,C-,C+,D+	*
+W    REF    0    chr1    104    114    >B>C>D
+W    HAP1    0    chr1    104    114    >B>F>D
+P    HAP2:4-21    B+,G+,C-,C+,D+    *
 ```
 
 This example shows the different roles of the path-index sections:
