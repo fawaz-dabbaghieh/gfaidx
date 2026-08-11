@@ -95,8 +95,29 @@ bool write_p_subpath_with_coords_bounded(std::ostream& out,
                                          const WalkCoordWarning& warn = WalkCoordWarning{});
 
 // Parallel extraction formats records in workers but writes them in original
-// run order. The step index is worker-local; the node-name index is immutable.
+// run order. The step index is worker-local; either node-name source below is
+// immutable for the duration of formatting.
 bool format_w_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn = WalkCoordWarning{});
+
+bool format_w_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const SelectedNodeNameLookup& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn = WalkCoordWarning{});
+
+bool format_p_subpath_with_coords_bounded(
     std::string& output,
     const PathIndexReader& step_index,
     const PathIndexReader& node_name_index,
@@ -109,7 +130,7 @@ bool format_w_subpath_with_coords_bounded(
 bool format_p_subpath_with_coords_bounded(
     std::string& output,
     const PathIndexReader& step_index,
-    const PathIndexReader& node_name_index,
+    const SelectedNodeNameLookup& node_name_index,
     std::uint32_t path_id,
     const WalkCoordState& walk_coord_state,
     std::uint64_t start_step,

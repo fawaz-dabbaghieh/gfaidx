@@ -198,8 +198,9 @@ bool build_coordinate_slice(const PathIndexReader& index,
 // Build very large coordinate-bearing records in memory and submit each one to
 // the output stream with a single write. This avoids repeated formatted-stream
 // setup for every segment while keeping one-record-at-a-time memory bounds.
+template <typename NodeNameLookup>
 void append_w_segments_from_steps(std::string& line,
-                                  const PathIndexReader& index,
+                                  const NodeNameLookup& index,
                                   const std::vector<StepRecord>& steps) {
     for (const auto& step : steps) {
         line.push_back(step.is_reverse ? '<' : '>');
@@ -207,8 +208,9 @@ void append_w_segments_from_steps(std::string& line,
     }
 }
 
+template <typename NodeNameLookup>
 void append_p_segments_from_steps(std::string& line,
-                                  const PathIndexReader& index,
+                                  const NodeNameLookup& index,
                                   const std::vector<StepRecord>& steps) {
     for (std::size_t i = 0; i < steps.size(); ++i) {
         const auto& step = steps[i];
@@ -480,10 +482,13 @@ void write_p_subpath_with_coords(std::ostream& out,
     out << '\n';
 }
 
-bool format_w_subpath_with_coords_bounded(
+// Keep coordinate validation and exact output bytes shared between the legacy
+// reader cache and extraction's non-owning selected-name lookup.
+template <typename NodeNameLookup>
+bool format_w_subpath_with_coords_bounded_impl(
     std::string& output,
     const PathIndexReader& step_index,
-    const PathIndexReader& node_name_index,
+    const NodeNameLookup& node_name_index,
     std::uint32_t path_id,
     const WalkCoordState& walk_coord_state,
     std::uint64_t start_step,
@@ -522,10 +527,11 @@ bool format_w_subpath_with_coords_bounded(
     return true;
 }
 
-bool format_p_subpath_with_coords_bounded(
+template <typename NodeNameLookup>
+bool format_p_subpath_with_coords_bounded_impl(
     std::string& output,
     const PathIndexReader& step_index,
-    const PathIndexReader& node_name_index,
+    const NodeNameLookup& node_name_index,
     std::uint32_t path_id,
     const WalkCoordState& walk_coord_state,
     std::uint64_t start_step,
@@ -555,6 +561,62 @@ bool format_p_subpath_with_coords_bounded(
     }
     output.push_back('\n');
     return true;
+}
+
+bool format_w_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn) {
+    return format_w_subpath_with_coords_bounded_impl(
+        output, step_index, node_name_index, path_id, walk_coord_state,
+        start_step, step_count, warn);
+}
+
+bool format_w_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const SelectedNodeNameLookup& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn) {
+    return format_w_subpath_with_coords_bounded_impl(
+        output, step_index, node_name_index, path_id, walk_coord_state,
+        start_step, step_count, warn);
+}
+
+bool format_p_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn) {
+    return format_p_subpath_with_coords_bounded_impl(
+        output, step_index, node_name_index, path_id, walk_coord_state,
+        start_step, step_count, warn);
+}
+
+bool format_p_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const SelectedNodeNameLookup& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn) {
+    return format_p_subpath_with_coords_bounded_impl(
+        output, step_index, node_name_index, path_id, walk_coord_state,
+        start_step, step_count, warn);
 }
 
 bool write_w_subpath_with_coords_bounded(std::ostream& out,

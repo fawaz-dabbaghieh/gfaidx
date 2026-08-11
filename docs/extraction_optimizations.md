@@ -4,7 +4,8 @@ This document records the extraction work performed on 2026-08-11 with the
 HPRC minigraph-cactus chr1 and PGGB chr22 indexes in
 `/home/user3/optimize_gfaidx`. The benchmark resource logs are retained under
 `/home/user3/optimize_gfaidx/benchmarks/<version>/`. Versions 1.9.1 through
-1.9.3 optimize serial algorithms; version 1.9.4 adds ordered parallel output.
+1.9.3 optimize serial algorithms; version 1.9.4 adds ordered parallel output;
+version 1.9.5 removes duplicate name ownership and avoidable record copies.
 
 ## Benchmark inputs
 
@@ -14,10 +15,10 @@ HPRC minigraph-cactus chr1 and PGGB chr22 indexes in
 | PGGB chr22 | `hprc2_pggb_chr22/20251014_hprc25272.p98-k311.chr22.indexed.gfa.gz` | P |
 
 The machine had 20 logical CPUs and 121 GiB RAM. Each extraction used one
-gfaidx process and GNU `time -v`. Version 1.9.4 was tested with 1, 2, 4, and 8
-P/W formatting threads. Benchmarks were run sequentially to avoid intentional
-storage contention. Filesystem cache state was not reset, so very small timing
-differences should be treated as noise.
+gfaidx process and GNU `time -v`. Versions 1.9.4 and 1.9.5 were tested with 1,
+2, 4, and 8 P/W formatting threads. Benchmarks were run sequentially to avoid
+intentional storage contention. Filesystem cache state was not reset, so very
+small timing differences should be treated as noise.
 
 ## Queries
 
@@ -83,9 +84,15 @@ to decimal GB. Each reported process exited successfully.
 | 1.9.4 | 2 | 44.74 | 66.03 | 0.781 | 73.7% faster, 88.3% less RSS |
 | 1.9.4 | 4 | 29.51 | 63.12 | 0.934 | 82.6% faster, 86.1% less RSS |
 | 1.9.4 | 8 | 22.23 | 64.35 | 1.252 | 86.9% faster, 81.3% less RSS |
+| 1.9.5 | 1 | 50.37 | 50.31 | 0.382 | 70.4% faster, 94.3% less RSS |
+| 1.9.5 | 2 | 34.43 | 48.51 | 0.680 | 79.7% faster, 89.8% less RSS |
+| 1.9.5 | 4 | 24.83 | 51.74 | 0.800 | 85.4% faster, 88.1% less RSS |
+| 1.9.5 | 8 | 18.61 | 50.44 | 1.180 | 89.1% faster, 82.4% less RSS |
 
-Version 1.9.4 with eight threads is 7.65 times faster than 1.9.0, 2.24
-times faster than 1.9.3, and 2.17 times faster than its own one-thread run.
+Version 1.9.5 with eight threads is 9.13 times faster than 1.9.0, 2.67
+times faster than 1.9.3, and 2.71 times faster than its own one-thread run.
+Against version 1.9.4 at eight threads, it is 16.3% faster and uses 5.7% less
+peak RSS.
 
 ### Other queries
 
@@ -239,6 +246,100 @@ seconds serially, so thread startup and cache preparation cannot pay back.
 | 4 | 0.46 | 0.213 | 282 | 1.30x |
 | 8 | 0.39 | 0.148 | 298 | 1.54x |
 
+## Version 1.9.5: one node-name owner and direct record handoff
+
+Graph materialization already loaded an owned string for every selected node.
+Version 1.9.4 then reread the same names from `.pdx` before parallel P/W output
+and retained a second copy in `PathIndexReader`'s frozen cache. On the PGGB
+stress query, that serial preparation took about 2.4 seconds for 2,150,883
+names and overlapped in memory with the graph membership set.
+
+Version 1.9.5 keeps the original selected-name vector as the only string owner:
+
+- graph S/L filtering uses an `unordered_set<string_view>` whose views point
+  into that stable vector;
+- the graph membership hash is released immediately after S/L output, before
+  coordinate slices and formatted P/W buffers are allocated;
+- `SelectedNodeNameLookup` maps node rank to an index in the owning vector and
+  stores no node-name bytes itself;
+- selections below 65,536 names use a sparse rank map, avoiding a graph-sized
+  allocation for small queries, while larger selections use a direct uint32
+  rank table for the hot per-step lookup; and
+- the lookup is built before workers start and is immutable during formatting,
+  preserving the version 1.9.4 thread-safety contract without shared file I/O.
+
+The stress-query lookup now takes about 0.10 seconds. The same lookup is also
+used by the one-thread path, so serial extraction avoids constructing a second
+name cache. Its normal-output wall measurement was 4.3% slower than the single
+version 1.9.4 sample, but peak RSS fell by 30.6%; filesystem cache and a 12 GB
+write make a difference of this size inconclusive without repeated trials.
+
+This version also removes an avoidable long-record copy. Formatters fill a
+caller-owned record buffer; the first record in a job swaps its allocation into
+the ordered result slot instead of being appended into a second string. Batched
+short-record jobs reuse a worker scratch buffer. Completed large slots are
+released after writing rather than retaining their capacities indefinitely.
+Finally, the ordered writer calls `notify_one` when one queue position opens;
+shutdown and failure paths retain `notify_all` because every waiter must stop.
+No index format, extraction semantics, record order, or output bytes changed.
+
+### Version 1.9.5 thread sweep: PGGB 5 kb interval
+
+| Threads | Wall (s) | P/W phase (s) | CPU use | Peak RSS (GB) | Speedup vs 1 thread | Change vs 1.9.4 |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 50.37 | 42.223 | 99% | 0.382 | 1.00x | 4.3% slower, 30.6% less RSS |
+| 2 | 34.43 | 24.274 | 140% | 0.680 | 1.46x | 23.0% faster, 12.9% less RSS |
+| 4 | 24.83 | 15.424 | 208% | 0.800 | 2.03x | 15.9% faster, 14.3% less RSS |
+| 8 | 18.61 | 8.501 | 271% | 1.180 | 2.71x | 16.3% faster, 5.7% less RSS |
+
+At eight threads the combined user and system time also fell from 64.35 to
+50.44 seconds. This is consistent with removing duplicate name reads and the
+second long-record copy rather than merely shifting work among threads.
+
+### Version 1.9.5 thread sweep: node extraction
+
+| Graph | Threads | Wall (s) | P/W phase (s) | Peak RSS (MB) | Speedup vs 1 thread |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PGGB | 1 | 4.40 | 3.423 | 259 | 1.00x |
+| PGGB | 2 | 2.72 | 1.773 | 259 | 1.62x |
+| PGGB | 4 | 1.94 | 0.897 | 259 | 2.27x |
+| PGGB | 8 | 1.51 | 0.463 | 259 | 2.91x |
+| minigraph-cactus | 1 | 0.03 | 0.008 | 113 | 1.00x |
+| minigraph-cactus | 2 | 0.05 | 0.027 | 121 | 0.60x |
+| minigraph-cactus | 4 | 0.06 | 0.021 | 123 | 0.50x |
+| minigraph-cactus | 8 requested / 5 effective | 0.04 | 0.019 | 128 | 0.75x |
+
+The PGGB node results are close to version 1.9.4; variations of 0.01 to 0.16
+seconds are small relative to graph setup and output. The 0.03-second
+minigraph-cactus serial query remains too small to benefit from worker startup.
+
+### Version 1.9.5 thread sweep: minigraph-cactus 1 Mb interval
+
+| Threads | Wall (s) | P/W phase (s) | Peak RSS (MB) | Speedup vs 1 thread |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.52 | 0.263 | 265 | 1.00x |
+| 2 | 0.56 | 0.270 | 275 | 0.93x |
+| 4 | 0.42 | 0.143 | 284 | 1.24x |
+| 8 | 0.37 | 0.097 | 301 | 1.41x |
+
+### Rejected low-risk experiments
+
+These ablations used the PGGB 5 kb query with eight threads and `/dev/null` as
+the output, so they isolate CPU and memory behavior but are not directly
+comparable to the normal-output tables above.
+
+| Build / buffer policy | Wall (s) | Peak RSS (GB) | Decision |
+| --- | ---: | ---: | --- |
+| ordinary Release, release completed buffers | 15.90 | 1.123 | retained as final design |
+| ordinary Release, retain ring buffer capacities | 14.82 | 1.688 | rejected: 50.3% more RSS for 6.8% less wall time |
+| Release LTO, release completed buffers | 17.82 | 1.242 | rejected: 12.1% slower and 10.6% more RSS |
+
+LTO was tested with CMake's supported interprocedural-optimization mechanism,
+but the measured regression means version 1.9.5 keeps the ordinary Release
+build on both Linux and macOS. Retaining every historical long-record capacity
+was also rejected; only the bounded current jobs and worker scratch buffers
+remain live.
+
 ### Linux and macOS portability
 
 The implementation uses only C++17 `std::thread`, `std::mutex`, and
@@ -270,6 +371,17 @@ Version 1.9.4 added parallel-specific validation:
 - the release and AddressSanitizer/UndefinedBehaviorSanitizer builds passed all
   seven CTest tests.
 
+Version 1.9.5 validation repeated the same checks after changing name ownership
+and worker buffer handoff:
+
+- all four PGGB interval outputs were byte-identical to `5kb_region.gfa`;
+- all four minigraph-cactus interval outputs were byte-identical to
+  `chr1_1mb.gfa`;
+- every parallel PGGB and minigraph-cactus node output matched its fresh serial
+  output; and
+- both Release and AddressSanitizer/UndefinedBehaviorSanitizer builds passed all
+  seven CTest tests.
+
 The comparisons used `cmp`, not record counts or normalized GFA output.
 ThreadSanitizer compiled, but its runtime stopped before executing the tests with
 `unexpected memory mapping` on this ARM Linux host. That is a host/runtime
@@ -277,10 +389,17 @@ limitation rather than a reported race; TSan should still be run in supported CI
 
 ## Remaining bottleneck and semantic decision
 
-At version 1.9.4 with eight threads, 13.833 s of the 22.23 s stress-test runtime
-is still coordinate calculation, formatting, and ordered output. The final GFA
-writer remains intentionally serial, as do selection and graph materialization;
-serial cache preparation and writing 12 GB now limit further thread scaling.
+At version 1.9.5 with eight threads, 8.501 s of the 18.61 s stress-test runtime
+is coordinate calculation, formatting, and ordered output. The final GFA
+writer remains intentionally serial, as do selection and graph materialization.
+Name-lookup preparation is now only 0.108 s; writing 12 GB and scanning the
+remaining coordinate steps are the dominant limits on further thread scaling.
+
+The next contained candidate is an mmap-backed or bulk-offset reader for the
+`.pdx` step table: a syscall profile of the PGGB node query observed about
+1.238 million `read` calls and 1.238 million `lseek` calls. Fusing checkpoint
+coordinate calculation with formatting remains the larger refactor and was
+intentionally deferred from this round.
 
 The best thread count depends on record size and query duration. On this
 20-logical-CPU machine, eight threads won for both substantial queries, while
