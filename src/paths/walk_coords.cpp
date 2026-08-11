@@ -195,23 +195,34 @@ bool build_coordinate_slice(const PathIndexReader& index,
     return true;
 }
 
-void write_w_segments_from_steps(std::ostream& out,
-                                 const PathIndexReader& index,
-                                 const std::vector<StepRecord>& steps) {
+// Build very large coordinate-bearing records in memory and submit each one to
+// the output stream with a single write. This avoids repeated formatted-stream
+// setup for every segment while keeping one-record-at-a-time memory bounds.
+void append_w_segments_from_steps(std::string& line,
+                                  const PathIndexReader& index,
+                                  const std::vector<StepRecord>& steps) {
     for (const auto& step : steps) {
-        out << (step.is_reverse ? '<' : '>');
-        out << index.get_node_name(step.node_id);
+        line.push_back(step.is_reverse ? '<' : '>');
+        line.append(index.get_node_name(step.node_id));
     }
 }
 
-void write_p_segments_from_steps(std::ostream& out,
-                                 const PathIndexReader& index,
-                                 const std::vector<StepRecord>& steps) {
+void append_p_segments_from_steps(std::string& line,
+                                  const PathIndexReader& index,
+                                  const std::vector<StepRecord>& steps) {
     for (std::size_t i = 0; i < steps.size(); ++i) {
         const auto& step = steps[i];
-        out << index.get_node_name(step.node_id);
-        out << (step.is_reverse ? '-' : '+');
-        if (i + 1 < steps.size()) out << ',';
+        line.append(index.get_node_name(step.node_id));
+        line.push_back(step.is_reverse ? '-' : '+');
+        if (i + 1 < steps.size()) line.push_back(',');
+    }
+}
+
+void write_buffered_record(std::ostream& out, const std::string& line) {
+    out.write(line.data(), static_cast<std::streamsize>(line.size()));
+    if (!out) {
+        throw std::runtime_error(
+            "Failed while writing coordinate-bearing P/W record");
     }
 }
 
@@ -483,13 +494,29 @@ bool write_w_subpath_with_coords_bounded(std::ostream& out,
         return false;
     }
 
-    out << "W\t" << info.sample_id << '\t' << info.hap_index << '\t'
-        << info.seq_id << '\t' << slice.start << '\t' << slice.end << '\t';
-    write_w_segments_from_steps(out, index, slice.steps);
+    // Numeric node names dominate current large indexes, so twelve bytes per
+    // step is a useful initial capacity without changing the final contents.
+    std::string line;
+    line.reserve(64 + info.sample_id.size() + info.seq_id.size() +
+                 info.tags.size() + slice.steps.size() * 12);
+    line.append("W\t");
+    line.append(info.sample_id);
+    line.push_back('\t');
+    line.append(std::to_string(info.hap_index));
+    line.push_back('\t');
+    line.append(info.seq_id);
+    line.push_back('\t');
+    line.append(std::to_string(slice.start));
+    line.push_back('\t');
+    line.append(std::to_string(slice.end));
+    line.push_back('\t');
+    append_w_segments_from_steps(line, index, slice.steps);
     if (!info.tags.empty()) {
-        out << '\t' << info.tags;
+        line.push_back('\t');
+        line.append(info.tags);
     }
-    out << '\n';
+    line.push_back('\n');
+    write_buffered_record(out, line);
     return true;
 }
 
@@ -507,15 +534,22 @@ bool write_p_subpath_with_coords_bounded(std::ostream& out,
         return false;
     }
 
-    out << "P\t"
-        << format_p_path_coordinate_name(info.name, slice.start, slice.end)
-        << '\t';
-    write_p_segments_from_steps(out, index, slice.steps);
-    out << "\t*";
+    const auto output_name =
+        format_p_path_coordinate_name(info.name, slice.start, slice.end);
+    std::string line;
+    line.reserve(8 + output_name.size() + info.tags.size() +
+                 slice.steps.size() * 12);
+    line.append("P\t");
+    line.append(output_name);
+    line.push_back('\t');
+    append_p_segments_from_steps(line, index, slice.steps);
+    line.append("\t*");
     if (!info.tags.empty()) {
-        out << '\t' << info.tags;
+        line.push_back('\t');
+        line.append(info.tags);
     }
-    out << '\n';
+    line.push_back('\n');
+    write_buffered_record(out, line);
     return true;
 }
 

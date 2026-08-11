@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -686,6 +687,15 @@ int run_get_region(const argparse::ArgumentParser& program) {
                 query_path_haplotype_nodes(path_index,
                                            ranks,
                                            exact_reference_path_runs);
+            std::cerr << get_time()
+                      << ": All-haplotype phases: postings="
+                      << std::fixed << std::setprecision(3)
+                      << selection.posting_seconds
+                      << "s, selected_steps="
+                      << selection.selected_step_seconds
+                      << "s, rank_materialization="
+                      << selection.node_rank_materialization_seconds
+                      << "s" << std::endl;
             std::cout << get_time() << ": All-haplotype path selection read "
                       << selection.posting_count << " postings across "
                       << selection.matched_path_count << " P/W records and selected "

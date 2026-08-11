@@ -147,6 +147,10 @@ constexpr std::size_t kPostingMergeFanIn = 128;
 
 constexpr std::size_t kFileCopyBufferBytes = 1ULL << 20;
 
+// Hash lookup is cheaper for small node sets; rank-addressed lookup wins once
+// coordinate output repeatedly visits a substantial number of distinct nodes.
+constexpr std::size_t kDenseNodeNamePromotionThreshold = 1ULL << 16;
+
 using detail::PostingHeapGreater;
 using detail::PostingHeapItem;
 using detail::PostingRunBuilder;
@@ -1184,18 +1188,59 @@ std::string_view PathIndexReader::get_path_name(std::uint32_t path_id) const {
     return rec.name;
 }
 
+void PathIndexReader::promote_node_name_cache() const {
+    const auto missing = std::numeric_limits<std::uint32_t>::max();
+    node_name_rank_to_dense_.assign(node_count_, missing);
+    for (auto& entry : node_name_cache_) {
+        if (dense_node_names_.size() >= missing) {
+            throw std::runtime_error("Dense node-name cache exceeds uint32 range");
+        }
+        const auto dense_id =
+            static_cast<std::uint32_t>(dense_node_names_.size());
+        node_name_rank_to_dense_[entry.first] = dense_id;
+        dense_node_names_.push_back(std::move(entry.second));
+    }
+
+    // Release both hash nodes and buckets after moving their strings. Future
+    // repeated lookups use one rank-table access and one deque access.
+    std::unordered_map<std::uint32_t, std::string>().swap(node_name_cache_);
+}
+
 std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
     if (node_id >= node_count_) {
         throw std::runtime_error("Node id out of range");
     }
+
+    if (!node_name_rank_to_dense_.empty()) {
+        auto& dense_id = node_name_rank_to_dense_[node_id];
+        const auto missing = std::numeric_limits<std::uint32_t>::max();
+        if (dense_id == missing) {
+            if (dense_node_names_.size() >= missing) {
+                throw std::runtime_error(
+                    "Dense node-name cache exceeds uint32 range");
+            }
+            dense_id = static_cast<std::uint32_t>(dense_node_names_.size());
+            // Node names are consumed repeatedly but their node metadata is
+            // not, so bypass the separate metadata hash cache on this miss.
+            dense_node_names_.push_back(copy_node_name(node_id));
+        }
+        return dense_node_names_[dense_id];
+    }
+
     const auto it = node_name_cache_.find(node_id);
     if (it != node_name_cache_.end()) {
         return it->second;
     }
 
-    const auto rec = read_node_meta(node_id);
-    auto [inserted_it, inserted] = node_name_cache_.emplace(node_id, read_string(rec.name_offset, rec.name_len));
+    // Name lookup does not need to retain NodeMeta: the owned name itself is
+    // sufficient for all later hits and avoids a second large hash table.
+    auto [inserted_it, inserted] =
+        node_name_cache_.emplace(node_id, copy_node_name(node_id));
     (void)inserted;
+    if (node_name_cache_.size() == kDenseNodeNamePromotionThreshold) {
+        promote_node_name_cache();
+        return dense_node_names_[node_name_rank_to_dense_[node_id]];
+    }
     return inserted_it->second;
 }
 

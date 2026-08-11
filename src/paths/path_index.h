@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <iosfwd>
@@ -181,6 +182,7 @@ private:
 
     [[nodiscard]] NodeMeta read_node_meta(std::uint32_t node_id) const;
     [[nodiscard]] std::string read_string(std::uint64_t offset, std::uint64_t len) const;
+    void promote_node_name_cache() const;
     void read_exact(std::uint64_t offset, void* dst, std::size_t bytes) const;
 
     std::string index_path_;
@@ -196,6 +198,12 @@ private:
     std::unordered_map<std::string, std::uint32_t> path_name_to_id_;
     mutable std::unordered_map<std::uint32_t, NodeMeta> node_meta_cache_;
     mutable std::unordered_map<std::uint32_t, std::string> node_name_cache_;
+    // Large scans promote the sparse hash cache into a rank-to-dense-name
+    // lookup. The deque keeps returned string views stable as more names are
+    // loaded, while the uint32 rank table avoids one string object per graph
+    // node and is not allocated for ordinary small queries.
+    mutable std::vector<std::uint32_t> node_name_rank_to_dense_;
+    mutable std::deque<std::string> dense_node_names_;
 };
 
 // Resolve a node set into all path runs that remain contiguous inside that set.

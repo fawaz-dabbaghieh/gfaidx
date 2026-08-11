@@ -23,6 +23,11 @@ struct PathHaplotypeQueryResult {
     // Exact coordinate-selected reference records are reported separately from
     // haplotypes that retain conservative min/max anchor bounds.
     std::uint64_t exact_reference_path_count{};
+    // Phase timings make large-query logs distinguish posting lookup, selected
+    // path-step scanning, and final dense-rank materialization.
+    double posting_seconds{};
+    double selected_step_seconds{};
+    double node_rank_materialization_seconds{};
 };
 
 // Find every indexed P/W record containing at least one reference anchor.

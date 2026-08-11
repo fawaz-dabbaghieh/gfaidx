@@ -28,6 +28,14 @@
 namespace gfaidx::chunk {
 namespace {
 
+std::string elapsed_seconds(const Timer& timer) {
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(3);
+    out << timer.elapsed() << 's';
+    return out.str();
+}
+
 struct ResolvedIndexPaths {
     std::string idx_path;
     std::string ndx_path;
@@ -513,6 +521,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
     // All-haplotype queries already selected one exact interval per matched
     // path. Generic node-set queries still derive every contiguous path run
     // from the final node membership set.
+    Timer discovery_timer;
     std::vector<paths::SubpathRun> discovered_runs;
     const std::vector<paths::SubpathRun>* runs = selected_path_runs;
     if (runs == nullptr) {
@@ -524,6 +533,9 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
             "Using " + std::to_string(runs->size()) +
             " preserved all-haplotype path intervals");
     }
+    info_get_subgraph("Subpath interval discovery finished in " +
+                      elapsed_seconds(discovery_timer) + " with " +
+                      std::to_string(runs->size()) + " intervals");
     if (runs->empty()) {
         return 0;
     }
@@ -542,6 +554,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
         }
     }
 
+    Timer coordinate_setup_timer;
     paths::WalkCoordState walk_coord_state;
     if (with_walk_coordinates && has_coordinate_run) {
         // Prefer .lnx for node lengths. If it is absent, the indexed graph
@@ -561,7 +574,10 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
                 checkpoint_index_path);
         }
     }
+    info_get_subgraph("Coordinate index setup finished in " +
+                      elapsed_seconds(coordinate_setup_timer));
 
+    Timer output_timer;
     std::uint64_t emitted = 0;
     for (const auto& run : *runs) {
         const auto info = index.get_path_info(run.path_id);
@@ -617,6 +633,8 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
                                          subpath_name);
         ++emitted;
     }
+    info_get_subgraph("P/W coordinate calculation and output finished in " +
+                      elapsed_seconds(output_timer));
     return emitted;
 }
 
@@ -673,6 +691,7 @@ int materialize_selected_subgraph(
                                  options.output_gfa);
     }
 
+    Timer graph_materialization_timer;
     info_get_subgraph("Starting subgraph materialization into " +
                       options.output_gfa);
     emit_header_if_present(out, options.input_gz, spans);
@@ -701,7 +720,8 @@ int materialize_selected_subgraph(
     }
     info_get_subgraph("Finished subgraph materialization with " +
                       std::to_string(total_stats.s_lines) + " S lines and " +
-                      std::to_string(total_stats.l_lines) + " L lines");
+                      std::to_string(total_stats.l_lines) + " L lines in " +
+                      elapsed_seconds(graph_materialization_timer));
 
     if (options.include_paths && index_paths.has_pdx) {
         info_get_subgraph("Starting indexed subpath extraction from " +

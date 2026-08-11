@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "paths/path_index.h"
+#include "utils/Timer.h"
 
 namespace gfaidx::coordinates {
 namespace {
@@ -94,9 +95,34 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
     PathHaplotypeQueryResult result;
     result.reference_node_count = unique_reference_nodes.size();
 
+    // A dense bitset bounds temporary rank memory by the graph node count.
+    // The previous append/sort/unique approach used one uint32 value per
+    // selected path step, which can be orders of magnitude larger when paths
+    // revisit nodes or conservative anchor bounds span most of a chromosome.
+    std::vector<std::uint64_t> selected_node_bits(
+        (static_cast<std::size_t>(path_index.node_count()) + 63) / 64,
+        0);
+    std::uint64_t selected_node_count = 0;
+    auto select_node_rank = [&](const std::uint32_t node_rank) {
+        if (node_rank >= path_index.node_count()) {
+            throw std::runtime_error(
+                "Selected path step has a node rank outside the .pdx node table");
+        }
+        auto& word = selected_node_bits[node_rank / 64];
+        const std::uint64_t mask = 1ULL << (node_rank % 64);
+        if ((word & mask) == 0) {
+            word |= mask;
+            ++selected_node_count;
+        }
+    };
+    for (const auto node_rank : unique_reference_nodes) {
+        select_node_rank(node_rank);
+    }
+
     // The posting table is the node-to-path inverted index. Each non-reference
     // path deliberately keeps its outermost anchor occurrences so insertions
     // and duplications between them remain part of the extracted haplotype.
+    Timer phase_timer;
     for (const auto node_rank : unique_reference_nodes) {
         if (node_rank >= path_index.node_count()) {
             throw std::runtime_error(
@@ -124,12 +150,9 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
                 ++result.posting_count;
             });
     }
+    result.posting_seconds = phase_timer.elapsed();
 
-    // Keep every reference node even if a malformed or incomplete path index
-    // has no posting for it. Under the all-nodes-covered assumption these will
-    // already occur in at least one selected path slice.
-    result.node_ranks = unique_reference_nodes;
-
+    phase_timer.reset();
     auto append_selected_run = [&](const paths::SubpathRun& run) {
         if (run.step_count >
             std::numeric_limits<std::uint64_t>::max() -
@@ -144,7 +167,7 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
             run.start_step,
             run.step_count,
             [&](const paths::StepRecord& step, std::uint64_t) {
-                result.node_ranks.push_back(step.node_id);
+                select_node_rank(step.node_id);
             });
     };
 
@@ -176,13 +199,22 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
             static_cast<std::uint64_t>(bounds.max_step) - bounds.min_step + 1,
         });
     }
+    result.selected_step_seconds = phase_timer.elapsed();
 
-    // Different haplotypes commonly share nodes, so collapse the accumulated
-    // path slices before chunk lookup and graph materialization.
-    std::sort(result.node_ranks.begin(), result.node_ranks.end());
-    result.node_ranks.erase(
-        std::unique(result.node_ranks.begin(), result.node_ranks.end()),
-        result.node_ranks.end());
+    phase_timer.reset();
+    // Enumerating the rank-addressed bitset produces the same sorted unique
+    // vector as the old sort/unique pass, without retaining every duplicate
+    // path-step occurrence in memory.
+    result.node_ranks.reserve(static_cast<std::size_t>(selected_node_count));
+    for (std::uint32_t node_rank = 0;
+         node_rank < path_index.node_count();
+         ++node_rank) {
+        if ((selected_node_bits[node_rank / 64] &
+             (1ULL << (node_rank % 64))) != 0) {
+            result.node_ranks.push_back(node_rank);
+        }
+    }
+    result.node_rank_materialization_seconds = phase_timer.elapsed();
     return result;
 }
 

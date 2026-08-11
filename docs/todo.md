@@ -43,6 +43,13 @@ Performance constraint:
 
 **Status:** deferred
 
+Serial profiling and optimization through version 1.9.3 are complete and are
+recorded in `extraction_optimizations.md`. The large PGGB stress query is now
+3.42 times faster with 91.8% lower peak RSS. Its remaining dominant phase is
+formatting and writing a semantics-required 12 GB path result. Decide whether
+to add compact local-haplotype selection before parallelizing the existing
+outermost-anchor behavior.
+
 Large `get_subgraph` and `get_region --all_haplotypes` queries currently
 perform posting decoding, selected path-step retrieval, coordinate calculation,
 and P/W formatting serially. Queries that touch tens of millions of postings
