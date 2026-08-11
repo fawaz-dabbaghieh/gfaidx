@@ -137,6 +137,10 @@ public:
     // Return one owned node name without retaining it in the reader cache.
     // Large one-pass rank materializations use this to keep memory bounded.
     [[nodiscard]] std::string copy_node_name(std::uint32_t node_id) const;
+    // Load every selected node name before workers start and then reject cache
+    // misses. Once frozen, concurrent readers only perform immutable lookups.
+    void freeze_node_name_cache_for_parallel_reads(
+        const std::vector<std::uint32_t>& node_ids) const;
     [[nodiscard]] std::string_view get_overlap_field(std::uint32_t path_id) const;
     [[nodiscard]] std::string_view get_tags(std::uint32_t path_id) const;
 
@@ -204,6 +208,7 @@ private:
     // node and is not allocated for ordinary small queries.
     mutable std::vector<std::uint32_t> node_name_rank_to_dense_;
     mutable std::deque<std::string> dense_node_names_;
+    mutable bool node_name_cache_frozen_{false};
 };
 
 // Resolve a node set into all path runs that remain contiguous inside that set.
@@ -222,6 +227,16 @@ void write_subpath_as_gfa_line(std::ostream& out,
                                std::uint64_t start_step,
                                std::uint64_t step_count,
                                std::string_view output_name);
+
+// Format one subpath into an owned buffer. The step reader belongs to one
+// worker, while node names come from a shared reader whose cache was frozen.
+std::string format_subpath_as_gfa_line(
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name);
 
 }  // namespace gfaidx::paths
 

@@ -1211,6 +1211,27 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
         throw std::runtime_error("Node id out of range");
     }
 
+    // Take only const container operations after freezing. This makes the
+    // concurrency contract explicit instead of relying on a cache hit through
+    // a mutable container's non-const overload.
+    if (node_name_cache_frozen_) {
+        if (!node_name_rank_to_dense_.empty()) {
+            const auto dense_id = node_name_rank_to_dense_[node_id];
+            if (dense_id == std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error(
+                    "Frozen node-name cache is missing a selected node");
+            }
+            return dense_node_names_[dense_id];
+        }
+        const auto& frozen_cache = node_name_cache_;
+        const auto frozen_it = frozen_cache.find(node_id);
+        if (frozen_it == frozen_cache.end()) {
+            throw std::runtime_error(
+                "Frozen node-name cache is missing a selected node");
+        }
+        return frozen_it->second;
+    }
+
     if (!node_name_rank_to_dense_.empty()) {
         auto& dense_id = node_name_rank_to_dense_[node_id];
         const auto missing = std::numeric_limits<std::uint32_t>::max();
@@ -1257,6 +1278,23 @@ std::string PathIndexReader::copy_node_name(std::uint32_t node_id) const {
         static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
     read_exact(offset, &rec, sizeof(rec));
     return read_string(rec.name_offset, rec.name_len);
+}
+
+void PathIndexReader::freeze_node_name_cache_for_parallel_reads(
+    const std::vector<std::uint32_t>& node_ids) const {
+    // Populate on the calling thread because get_node_name mutates its adaptive
+    // cache on misses. After every selected rank is present, worker threads can
+    // safely share the cache as an immutable lookup table.
+    if (!node_name_cache_frozen_) {
+        for (const auto node_id : node_ids) {
+            (void)get_node_name(node_id);
+        }
+        node_name_cache_frozen_ = true;
+        return;
+    }
+
+    // A second freeze request verifies that it is a subset of the first one.
+    for (const auto node_id : node_ids) (void)get_node_name(node_id);
 }
 
 std::string_view PathIndexReader::get_overlap_field(std::uint32_t path_id) const {
@@ -1548,6 +1586,55 @@ void write_path_as_gfa_line(std::ostream& out,
         }
     }
     out << '\n';
+}
+
+std::string format_subpath_as_gfa_line(
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name) {
+    const auto info = step_index.get_path_info(path_id);
+    const auto steps = step_index.read_steps(path_id, start_step, step_count);
+
+    // Build one complete record so the ordered writer performs one checked
+    // write and never interleaves fields from different worker threads.
+    std::string line;
+    line.reserve(64 + output_name.size() + info.tags.size() +
+                 info.overlap_field.size() + steps.size() * 12);
+    line.push_back(info.record_type);
+    line.push_back('\t');
+    if (info.record_type == 'W') {
+        line.append(info.sample_id);
+        line.push_back('\t');
+        line.append(std::to_string(info.hap_index));
+        line.push_back('\t');
+        line.append(output_name);
+        line.append("\t*\t*\t");
+        for (const auto& step : steps) {
+            line.push_back(step.is_reverse ? '<' : '>');
+            line.append(node_name_index.get_node_name(step.node_id));
+        }
+    } else {
+        line.append(output_name);
+        line.push_back('\t');
+        for (std::size_t i = 0; i < steps.size(); ++i) {
+            if (i > 0) line.push_back(',');
+            line.append(node_name_index.get_node_name(steps[i].node_id));
+            line.push_back(steps[i].is_reverse ? '-' : '+');
+        }
+        line.push_back('\t');
+        line.append(make_overlap_slice(info.overlap_field,
+                                       start_step,
+                                       step_count > 0 ? step_count - 1 : 0));
+    }
+    if (!info.tags.empty()) {
+        line.push_back('\t');
+        line.append(info.tags);
+    }
+    line.push_back('\n');
+    return line;
 }
 
 void write_subpath_as_gfa_line(std::ostream& out,

@@ -480,6 +480,83 @@ void write_p_subpath_with_coords(std::ostream& out,
     out << '\n';
 }
 
+bool format_w_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn) {
+    const auto info = step_index.get_path_info(path_id);
+    CoordinateSlice slice;
+    if (!build_coordinate_slice(step_index, info, walk_coord_state, start_step,
+                                step_count, slice, warn)) {
+        output.clear();
+        return false;
+    }
+
+    // Numeric node names dominate current large indexes, so twelve bytes per
+    // step is a useful initial capacity without changing the final contents.
+    output.clear();
+    output.reserve(64 + info.sample_id.size() + info.seq_id.size() +
+                   info.tags.size() + slice.steps.size() * 12);
+    output.append("W\t");
+    output.append(info.sample_id);
+    output.push_back('\t');
+    output.append(std::to_string(info.hap_index));
+    output.push_back('\t');
+    output.append(info.seq_id);
+    output.push_back('\t');
+    output.append(std::to_string(slice.start));
+    output.push_back('\t');
+    output.append(std::to_string(slice.end));
+    output.push_back('\t');
+    append_w_segments_from_steps(output, node_name_index, slice.steps);
+    if (!info.tags.empty()) {
+        output.push_back('\t');
+        output.append(info.tags);
+    }
+    output.push_back('\n');
+    return true;
+}
+
+bool format_p_subpath_with_coords_bounded(
+    std::string& output,
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    const WalkCoordWarning& warn) {
+    const auto info = step_index.get_path_info(path_id);
+    CoordinateSlice slice;
+    if (!build_coordinate_slice(step_index, info, walk_coord_state, start_step,
+                                step_count, slice, warn)) {
+        output.clear();
+        return false;
+    }
+
+    const auto output_name =
+        format_p_path_coordinate_name(info.name, slice.start, slice.end);
+    output.clear();
+    output.reserve(8 + output_name.size() + info.tags.size() +
+                   slice.steps.size() * 12);
+    output.append("P\t");
+    output.append(output_name);
+    output.push_back('\t');
+    append_p_segments_from_steps(output, node_name_index, slice.steps);
+    output.append("\t*");
+    if (!info.tags.empty()) {
+        output.push_back('\t');
+        output.append(info.tags);
+    }
+    output.push_back('\n');
+    return true;
+}
+
 bool write_w_subpath_with_coords_bounded(std::ostream& out,
                                          const PathIndexReader& index,
                                          std::uint32_t path_id,
@@ -487,35 +564,12 @@ bool write_w_subpath_with_coords_bounded(std::ostream& out,
                                          std::uint64_t start_step,
                                          std::uint64_t step_count,
                                          const WalkCoordWarning& warn) {
-    const auto info = index.get_path_info(path_id);
-    CoordinateSlice slice;
-    if (!build_coordinate_slice(index, info, walk_coord_state, start_step,
-                                step_count, slice, warn)) {
+    std::string line;
+    if (!format_w_subpath_with_coords_bounded(
+            line, index, index, path_id, walk_coord_state, start_step,
+            step_count, warn)) {
         return false;
     }
-
-    // Numeric node names dominate current large indexes, so twelve bytes per
-    // step is a useful initial capacity without changing the final contents.
-    std::string line;
-    line.reserve(64 + info.sample_id.size() + info.seq_id.size() +
-                 info.tags.size() + slice.steps.size() * 12);
-    line.append("W\t");
-    line.append(info.sample_id);
-    line.push_back('\t');
-    line.append(std::to_string(info.hap_index));
-    line.push_back('\t');
-    line.append(info.seq_id);
-    line.push_back('\t');
-    line.append(std::to_string(slice.start));
-    line.push_back('\t');
-    line.append(std::to_string(slice.end));
-    line.push_back('\t');
-    append_w_segments_from_steps(line, index, slice.steps);
-    if (!info.tags.empty()) {
-        line.push_back('\t');
-        line.append(info.tags);
-    }
-    line.push_back('\n');
     write_buffered_record(out, line);
     return true;
 }
@@ -527,28 +581,12 @@ bool write_p_subpath_with_coords_bounded(std::ostream& out,
                                          std::uint64_t start_step,
                                          std::uint64_t step_count,
                                          const WalkCoordWarning& warn) {
-    const auto info = index.get_path_info(path_id);
-    CoordinateSlice slice;
-    if (!build_coordinate_slice(index, info, walk_coord_state, start_step,
-                                step_count, slice, warn)) {
+    std::string line;
+    if (!format_p_subpath_with_coords_bounded(
+            line, index, index, path_id, walk_coord_state, start_step,
+            step_count, warn)) {
         return false;
     }
-
-    const auto output_name =
-        format_p_path_coordinate_name(info.name, slice.start, slice.end);
-    std::string line;
-    line.reserve(8 + output_name.size() + info.tags.size() +
-                 slice.steps.size() * 12);
-    line.append("P\t");
-    line.append(output_name);
-    line.push_back('\t');
-    append_p_segments_from_steps(line, index, slice.steps);
-    line.append("\t*");
-    if (!info.tags.empty()) {
-        line.push_back('\t');
-        line.append(info.tags);
-    }
-    line.push_back('\n');
     write_buffered_record(out, line);
     return true;
 }

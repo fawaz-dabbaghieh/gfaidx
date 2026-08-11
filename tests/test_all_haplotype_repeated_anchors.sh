@@ -87,6 +87,18 @@ EOF
     --with_coords >/dev/null
 check_output "$work_dir/from_cdx.gfa"
 
+# Interval extraction uses the same ordered worker pool. Four workers must emit
+# exactly the same S/L/P byte stream as the default one-worker path.
+"$gfaidx" get_region \
+    "$indexed_gfa" \
+    ref:1-4 \
+    "$work_dir/from_cdx_parallel.gfa" \
+    --all_haplotypes \
+    --with_coords \
+    --threads 4 >/dev/null
+cmp "$work_dir/from_cdx.gfa" "$work_dir/from_cdx_parallel.gfa"
+check_output "$work_dir/from_cdx_parallel.gfa"
+
 # The slower PDX/LNX fallback computes the same exact source run and must have
 # identical min/max haplotype behavior when no coordinate sidecar is available.
 "$gfaidx" get_region \

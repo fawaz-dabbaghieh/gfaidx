@@ -467,6 +467,11 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("maximum total seeds plus BFS nodes; not used with --all_haplotypes");
 
+    parser.add_argument("--threads")
+      .default_value(std::string("1"))
+      .nargs(1)
+      .help("number of ordered P/W formatting workers (default: 1)");
+
     parser.add_argument("--all_haplotypes").default_value(false)
       .implicit_value(true)
       .help("select the exact reference interval and anchor-supported P/W spans instead of BFS");
@@ -675,6 +680,11 @@ int run_get_region(const argparse::ArgumentParser& program) {
         // indexes by using the previous bounded path-prefix scan.
         options.pcx_path = file_exists(pcx_path.c_str()) ? pcx_path : std::string{};
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
+        options.threads = utils::parse_u32_strict(
+            program.get<std::string>("threads"),
+            "--threads",
+            1,
+            chunk::kMaxExtractionThreads);
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_coords;
         options.debug_trace = program.get<bool>("debug_trace");
