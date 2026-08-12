@@ -17,6 +17,15 @@ indexed_gfa="$work_dir/graph.gfa.gz"
     --path_names_file "$coordinate_paths" \
     --progress_every 0 >/dev/null
 
+# A two-step stride deliberately puts extracted start/end positions both on and
+# between checkpoints, providing compact boundary coverage for the fused path.
+mv "$indexed_gfa.pcx" "$work_dir/default_checkpoint_index.pcx"
+"$gfaidx" index_path_checkpoints \
+    "$indexed_gfa" \
+    "$indexed_gfa.pcx" \
+    --checkpoint_steps 2 \
+    --progress_every_paths 0 >/dev/null
+
 # Name listing is driven by the complete .pdx path table. The optional .cdx
 # only marks the selected reference path as accelerated.
 "$gfaidx" get_region "$indexed_gfa" --print_path_names \
@@ -101,6 +110,9 @@ check_output "$work_dir/from_cdx_parallel.gfa"
 
 # The slower PDX/LNX fallback computes the same exact source run and must have
 # identical min/max haplotype behavior when no coordinate sidecar is available.
+# Remove .pcx for this final query so the legacy CoordinateSlice fallback is
+# tested independently of the checkpoint-backed direct formatter above.
+mv "$indexed_gfa.pcx" "$work_dir/checkpoint_stride_2.pcx"
 "$gfaidx" get_region \
     "$indexed_gfa" \
     ref:1-4 \

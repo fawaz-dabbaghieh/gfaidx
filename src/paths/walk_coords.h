@@ -75,9 +75,9 @@ void write_p_subpath_with_coords(std::ostream& out,
                                  std::uint64_t start_step,
                                  std::uint64_t step_count);
 
-// Bounded-memory coordinate emitters used by query commands. They stream only
-// the path prefix needed to compute this subpath's coordinate range and keep
-// just the emitted slice in memory.
+// Bounded-memory coordinate emitters used by query commands. With a valid .pcx,
+// large selected intervals recover only their two coordinate boundaries and
+// stream steps directly; short intervals or missing .pcx use the slice fallback.
 bool write_w_subpath_with_coords_bounded(std::ostream& out,
                                          const PathIndexReader& index,
                                          std::uint32_t path_id,

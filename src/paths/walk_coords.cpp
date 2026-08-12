@@ -83,6 +83,13 @@ struct CoordinateSlice {
     std::vector<StepRecord> steps;
 };
 
+// The checkpoint-backed fast path needs only the two output coordinates; steps
+// are streamed directly from .pdx into the final P/W record.
+struct CoordinateInterval {
+    std::uint64_t start{};
+    std::uint64_t end{};
+};
+
 bool build_coordinate_slice(const PathIndexReader& index,
                             const PathInfo& info,
                             const WalkCoordState& walk_coord_state,
@@ -195,6 +202,129 @@ bool build_coordinate_slice(const PathIndexReader& index,
     return true;
 }
 
+// Recover one exact prefix length by starting at the nearest checkpoint and
+// scanning only the bounded remainder up to the requested step boundary.
+std::uint64_t checkpoint_prefix_at_boundary(
+    const PathIndexReader& index,
+    const PathInfo& info,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t boundary_step) {
+    std::uint64_t scan_start_step = 0;
+    std::uint64_t cumulative =
+        walk_coord_state.checkpoint_index->prefix_before_step(
+            info.path_id, boundary_step, scan_start_step);
+    if (scan_start_step > boundary_step) {
+        throw std::runtime_error("coordinate checkpoint begins after requested boundary");
+    }
+
+    // At most checkpoint_stride - 1 node lengths are read for each endpoint.
+    if (scan_start_step < boundary_step) {
+        index.for_each_step(
+            info.path_id, scan_start_step, boundary_step - scan_start_step,
+            [&](const StepRecord& step, std::uint64_t) {
+                if (step.node_id >= walk_coord_state.length_count()) {
+                    throw std::runtime_error(
+                        "path references a node outside the length table");
+                }
+                cumulative += walk_coord_state.node_length(step.node_id);
+            });
+    }
+    return cumulative;
+}
+
+// Compute coordinate endpoints independently of segment formatting. This is
+// the fused fast path: the selected steps no longer need length lookups or an
+// intermediate CoordinateSlice before they are written to the output record.
+bool build_checkpoint_coordinate_interval(
+    const PathIndexReader& index,
+    const PathInfo& info,
+    const WalkCoordState& walk_coord_state,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    CoordinateInterval& out,
+    const WalkCoordWarning& warn) {
+    if (step_count == 0 || start_step > info.step_count ||
+        step_count > info.step_count - start_step) {
+        warn_if_requested(warn, "requested subpath range is outside path '" +
+                                std::string(info.name) + "'");
+        return false;
+    }
+    if (info.record_type == 'P' &&
+        !p_path_has_no_overlaps(info.overlap_field)) {
+        warn_if_requested(
+            warn, "P-line '" + std::string(info.name) +
+                      "' has overlaps, falling back to subpath output without coordinates");
+        return false;
+    }
+    if (info.record_type == 'W' &&
+        (info.seq_start < 0 || info.seq_end < 0)) {
+        warn_if_requested(
+            warn, "W-line '" + std::string(info.name) +
+                      "' is missing SeqStart/SeqEnd, falling back to subwalk output without coordinates");
+        return false;
+    }
+    if (info.record_type == 'W' && info.seq_end < info.seq_start) {
+        warn_if_requested(
+            warn, "W-line '" + std::string(info.name) +
+                      "' has SeqEnd < SeqStart, falling back to subwalk output without coordinates");
+        return false;
+    }
+
+    out = CoordinateInterval{};
+    try {
+        // The start and exclusive end are both prefix boundaries, so neither
+        // query needs to scan the potentially very large selected interval.
+        out.start = checkpoint_prefix_at_boundary(
+            index, info, walk_coord_state, start_step);
+        out.end = checkpoint_prefix_at_boundary(
+            index, info, walk_coord_state, start_step + step_count);
+    } catch (const std::exception& err) {
+        warn_if_requested(warn, "could not compute coordinates for path '" +
+                                std::string(info.name) + "': " + err.what());
+        out = CoordinateInterval{};
+        return false;
+    }
+
+    // Preserve the original W/P coordinate bases and validation rules exactly.
+    if (info.record_type == 'W') {
+        out.start += static_cast<std::uint64_t>(info.seq_start);
+        out.end += static_cast<std::uint64_t>(info.seq_start);
+        if (out.end > static_cast<std::uint64_t>(info.seq_end)) {
+            warn_if_requested(
+                warn, "W-line '" + std::string(info.name) +
+                          "' has segment lengths beyond SeqEnd, falling back to subwalk output without coordinates");
+            out = CoordinateInterval{};
+            return false;
+        }
+    } else {
+        const auto parsed = parse_p_path_coordinate_name(info.name);
+        if (out.start > std::numeric_limits<std::uint64_t>::max() -
+                            parsed.start ||
+            out.end > std::numeric_limits<std::uint64_t>::max() -
+                          parsed.start) {
+            warn_if_requested(
+                warn,
+                "P-line '" + std::string(info.name) +
+                    "' coordinate offset overflows uint64, falling back to "
+                    "subpath output without coordinates");
+            out = CoordinateInterval{};
+            return false;
+        }
+        out.start += parsed.start;
+        out.end += parsed.start;
+        if (parsed.has_coordinates && out.end > parsed.end) {
+            warn_if_requested(
+                warn,
+                "P-line '" + std::string(info.name) +
+                    "' has segment lengths beyond its encoded end, falling "
+                    "back to subpath output without coordinates");
+            out = CoordinateInterval{};
+            return false;
+        }
+    }
+    return true;
+}
+
 // Build very large coordinate-bearing records in memory and submit each one to
 // the output stream with a single write. This avoids repeated formatted-stream
 // setup for every segment while keeping one-record-at-a-time memory bounds.
@@ -218,6 +348,43 @@ void append_p_segments_from_steps(std::string& line,
         line.push_back(step.is_reverse ? '-' : '+');
         if (i + 1 < steps.size()) line.push_back(',');
     }
+}
+
+// With endpoint coordinates already known from .pcx, stream W steps from the
+// path index directly into the final record and avoid a temporary step vector.
+template <typename NodeNameLookup>
+void append_w_segments_from_index(std::string& line,
+                                  const PathIndexReader& step_index,
+                                  const NodeNameLookup& node_name_index,
+                                  std::uint32_t path_id,
+                                  std::uint64_t start_step,
+                                  std::uint64_t step_count) {
+    step_index.for_each_step(
+        path_id, start_step, step_count,
+        [&](const StepRecord& step, std::uint64_t) {
+            line.push_back(step.is_reverse ? '<' : '>');
+            line.append(node_name_index.get_node_name(step.node_id));
+        });
+}
+
+// P records use the same direct stream, adding separators before every step
+// after the first so no trailing comma or post-processing pass is required.
+template <typename NodeNameLookup>
+void append_p_segments_from_index(std::string& line,
+                                  const PathIndexReader& step_index,
+                                  const NodeNameLookup& node_name_index,
+                                  std::uint32_t path_id,
+                                  std::uint64_t start_step,
+                                  std::uint64_t step_count) {
+    bool first = true;
+    step_index.for_each_step(
+        path_id, start_step, step_count,
+        [&](const StepRecord& step, std::uint64_t) {
+            if (!first) line.push_back(',');
+            first = false;
+            line.append(node_name_index.get_node_name(step.node_id));
+            line.push_back(step.is_reverse ? '-' : '+');
+        });
 }
 
 void write_buffered_record(std::ostream& out, const std::string& line) {
@@ -496,17 +663,41 @@ bool format_w_subpath_with_coords_bounded_impl(
     const WalkCoordWarning& warn) {
     const auto info = step_index.get_path_info(path_id);
     CoordinateSlice slice;
-    if (!build_coordinate_slice(step_index, info, walk_coord_state, start_step,
-                                step_count, slice, warn)) {
-        output.clear();
-        return false;
+    CoordinateInterval interval;
+    const auto* checkpoint_index =
+        walk_coord_state.checkpoint_index.get();
+    // Division expresses step_count >= 2 * stride without risking
+    // multiplication overflow.
+    const bool use_fused_checkpoint_path =
+        checkpoint_index != nullptr &&
+        step_count / 2 >= checkpoint_index->checkpoint_stride();
+
+    // For intervals shorter than two checkpoint strides, one slice scan has
+    // less call overhead. Larger intervals use bounded endpoint scans and avoid
+    // a node-length lookup plus temporary StepRecord for every selected step.
+    if (use_fused_checkpoint_path) {
+        if (!build_checkpoint_coordinate_interval(
+                step_index, info, walk_coord_state, start_step, step_count,
+                interval, warn)) {
+            output.clear();
+            return false;
+        }
+    } else {
+        if (!build_coordinate_slice(step_index, info, walk_coord_state,
+                                    start_step, step_count, slice, warn)) {
+            output.clear();
+            return false;
+        }
+        interval.start = slice.start;
+        interval.end = slice.end;
     }
 
     // Numeric node names dominate current large indexes, so twelve bytes per
     // step is a useful initial capacity without changing the final contents.
     output.clear();
     output.reserve(64 + info.sample_id.size() + info.seq_id.size() +
-                   info.tags.size() + slice.steps.size() * 12);
+                   info.tags.size() +
+                   static_cast<std::size_t>(step_count) * 12);
     output.append("W\t");
     output.append(info.sample_id);
     output.push_back('\t');
@@ -514,11 +705,18 @@ bool format_w_subpath_with_coords_bounded_impl(
     output.push_back('\t');
     output.append(info.seq_id);
     output.push_back('\t');
-    output.append(std::to_string(slice.start));
+    output.append(std::to_string(interval.start));
     output.push_back('\t');
-    output.append(std::to_string(slice.end));
+    output.append(std::to_string(interval.end));
     output.push_back('\t');
-    append_w_segments_from_steps(output, node_name_index, slice.steps);
+    if (use_fused_checkpoint_path) {
+        // Stream selected steps straight into the record instead of allocating
+        // a second StepRecord vector and then traversing it again.
+        append_w_segments_from_index(output, step_index, node_name_index,
+                                     path_id, start_step, step_count);
+    } else {
+        append_w_segments_from_steps(output, node_name_index, slice.steps);
+    }
     if (!info.tags.empty()) {
         output.push_back('\t');
         output.append(info.tags);
@@ -539,21 +737,50 @@ bool format_p_subpath_with_coords_bounded_impl(
     const WalkCoordWarning& warn) {
     const auto info = step_index.get_path_info(path_id);
     CoordinateSlice slice;
-    if (!build_coordinate_slice(step_index, info, walk_coord_state, start_step,
-                                step_count, slice, warn)) {
-        output.clear();
-        return false;
+    CoordinateInterval interval;
+    const auto* checkpoint_index =
+        walk_coord_state.checkpoint_index.get();
+    // Division expresses step_count >= 2 * stride without risking
+    // multiplication overflow.
+    const bool use_fused_checkpoint_path =
+        checkpoint_index != nullptr &&
+        step_count / 2 >= checkpoint_index->checkpoint_stride();
+
+    // Apply the same crossover to P records so millions of short paths retain
+    // the lower-call-overhead slice route and large paths use endpoint fusion.
+    if (use_fused_checkpoint_path) {
+        if (!build_checkpoint_coordinate_interval(
+                step_index, info, walk_coord_state, start_step, step_count,
+                interval, warn)) {
+            output.clear();
+            return false;
+        }
+    } else {
+        if (!build_coordinate_slice(step_index, info, walk_coord_state,
+                                    start_step, step_count, slice, warn)) {
+            output.clear();
+            return false;
+        }
+        interval.start = slice.start;
+        interval.end = slice.end;
     }
 
-    const auto output_name =
-        format_p_path_coordinate_name(info.name, slice.start, slice.end);
+    const auto output_name = format_p_path_coordinate_name(
+        info.name, interval.start, interval.end);
     output.clear();
     output.reserve(8 + output_name.size() + info.tags.size() +
-                   slice.steps.size() * 12);
+                   static_cast<std::size_t>(step_count) * 12);
     output.append("P\t");
     output.append(output_name);
     output.push_back('\t');
-    append_p_segments_from_steps(output, node_name_index, slice.steps);
+    if (use_fused_checkpoint_path) {
+        // Formatting directly from .pdx removes the intermediate selected-step
+        // allocation while preserving order and byte-for-byte P syntax.
+        append_p_segments_from_index(output, step_index, node_name_index,
+                                     path_id, start_step, step_count);
+    } else {
+        append_p_segments_from_steps(output, node_name_index, slice.steps);
+    }
     output.append("\t*");
     if (!info.tags.empty()) {
         output.push_back('\t');
