@@ -339,6 +339,18 @@ Important options:
   use the default BFS mode when path support is ambiguous. This mode assumes
   the graph nodes of interest are covered by indexed P/W records; graph-only
   nodes are not discovered
+- `--haplotype_gap <LIMIT>`
+  optionally replace the non-reference minimum/maximum span with ODGI-style
+  local anchor clustering. Consecutive anchor occurrences stay in one path run
+  while the intervening non-anchor sequence is at most `LIMIT` bases; the next
+  anchor starts a new run after the limit is exceeded. This can prevent distant
+  repeat hits from pulling most of a PGGB haplotype into a small query. The
+  coordinate-selected reference run always remains exact. Omitting the option
+  preserves the established conservative behavior and its lower overhead.
+  `LIMIT` accepts a bare base count or a case-insensitive `bp`, `kb`, `mb`, or
+  `gb` suffix using decimal units; for example, `10kb` is 10,000 bases and `0`
+  joins only directly adjacent anchors. The option requires
+  `--all_haplotypes` and a matching `.lnx` node-length index
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
@@ -378,6 +390,9 @@ gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
   --reference CHM13 --all_haplotypes
 
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 local_haplotypes.gfa \
+  --reference CHM13 --all_haplotypes --haplotype_gap 10kb
+
 gfaidx get_region chr22.gfa.gz --list_coordinates
 ```
 
@@ -408,15 +423,20 @@ haplotype:  B G H C
 ```
 
 The node union is still used to write the graph's `S` and `L` records. The
-preserved path intervals are used only for `P` and `W` output. Consequently,
-each matched P/W record produces one output interval, including paths whose
-selected interval is reversed relative to the reference.
+preserved path intervals are used only for `P` and `W` output. By default, each
+matched P/W record produces one output interval, including paths whose selected
+interval is reversed relative to the reference. With `--haplotype_gap`, one
+matched P/W record can instead produce several coordinate-labelled local runs.
 
 If `B` also occurs later on the reference path, the `.cdx` step range identifies
 which occurrence overlaps the requested coordinates. On another haplotype,
 all sequence between the outermost matching anchors is retained. For example,
 `B Q B X C D E` remains complete when `B` and `E` anchor the interval; gfaidx
 does not discard `Q B X` by choosing the shorter of several possible matches.
+If `--haplotype_gap 1kb` is supplied and more than 1,000 non-anchor bases lie
+between the first and second `B`, the two anchor clusters are emitted as
+separate runs. This rule depends only on distance along that haplotype; it does
+not attempt to infer a unique collinear alignment through a repeat.
 
 ### `gfaidx get_chunk`
 

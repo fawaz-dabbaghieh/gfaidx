@@ -7,7 +7,9 @@ HPRC minigraph-cactus chr1 and PGGB chr22 indexes in
 `/home/user3/optimize_gfaidx/benchmarks/<version>/`. Versions 1.9.1 through
 1.9.3 optimize serial algorithms; version 1.9.4 adds ordered parallel output;
 version 1.9.5 removes duplicate name ownership and copies; version 1.9.6 fuses
-checkpoint coordinate boundaries with direct formatting for large records.
+checkpoint coordinate boundaries with direct formatting for large records;
+version 1.9.7 adds opt-in gap-limited local haplotype intervals for repeat-rich
+graphs while leaving the established minimum/maximum behavior as the default.
 
 ## Benchmark inputs
 
@@ -18,9 +20,11 @@ checkpoint coordinate boundaries with direct formatting for large records.
 
 The machine had 20 logical CPUs and 121 GiB RAM. Each extraction used one
 gfaidx process and GNU `time -v`. Versions 1.9.4 through 1.9.6 were tested
-with 1, 2, 4, and 8 P/W formatting threads. Benchmarks were run sequentially
-to avoid intentional storage contention. Filesystem cache state was not reset,
-so very small timing differences should be treated as noise.
+with 1, 2, 4, and 8 P/W formatting threads. The version 1.9.7 gap sweep used one
+thread to isolate selection behavior; one PGGB case was repeated with eight
+threads for byte determinism. Benchmarks were run sequentially to avoid
+intentional storage contention. Filesystem cache state was not reset, so very
+small timing differences should be treated as noise.
 
 ## Queries
 
@@ -440,7 +444,87 @@ still improves 10.1%. The p- and q-arm P/W phases improve 25.5% and 30.8%.
 All three version 1.9.6 serial outputs were byte-identical to the preserved
 version 1.9.5 binary, and all eight-thread outputs matched their serial output.
 
-### Rejected low-risk experiments
+## Version 1.9.7: optional ODGI-style gap-limited intervals
+
+The conservative all-haplotype rule is useful on many graphs, especially the
+minigraph-cactus input above: each non-reference path retains every step from
+its minimum to maximum occurrence of a reference node. On repeat-rich PGGB
+graphs, however, one distant occurrence can widen a 50 kb query to most of a
+chromosome path. Version 1.9.7 adds `--haplotype_gap LIMIT` as an explicit
+alternative. Omitting the option executes the version 1.9.6 min/max path
+unchanged and does not open `.lnx` or allocate local-anchor state.
+
+The optional algorithm works as follows:
+
+- reference-node postings still identify every anchor occurrence and aggregate
+  each path's outer bounds;
+- a dense bitset over absolute packed `.pdx` steps marks anchor occurrences,
+  avoiding an occurrence-sized vector and global sort for up to 100 million
+  postings in this benchmark;
+- each matched non-reference path is scanned once between its outer anchors;
+  consecutive anchors remain in the current run while the summed `.lnx`
+  lengths of intervening non-anchor nodes are at most the requested gap;
+- after the gap is exceeded, the next anchor begins another `SubpathRun`, and
+  only nodes in the retained runs enter the materialized graph union; and
+- coordinate-selected reference runs override this process and remain exact.
+
+This is deliberately described as ODGI-style gap limiting rather than a best
+alignment or collinear-chain inference. It clusters nearby path occurrences in
+one pass and can emit a singleton-anchor run. It does not perform iterative
+graph-context expansion. Limits accept bare bases and case-insensitive decimal
+`bp`, `kb`, `mb`, and `gb` suffixes. An explicit zero joins adjacent anchors
+only; the omitted option remains semantically different.
+
+### PGGB chr22 50 kb gap sweep
+
+This test used `CHM13#0#chr22:4000000-4050000`, one formatting thread, normal
+GFA output, and the regenerated `50kb_region_time_1.9.6.gfa` as the default
+byte reference. Selection time is the sum of logged posting, selected-step,
+and rank-materialization phases. Output sizes and RSS are decimal units.
+
+| Gap policy | Wall (s) | Selection (s) | Unique nodes | Selected path steps | P records | Split paths | Output (GB) | Peak RSS (GB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| default min/max | 49.78 | 2.043 | 2,150,991 | 1,303,360,559 | 778 | 0 | 12.202 | 0.383 |
+| 1 kb | 7.40 | 4.998 | 27,428 | 135,670,699 | 12,871 | 774 | 1.223 | 0.374 |
+| 10 kb | 8.02 | 5.057 | 52,496 | 146,330,132 | 6,990 | 774 | 1.320 | 0.376 |
+| 100 kb | 8.87 | 5.925 | 167,634 | 196,093,161 | 3,814 | 708 | 1.773 | 0.378 |
+
+The 1 kb policy is 6.73 times faster than the default and writes 90.0% fewer
+bytes. The 10 kb and 100 kb samples are 6.21 and 5.61 times faster. Local
+selection itself is about 2.4-2.9 times slower because it initializes the
+anchor bitset and scans the outer path ranges with node lengths. The total
+command wins because far fewer unique graph nodes, edges, and path-step bytes
+are materialized. At 1 kb, 12,871 local P records still encode 135.7 million
+step occurrences, explaining why the 27,428-node graph remains 1.22 GB.
+
+The default version 1.9.7 output was byte-identical to both regenerated 1.9.0
+and 1.9.6 outputs. The 10 kb result was also byte-identical between one and
+eight threads; the eight-thread run took 6.34 s, but selection remained serial
+and dominated its shorter output, so the main table reports the cleaner
+one-thread sweep.
+
+### Minigraph-cactus chr1 1 Mb control
+
+The existing `chr1:36000000-37000000` CHM13 query shows why local clustering
+is optional rather than the new default.
+
+| Gap policy | Wall (s) | Selection (s) | Unique nodes | Selected path steps | W records | Split paths | Output (MB) | Peak RSS (MB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| default min/max | 0.45 | 0.162 | 42,296 | 12,752,164 | 464 | 0 | 105.008 | 257 |
+| 1 kb | 0.71 | 0.227 | 42,266 | 12,752,122 | 471 | 7 | 104.990 | 428 |
+| 10 kb | 0.67 | 0.222 | 42,296 | 12,752,164 | 464 | 0 | 105.008 | 428 |
+| 100 kb | 0.63 | 0.223 | 42,296 | 12,752,164 | 464 | 0 | 105.008 | 428 |
+
+At 10 kb and 100 kb no path is split, so both outputs are byte-identical to the
+default while wall time rises 40-49% and peak RSS rises about 171 MB. That
+memory is the graph-wide packed-step anchor bitset; PGGB's smaller selected
+records offset it in the process peak, whereas this minigraph-cactus query has
+no such saving. The 1 kb policy changes only seven paths and 42 selected steps,
+which is not enough to recover its setup cost. Users should therefore keep the
+default for graphs where outer anchors already describe local haplotypes and
+enable a gap only when repeat widening is visible.
+
+## Rejected low-risk experiments
 
 These ablations used the PGGB 5 kb query with eight threads and `/dev/null` as
 the output, so they isolate CPU and memory behavior but are not directly
@@ -459,7 +543,7 @@ build on both Linux and macOS. Retaining every historical long-record capacity
 was also rejected; only the bounded current jobs and worker scratch buffers
 remain live.
 
-### Linux and macOS portability
+## Linux and macOS portability
 
 The implementation uses only C++17 `std::thread`, `std::mutex`, and
 `std::condition_variable`. CMake resolves the platform thread support with
@@ -516,6 +600,19 @@ Version 1.9.6 validation additionally covered the adaptive coordinate path:
 - final Release and AddressSanitizer/UndefinedBehaviorSanitizer builds passed
   all seven CTest tests.
 
+Version 1.9.7 validation adds local multi-run and compatibility coverage:
+
+- the repeated-anchor fixture checks exact local P runs for zero and one-base
+  gaps, case-insensitive `bp`/`kb` parsing, invalid flag combinations, and
+  byte-identical one- versus four-thread output;
+- the default 50 kb PGGB output matches the user-provided version 1.9.6 file,
+  and those regenerated version 1.9.0 and 1.9.6 files match each other;
+- a real 10 kb-gap PGGB output is byte-identical at one and eight threads;
+- the default minigraph-cactus output matches the preserved version 1.9.6
+  binary, while its unsplit 10 kb and 100 kb outputs match the default; and
+- final Release and AddressSanitizer/UndefinedBehaviorSanitizer builds pass all
+  seven CTest tests.
+
 The comparisons used `cmp`, not record counts or normalized GFA output.
 ThreadSanitizer compiled, but its runtime stopped before executing the tests with
 `unexpected memory mapping` on this ARM Linux host. That is a host/runtime
@@ -541,13 +638,13 @@ The best thread count depends on record size and query duration. On this
 four threads already captured much of the gain with lower memory. Tiny queries
 should keep the default of one thread because startup overhead can dominate.
 
-The unexpectedly large output is caused by current `--all_haplotypes`
-semantics, not by BFS or coordinate-index lookup. For each non-reference path,
-the algorithm retains every step between the minimum and maximum occurrence of
-any queried reference node. Repeated anchors can therefore span most of a path
-even for a 5 kb reference interval.
+The unexpectedly large default output is caused by conservative
+`--all_haplotypes` semantics, not by BFS or coordinate-index lookup. For each
+non-reference path, the default retains every step between the minimum and
+maximum occurrence of any queried reference node. Repeated anchors can
+therefore span most of a path even for a 5 kb reference interval.
 
-A compact local-haplotype mode would require a deliberate semantic choice, for
-example clustering anchor occurrences or selecting a best collinear anchor
-chain. Such a mode should be opt-in until its behavior for repeats, inversions,
-and duplications is specified.
+Version 1.9.7 implements the contained anchor-clustering choice as an opt-in
+gap. A best collinear anchor chain remains a separate, substantially more
+complex semantic option: it would need explicit rules for reference order,
+orientation changes, duplicate anchors, ties, and paths with only one anchor.
