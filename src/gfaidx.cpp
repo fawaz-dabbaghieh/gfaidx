@@ -14,7 +14,9 @@
 
 int main(int argc, char** argv) {
 
-    constexpr const char* version = "1.9.7";
+    // CMake supplies the one project version used by the CLI, exported
+    // library, and Python distribution.
+    constexpr const char* version = GFAIDX_VERSION;
     std::cerr << "gfaidx version " << version << std::endl;
 
     argparse::ArgumentParser program("gfaidx", version);

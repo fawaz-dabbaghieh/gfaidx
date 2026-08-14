@@ -23,7 +23,7 @@ Main tasks:
   - [Supported platforms](#supported-platforms)
   - [C++ CLI](#c-cli)
   - [Bioconda](#bioconda)
-  - [Python helper install](#python-helper-install)
+  - [Python library install](#python-library-install)
 - [CLI](#cli)
   - [`gfaidx index_gfa`](#gfaidx-index_gfa)
   - [`gfaidx get_subgraph`](#gfaidx-get_subgraph)
@@ -40,7 +40,7 @@ Main tasks:
   - [GFA with `W` lines](#gfa-with-w-lines)
 - [How the path index works](#how-the-path-index-works)
 - [Utility scripts](#utility-scripts)
-- [Python helpers](#python-helpers)
+- [Python library](#python-library)
 - [Notes](#notes)
 - [TODO](#todo)
 
@@ -120,6 +120,10 @@ To install the executable into a prefix:
 cmake --install build --prefix /usr/local
 ```
 
+The same installation also provides the `gfaidx::gfaidx` C++ query target and
+public headers. See [`README_library.md`](README_library.md) for downstream
+`find_package(gfaidx)` setup and API examples.
+
 For a user-writable install, replace `/usr/local` with another prefix, for
 example `$HOME/.local`.
 
@@ -131,11 +135,16 @@ A Bioconda package is planned. Once the recipe is merged, installation will be:
 conda install -c bioconda gfaidx
 ```
 
-### Python helper install
+### Python library install
 
 ```bash
 pip install -e .
 ```
+
+The Python package is named `pygfaidx`, but it now binds the native query
+engine rather than using the former pure-Python prototype. See
+[`README_pygfaidx.md`](README_pygfaidx.md) for its complete API and
+[`README_library.md`](README_library.md) for C++ integration.
 
 ## CLI
 
@@ -949,27 +958,21 @@ path locally from zero, so the same converted path has ODGI offsets starting at
 `0`, not `1830045`. ODGI does not reconstruct a chromosome-wide coordinate
 system from separate W fragments.
 
-## Python helpers
+## Python library
 
-Install with:
-
-```bash
-pip install -e .
-```
-
-The helper CLI is:
-
-```bash
-pygfaidx-bfs <graph.gfa.gz> <node_id> [size] [outgfa] [--no-shared-cache]
-```
-
-It loads community chunks on demand through `.idx` and `.ndx`.
-
-The Python API exposes `ChGraph`:
+The compiled `pygfaidx` package exposes an immutable, disk-backed
+`IndexedGraph` and an owned mutable `Graph`:
 
 ```python
-from pygfaidx.chgraph import ChGraph
+import pygfaidx
+
+index = pygfaidx.IndexedGraph("graph.indexed.gfa.gz")
+graph = index.get_subgraph(["s123"], max_nodes=1000)
+graph.write_gfa("subgraph.gfa")
 ```
+
+See [`README_pygfaidx.md`](README_pygfaidx.md) for node inspection, paths,
+coordinate queries, mutation, and explicit streaming.
 
 ## Notes
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -23,6 +24,7 @@
 #include "paths/path_index.h"
 #include "utils/Timer.h"
 #include "utils/cli_helpers.h"
+#include "gfaidx/indexed_graph.hpp"
 
 namespace gfaidx::coordinates {
 namespace {
@@ -219,50 +221,6 @@ void write_available_coordinate_paths(
                 << '\n';
         }
     }
-}
-
-std::vector<paths::SubpathRun> resolve_coordinate_path_runs(
-    const paths::PathIndexReader& path_index,
-    const CoordinateQueryResult& query) {
-    std::vector<paths::SubpathRun> runs;
-    runs.reserve(query.slices.size());
-
-    for (const auto& slice : query.slices) {
-        if (slice.track.source_type == 'S') {
-            // rGFA segment tracks have a coordinate namespace but do not
-            // necessarily correspond to one indexed P/W record.
-            continue;
-        }
-
-        const auto lookup_name = slice.track.source_type == 'P'
-            ? slice.track.sequence_name
-            : coordinate_walk_key(slice.track);
-        std::uint32_t path_id = 0;
-        if (!path_index.lookup_path_id(lookup_name, path_id)) {
-            throw std::runtime_error(
-                "Coordinate P/W track does not exist in the supplied .pdx: " +
-                lookup_name);
-        }
-
-        const auto info = path_index.get_path_info(path_id);
-        if (info.record_type != slice.track.source_type ||
-            info.step_count != slice.track.entry_count ||
-            slice.start_step > info.step_count ||
-            slice.step_count > info.step_count - slice.start_step) {
-            throw std::runtime_error(
-                "Coordinate P/W track is not aligned with the supplied .pdx: " +
-                lookup_name);
-        }
-
-        // CDX entries for P/W tracks are written in original path-step order,
-        // so the binary-search offsets are already exact .pdx subpath bounds.
-        runs.push_back(paths::SubpathRun{
-            path_id,
-            slice.start_step,
-            slice.step_count,
-        });
-    }
-    return runs;
 }
 
 std::uint32_t parse_max_nodes(const std::string& value) {
@@ -647,97 +605,27 @@ int run_get_region(const argparse::ArgumentParser& program) {
             throw std::runtime_error("Path checkpoint index does not exist: " + pcx_path);
         }
 
-        paths::PathIndexReader path_index(pdx_path);
-        if (!file_exists(cdx_path.c_str()) &&
-            path_index.path_count() == 0) {
+        // Extraction is delegated to the same immutable IndexedGraph API used
+        // by C++ and Python callers. The CLI remains responsible only for
+        // parsing flags, formatting warnings, and choosing the output sink.
+        gfaidx::IndexPaths overrides;
+        overrides.idx = program.get<std::string>("idx");
+        overrides.ndx = program.get<std::string>("ndx");
+        overrides.pdx = pdx_path;
+        overrides.lnx = file_exists(lnx_path.c_str()) ? lnx_path : std::string{};
+        overrides.pcx = file_exists(pcx_path.c_str()) ? pcx_path : std::string{};
+        overrides.cdx = cdx_path;
+        gfaidx::IndexedGraph graph(input_gz, std::move(overrides));
+        if (!graph.capabilities().coordinates && graph.paths().empty()) {
             throw std::runtime_error(
                 "No coordinate index was found at " + cdx_path +
                 ", and " + pdx_path +
                 " contains no P or W records. For an rGFA, build the SR:i:0 "
                 "coordinate index with: gfaidx index_coordinates " +
-                input_gz + " " + cdx_path +
-                ". Then inspect its queryable sequences with: gfaidx "
-                "get_region " + input_gz + " --list_coordinates");
+                input_gz + " " + cdx_path);
         }
 
-        std::vector<std::uint32_t> ranks;
-        std::vector<paths::SubpathRun> exact_reference_path_runs;
-        bool used_coordinate_index = false;
-        bool coordinate_index_returned_empty = false;
-        std::string coordinate_index_error;
-        if (file_exists(cdx_path.c_str())) {
-            CoordinateIndexReader coordinate_index(cdx_path);
-            if (coordinate_index.node_count() != path_index.node_count()) {
-                throw std::runtime_error(".cdx and .pdx node counts differ; rebuild them against the same .ndx");
-            }
-            try {
-                auto query = coordinate_index.query_region(reference,
-                                                            region.sequence,
-                                                            region.begin,
-                                                            region.end);
-                std::vector<paths::SubpathRun> query_reference_runs;
-                if (all_haplotypes) {
-                    query_reference_runs =
-                        resolve_coordinate_path_runs(path_index, query);
-                }
-
-                // Publish the query state only after P/W-to-PDX validation has
-                // also succeeded, so a mismatched sidecar cannot leave a
-                // partially usable rank result behind.
-                ranks = std::move(query.node_ranks);
-                exact_reference_path_runs = std::move(query_reference_runs);
-                used_coordinate_index = !ranks.empty();
-                coordinate_index_returned_empty = ranks.empty();
-            } catch (const std::exception& err) {
-                coordinate_index_error = err.what();
-            }
-        }
-
-        if (ranks.empty()) {
-            try {
-                const auto fallback = query_path_coordinates_on_the_fly(path_index,
-                                                                        file_exists(lnx_path.c_str()) ? lnx_path : std::string{},
-                                                                        reference,
-                                                                        region.sequence,
-                                                                        region.begin,
-                                                                        region.end);
-                ranks = fallback.node_ranks;
-                exact_reference_path_runs = fallback.reference_path_runs;
-                std::cout << "On-the-fly path coordinate query selected "
-                          << ranks.size() << " seed nodes from "
-                          << fallback.matched_path_count << " indexed P/W records" << std::endl;
-            } catch (const std::exception& err) {
-                if (coordinate_index_returned_empty) {
-                    throw std::runtime_error("No reference nodes overlap the requested coordinate interval");
-                }
-                if (!coordinate_index_error.empty()) {
-                    throw std::runtime_error(std::string(err.what()) +
-                                             "; .cdx lookup also failed: " +
-                                             coordinate_index_error);
-                }
-                throw;
-            }
-        }
-
-        if (used_coordinate_index) {
-            std::cout << get_time() << ": Coordinate query selected " << ranks.size()
-                      << " reference seed nodes" << std::endl;
-        }
-
-        // Both selection modes share the same index overrides and output
-        // controls. Only the node-selection strategy changes below.
-        chunk::SubgraphExtractionOptions options;
-        options.input_gz = input_gz;
-        options.output_gfa = output_gfa;
-        options.idx_path = program.get<std::string>("idx");
-        options.ndx_path = program.get<std::string>("ndx");
-        options.pdx_path = pdx_path;
-        // Empty means "fall back to the old S-line scan" inside the shared
-        // subgraph extractor. Explicit missing --lnx is rejected above.
-        options.lnx_path = file_exists(lnx_path.c_str()) ? lnx_path : std::string{};
-        // Missing inferred .pcx files preserve compatibility with existing
-        // indexes by using the previous bounded path-prefix scan.
-        options.pcx_path = file_exists(pcx_path.c_str()) ? pcx_path : std::string{};
+        gfaidx::RegionOptions options;
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
         options.threads = utils::parse_u32_strict(
             program.get<std::string>("threads"),
@@ -745,78 +633,37 @@ int run_get_region(const argparse::ArgumentParser& program) {
             1,
             chunk::kMaxExtractionThreads);
         options.include_paths = !no_paths;
-        options.with_walk_coordinates = with_coords;
-        options.debug_trace = program.get<bool>("debug_trace");
+        options.include_coordinates = with_coords;
+        options.mode = all_haplotypes
+            ? gfaidx::RegionMode::all_haplotypes
+            : gfaidx::RegionMode::bfs;
+        options.haplotype_gap = haplotype_gap_bases;
 
-        if (all_haplotypes) {
-            // Omitted gap limits preserve the original min/max implementation
-            // without constructing a length reader or local-anchor bitset.
-            PathHaplotypeQueryOptions query_options;
-            std::unique_ptr<indexer::NodeLengthIndexReader> gap_node_lengths;
-            if (haplotype_gap_bases.has_value()) {
-                gap_node_lengths =
-                    std::make_unique<indexer::NodeLengthIndexReader>(lnx_path);
-                query_options.max_gap_bases = haplotype_gap_bases;
-                query_options.node_lengths = gap_node_lengths.get();
-            }
-
-            // Use .pdx postings as an inverted index from reference anchors to
-            // their path occurrences. The coordinate source stays exact;
-            // optional gap clustering splits distant non-reference repeats.
-            const auto selection =
-                query_path_haplotype_nodes(path_index,
-                                           ranks,
-                                           exact_reference_path_runs,
-                                           query_options);
-            std::cerr << get_time()
-                      << ": All-haplotype phases: postings="
-                      << std::fixed << std::setprecision(3)
-                      << selection.posting_seconds
-                      << "s, selected_steps="
-                      << selection.selected_step_seconds
-                      << "s, rank_materialization="
-                      << selection.node_rank_materialization_seconds
-                      << "s" << std::endl;
-            std::cout << get_time() << ": All-haplotype path selection read "
-                      << selection.posting_count << " postings across "
-                      << selection.matched_path_count << " P/W records and selected "
-                      << selection.node_ranks.size() << " unique nodes from "
-                      << selection.selected_path_step_count << " path steps"
-                      << std::endl;
-            // Local-mode diagnostics are useful even if a future coordinate
-            // source cannot identify an exact P/W run for separate reporting.
-            if (haplotype_gap_bases.has_value()) {
-                std::cout << get_time()
-                          << ": Local all-haplotype interval resolution used a "
-                          << *haplotype_gap_bases
-                          << " bp maximum gap and emitted "
-                          << selection.local_non_reference_run_count
-                          << " non-reference interval(s); "
-                          << selection.local_split_path_count
-                          << " path(s) were split, while "
-                          << selection.exact_reference_path_count
-                          << " coordinate path(s) remained exact" << std::endl;
-            } else if (selection.exact_reference_path_count > 0) {
-                std::cout << get_time() << ": All-haplotype interval resolution preserved "
-                          << selection.exact_reference_path_count
-                          << " exact coordinate path(s); other paths retained "
-                          << "their minimum/maximum anchor bounds" << std::endl;
-            }
-            return chunk::extract_subgraph_from_node_ranks(
-                options,
-                selection.node_ranks,
-                selection.path_runs,
-                path_index);
+        std::ofstream out(output_gfa);
+        if (!out) {
+            throw std::runtime_error(
+                "Failed to open output GFA file for writing: " + output_gfa);
         }
-
-        // BFS still uses original node-name strings. Convert only the reference
-        // seed ranks selected by the coordinate query.
-        std::vector<std::string> seed_nodes;
-        seed_nodes.reserve(ranks.size());
-        for (const auto rank : ranks) {
-            seed_nodes.emplace_back(path_index.get_node_name(rank));
+        gfaidx::QueryCallbacks callbacks;
+        callbacks.warning = [](std::string_view message) {
+            std::cerr << get_time() << ": Warning: " << message << std::endl;
+        };
+        graph.stream_region(
+            reference,
+            region.sequence,
+            region.begin,
+            region.end,
+            [&](std::string_view line) {
+                out << line << '\n';
+                return static_cast<bool>(out);
+            },
+            options,
+            callbacks);
+        if (!out) {
+            throw std::runtime_error(
+                "Failed while writing output GFA: " + output_gfa);
         }
-        return chunk::extract_subgraph_from_seeds(options, seed_nodes);
+        return 0;
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         return 1;

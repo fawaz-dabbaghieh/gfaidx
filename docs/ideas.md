@@ -879,11 +879,13 @@ If a future Codex session needs a fast recap:
   - expanded graph context for visualization
 
 
-## Future C++ Library And Language Bindings
+## C++ Library And Language Bindings
 
-> **Status: proposed.** The current code contains reusable index readers and
-> query algorithms, but only the command-line executable is built and
-> installed.
+> **Status: implemented in version 2.0.** The final API uses an immutable
+> `IndexedGraph` and returns an owned mutable `Graph`, with explicit
+> streaming as the large-result alternative. The design discussion below is
+> retained as history; the canonical interfaces and examples are documented in
+> `README_library.md` and `README_pygfaidx.md`.
 
 ### Goal
 
