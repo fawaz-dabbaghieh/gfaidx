@@ -11,6 +11,10 @@
 
 namespace gfaidx::chunk {
 
+// Prevent accidental creation of an extreme number of OS threads while still
+// allowing deliberate oversubscription on large servers.
+inline constexpr std::uint32_t kMaxExtractionThreads = 256;
+
 // Shared extraction options used by the node and coordinate query commands.
 struct SubgraphExtractionOptions {
     std::string input_gz;
@@ -21,6 +25,9 @@ struct SubgraphExtractionOptions {
     std::string lnx_path;
     std::string pcx_path;
     std::uint32_t max_nodes{};
+    // P/W formatting is the CPU-heavy extraction phase. One worker preserves
+    // the historical serial behavior; larger values use ordered parallelism.
+    std::uint32_t threads{1};
     bool include_paths{true};
     bool with_walk_coordinates{false};
     bool debug_trace{false};

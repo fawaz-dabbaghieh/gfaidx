@@ -1,18 +1,23 @@
 #include "chunk/get_subgraph_command.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "chunk/chunk_reader.h"
@@ -27,6 +32,14 @@
 
 namespace gfaidx::chunk {
 namespace {
+
+std::string elapsed_seconds(const Timer& timer) {
+    std::ostringstream out;
+    out.setf(std::ios::fixed);
+    out.precision(3);
+    out << timer.elapsed() << 's';
+    return out.str();
+}
 
 struct ResolvedIndexPaths {
     std::string idx_path;
@@ -448,7 +461,7 @@ void emit_header_if_present(std::ostream& out,
 EmissionStats emit_filtered_member(std::ostream& out,
                                    const std::string& gz_path,
                                    const CommunitySpan& span,
-                                   const std::unordered_set<std::string>& node_set) {
+                                   const std::unordered_set<std::string_view>& node_set) {
     EmissionStats stats{};
     if (span.gz_size == 0) return stats;
 
@@ -482,7 +495,8 @@ EmissionStats emit_filtered_member(std::ostream& out,
 }
 
 // Convert only the final selected node names to .ndx ranks when path extraction
-// needs the rank-aligned .pdx. Graph-only queries never call this helper.
+// needs the rank-aligned .pdx. Preserve name order so each rank remains paired
+// with the already-owned string used by the extraction name lookup.
 std::vector<std::uint32_t> resolve_selected_node_ranks(
     const indexer::NodeHashIndex& node_index,
     const std::vector<std::string>& node_names) {
@@ -495,24 +509,287 @@ std::vector<std::uint32_t> resolve_selected_node_ranks(
         }
         node_ids.push_back(rank);
     }
-    std::sort(node_ids.begin(), node_ids.end());
     return node_ids;
+}
+
+// Very short subpaths are common in node queries. Grouping them into bounded
+// jobs avoids one mutex/condition-variable round trip per tiny P/W record,
+// while a chromosome-scale record remains a job by itself.
+struct SubpathFormattingJob {
+    std::size_t begin_run{};
+    std::size_t end_run{};
+};
+
+std::vector<SubpathFormattingJob> build_subpath_formatting_jobs(
+    const std::vector<paths::SubpathRun>& runs) {
+    constexpr std::uint64_t kTargetStepsPerJob = 1ULL << 16;
+    constexpr std::size_t kMaxRunsPerJob = 1ULL << 12;
+    std::vector<SubpathFormattingJob> jobs;
+    jobs.reserve(std::min<std::size_t>(runs.size(), kMaxRunsPerJob));
+
+    std::size_t begin_run = 0;
+    std::uint64_t job_steps = 0;
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        const bool run_limit_reached = i - begin_run >= kMaxRunsPerJob;
+        const bool step_limit_reached =
+            job_steps > 0 &&
+            (job_steps >= kTargetStepsPerJob ||
+             runs[i].step_count > kTargetStepsPerJob - job_steps);
+        if (run_limit_reached || step_limit_reached) {
+            jobs.push_back(SubpathFormattingJob{begin_run, i});
+            begin_run = i;
+            job_steps = 0;
+        }
+
+        // Once a single run exceeds the target, it is flushed before the next
+        // run; no uint64 addition is attempted above unless it is safe.
+        job_steps += runs[i].step_count;
+    }
+    if (begin_run < runs.size()) {
+        jobs.push_back(SubpathFormattingJob{begin_run, runs.size()});
+    }
+    return jobs;
+}
+
+// One slot holds one completed job until the main thread writes that exact
+// job number. A ring with one slot per worker bounds large record buffers.
+struct FormattedSubpathSlot {
+    std::size_t sequence{std::numeric_limits<std::size_t>::max()};
+    bool ready{false};
+    std::string line;
+    std::vector<std::string> warnings;
+    std::exception_ptr error;
+};
+
+// Format one run without touching the shared output stream. Warnings are
+// returned with the record so the writer can print them deterministically. The
+// caller-owned buffer is reused across runs and jobs.
+void format_subpath_record(
+    std::string& line,
+    const paths::PathIndexReader& step_index,
+    const paths::SelectedNodeNameLookup& node_name_index,
+    const paths::SubpathRun& run,
+    const paths::WalkCoordState& walk_coord_state,
+    bool with_walk_coordinates,
+    std::vector<std::string>& warnings) {
+    const auto info = step_index.get_path_info(run.path_id);
+    if (run.step_count == 0 || run.start_step > info.step_count ||
+        run.step_count > info.step_count - run.start_step) {
+        throw std::runtime_error(
+            "Selected path interval is outside path '" +
+            std::string(info.name) + "'");
+    }
+
+    const auto base_name =
+        (info.record_type == 'W') ? info.seq_id : info.name;
+    const std::string subpath_name =
+        std::string(base_name) + "#subpath_" +
+        std::to_string(run.start_step) + "_" +
+        std::to_string(run.start_step + run.step_count - 1);
+    const auto capture_warning = [&warnings](const std::string& message) {
+        warnings.push_back(message);
+    };
+
+    line.clear();
+    if (with_walk_coordinates && walk_coord_state.usable &&
+        (info.record_type == 'W' || info.record_type == 'P')) {
+        const bool formatted = info.record_type == 'W'
+            ? paths::format_w_subpath_with_coords_bounded(
+                  line, step_index, node_name_index, run.path_id,
+                  walk_coord_state, run.start_step, run.step_count,
+                  capture_warning)
+            : paths::format_p_subpath_with_coords_bounded(
+                  line, step_index, node_name_index, run.path_id,
+                  walk_coord_state, run.start_step, run.step_count,
+                  capture_warning);
+        if (formatted) return;
+    }
+
+    line = paths::format_subpath_as_gfa_line(
+        step_index, node_name_index, run.path_id, run.start_step,
+        run.step_count, subpath_name);
+}
+
+// Use persistent worker-local readers for independent seeks into the packed
+// step table. All workers share the immutable selected-name lookup, which has
+// no file stream or mutable cache state.
+std::uint64_t emit_subpaths_in_parallel(
+    std::ostream& out,
+    const std::string& path_index_path,
+    const paths::SelectedNodeNameLookup& node_name_lookup,
+    const std::vector<paths::SubpathRun>& runs,
+    const paths::WalkCoordState& walk_coord_state,
+    bool with_walk_coordinates,
+    std::uint32_t requested_threads) {
+    const auto jobs = build_subpath_formatting_jobs(runs);
+    const std::size_t worker_count = std::min<std::size_t>(
+        requested_threads, jobs.size());
+
+    info_get_subgraph(
+        "Using " + std::to_string(worker_count) +
+        " P/W formatting threads with at most " +
+        std::to_string(worker_count) + " buffered jobs (" +
+        std::to_string(jobs.size()) + " jobs for " +
+        std::to_string(runs.size()) + " records)");
+
+    std::vector<FormattedSubpathSlot> slots(worker_count);
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    std::mutex state_mutex;
+    std::condition_variable work_available;
+    std::condition_variable result_available;
+    std::size_t next_job = 0;
+    std::size_t next_output = 0;
+    bool stop = false;
+    std::exception_ptr startup_error;
+
+    // This cleanup path is used for normal completion, formatting errors, and
+    // output failures, so no joinable std::thread can escape the function.
+    const auto stop_and_join = [&]() {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            stop = true;
+        }
+        work_available.notify_all();
+        result_available.notify_all();
+        for (auto& worker : workers) {
+            if (worker.joinable()) worker.join();
+        }
+    };
+
+    try {
+        for (std::size_t worker_number = 0;
+             worker_number < worker_count; ++worker_number) {
+            workers.emplace_back([&]() {
+                try {
+                    // An independent file stream is required because seekg and
+                    // read mutate stream state even through const reader APIs.
+                    paths::PathIndexReader step_index(path_index_path);
+                    // Short-record jobs reuse this scratch string; long-record
+                    // jobs hand its allocation directly to the output slot.
+                    std::string record_buffer;
+                    while (true) {
+                        std::size_t sequence = 0;
+                        {
+                            std::unique_lock<std::mutex> lock(state_mutex);
+                            work_available.wait(lock, [&]() {
+                                return stop || next_job >= jobs.size() ||
+                                       next_job < next_output + slots.size();
+                            });
+                            if (stop || next_job >= jobs.size()) return;
+                            sequence = next_job++;
+                        }
+
+                        FormattedSubpathSlot result;
+                        result.sequence = sequence;
+                        try {
+                            const auto& job = jobs[sequence];
+                            for (std::size_t run_index = job.begin_run;
+                                 run_index < job.end_run; ++run_index) {
+                                format_subpath_record(
+                                    record_buffer, step_index,
+                                    node_name_lookup, runs[run_index],
+                                    walk_coord_state, with_walk_coordinates,
+                                    result.warnings);
+                                if (result.line.empty()) {
+                                    result.line.swap(record_buffer);
+                                } else {
+                                    result.line.append(record_buffer);
+                                }
+                            }
+                        } catch (...) {
+                            result.error = std::current_exception();
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(state_mutex);
+                            if (stop) return;
+                            auto& slot = slots[sequence % slots.size()];
+                            slot = std::move(result);
+                            slot.ready = true;
+                            if (slot.error) {
+                                result_available.notify_one();
+                                return;
+                            }
+                        }
+                        result_available.notify_one();
+                    }
+                } catch (...) {
+                    // Reader construction failures have no sequence number;
+                    // wake the writer immediately and preserve the exception.
+                    {
+                        std::lock_guard<std::mutex> lock(state_mutex);
+                        if (!startup_error) startup_error = std::current_exception();
+                        stop = true;
+                    }
+                    work_available.notify_all();
+                    result_available.notify_all();
+                }
+            });
+        }
+
+        while (next_output < jobs.size()) {
+            FormattedSubpathSlot* slot = nullptr;
+            {
+                std::unique_lock<std::mutex> lock(state_mutex);
+                result_available.wait(lock, [&]() {
+                    const auto& candidate = slots[next_output % slots.size()];
+                    return startup_error ||
+                           (candidate.ready &&
+                            candidate.sequence == next_output);
+                });
+                if (startup_error) std::rethrow_exception(startup_error);
+                slot = &slots[next_output % slots.size()];
+            }
+
+            // The ring window prevents this slot from being reused until
+            // next_output advances, so it is safe to write without the mutex.
+            if (slot->error) std::rethrow_exception(slot->error);
+            for (const auto& warning : slot->warnings) {
+                warn_get_subgraph(warning);
+            }
+            out.write(slot->line.data(),
+                      static_cast<std::streamsize>(slot->line.size()));
+            if (!out) {
+                throw std::runtime_error(
+                    "Failed while writing parallel P/W record");
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                *slot = FormattedSubpathSlot{};
+                ++next_output;
+            }
+            // Exactly one new job enters the bounded window per consumed slot.
+            work_available.notify_one();
+        }
+    } catch (...) {
+        stop_and_join();
+        throw;
+    }
+
+    stop_and_join();
+    return static_cast<std::uint64_t>(runs.size());
 }
 
 // Append indexed P/W subpaths for the extracted node set when a companion
 // .pdx exists. This keeps graph extraction and path extraction in one command.
 std::uint64_t emit_subpaths_if_available(std::ostream& out,
                                          const paths::PathIndexReader& index,
+                                         const std::string& path_index_path,
                                          const std::vector<std::uint32_t>& node_ids,
+                                         const std::vector<std::string>& node_names,
                                          const std::vector<paths::SubpathRun>* selected_path_runs,
                                          const indexer::NodeHashIndex& node_index,
                                          const std::string& source_gfa,
                                          const std::string& length_index_path,
                                          const std::string& checkpoint_index_path,
-                                         bool with_walk_coordinates) {
+                                         bool with_walk_coordinates,
+                                         std::uint32_t threads) {
     // All-haplotype queries already selected one exact interval per matched
     // path. Generic node-set queries still derive every contiguous path run
     // from the final node membership set.
+    Timer discovery_timer;
     std::vector<paths::SubpathRun> discovered_runs;
     const std::vector<paths::SubpathRun>* runs = selected_path_runs;
     if (runs == nullptr) {
@@ -524,6 +801,9 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
             "Using " + std::to_string(runs->size()) +
             " preserved all-haplotype path intervals");
     }
+    info_get_subgraph("Subpath interval discovery finished in " +
+                      elapsed_seconds(discovery_timer) + " with " +
+                      std::to_string(runs->size()) + " intervals");
     if (runs->empty()) {
         return 0;
     }
@@ -542,6 +822,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
         }
     }
 
+    Timer coordinate_setup_timer;
     paths::WalkCoordState walk_coord_state;
     if (with_walk_coordinates && has_coordinate_run) {
         // Prefer .lnx for node lengths. If it is absent, the indexed graph
@@ -561,62 +842,46 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
                 checkpoint_index_path);
         }
     }
+    info_get_subgraph("Coordinate index setup finished in " +
+                      elapsed_seconds(coordinate_setup_timer));
+
+    Timer output_timer;
+    Timer name_lookup_timer;
+    paths::SelectedNodeNameLookup node_name_lookup(
+        index.node_count(), node_ids, node_names);
+    info_get_subgraph(
+        "Prepared shared selected-node name lookup in " +
+        elapsed_seconds(name_lookup_timer));
+
+    if (threads > 1 && runs->size() > 1) {
+        const auto emitted = emit_subpaths_in_parallel(
+            out, path_index_path, node_name_lookup, *runs, walk_coord_state,
+            with_walk_coordinates, threads);
+        info_get_subgraph("P/W coordinate calculation and output finished in " +
+                          elapsed_seconds(output_timer));
+        return emitted;
+    }
 
     std::uint64_t emitted = 0;
+    std::string line;
+    std::vector<std::string> warnings;
     for (const auto& run : *runs) {
-        const auto info = index.get_path_info(run.path_id);
-        if (run.step_count == 0 ||
-            run.start_step > info.step_count ||
-            run.step_count > info.step_count - run.start_step) {
+        warnings.clear();
+        format_subpath_record(
+            line, index, node_name_lookup, run, walk_coord_state,
+            with_walk_coordinates, warnings);
+        for (const auto& warning : warnings) {
+            warn_get_subgraph(warning);
+        }
+        out.write(line.data(), static_cast<std::streamsize>(line.size()));
+        if (!out) {
             throw std::runtime_error(
-                "Selected path interval is outside path '" +
-                std::string(info.name) + "'");
+                "Failed while writing serial P/W record");
         }
-        const auto base_name = (info.record_type == 'W') ? info.seq_id : info.name;
-        const std::string subpath_name = std::string(base_name) + "#subpath_" +
-            std::to_string(run.start_step) + "_" +
-            std::to_string(run.start_step + run.step_count - 1);
-
-        if (with_walk_coordinates && walk_coord_state.usable &&
-            (info.record_type == 'W' || info.record_type == 'P')) {
-            bool wrote_coordinates = false;
-            if (info.record_type == 'W') {
-                wrote_coordinates = paths::write_w_subpath_with_coords_bounded(
-                    out,
-                    index,
-                    run.path_id,
-                    walk_coord_state,
-                    run.start_step,
-                    run.step_count,
-                    [](const std::string& message) {
-                        warn_get_subgraph(message);
-                    });
-            } else {
-                wrote_coordinates = paths::write_p_subpath_with_coords_bounded(
-                    out,
-                    index,
-                    run.path_id,
-                    walk_coord_state,
-                    run.start_step,
-                    run.step_count,
-                    [](const std::string& message) {
-                        warn_get_subgraph(message);
-                    });
-            }
-            if (wrote_coordinates) {
-                ++emitted;
-                continue;
-            }
-        }
-
-        paths::write_subpath_as_gfa_line(out,
-                                         index,
-                                         run.path_id,
-                                         run.start_step,
-                                         run.step_count,
-                                         subpath_name);
         ++emitted;
     }
+    info_get_subgraph("P/W coordinate calculation and output finished in " +
+                      elapsed_seconds(output_timer));
     return emitted;
 }
 
@@ -657,15 +922,14 @@ int materialize_selected_subgraph(
         path_node_ranks = &resolved_node_ranks;
     }
 
-    // Move names into the lookup table instead of keeping a second full string
-    // copy during chunk replay. Releasing the moved-from vector also drops its
-    // per-string object array before the potentially large shared-edge scan.
-    std::unordered_set<std::string> node_set;
+    // The stable vector remains the single string owner. The membership table
+    // stores non-owning views for graph replay, and the later rank lookup refers
+    // to the same vector instead of rereading names from .pdx.
+    std::unordered_set<std::string_view> node_set;
     node_set.reserve(node_names.size());
-    for (auto& node_name : node_names) {
-        node_set.emplace(std::move(node_name));
+    for (const auto& node_name : node_names) {
+        node_set.emplace(node_name);
     }
-    std::vector<std::string>().swap(node_names);
 
     std::ofstream out(options.output_gfa);
     if (!out) {
@@ -673,6 +937,7 @@ int materialize_selected_subgraph(
                                  options.output_gfa);
     }
 
+    Timer graph_materialization_timer;
     info_get_subgraph("Starting subgraph materialization into " +
                       options.output_gfa);
     emit_header_if_present(out, options.input_gz, spans);
@@ -701,8 +966,13 @@ int materialize_selected_subgraph(
     }
     info_get_subgraph("Finished subgraph materialization with " +
                       std::to_string(total_stats.s_lines) + " S lines and " +
-                      std::to_string(total_stats.l_lines) + " L lines");
+                      std::to_string(total_stats.l_lines) + " L lines in " +
+                      elapsed_seconds(graph_materialization_timer));
 
+    // Graph filtering is complete before P/W buffers are allocated. Release
+    // hash nodes and buckets now; node_names continues to own all strings used
+    // by the immutable rank lookup.
+    std::unordered_set<std::string_view>().swap(node_set);
     if (options.include_paths && index_paths.has_pdx) {
         info_get_subgraph("Starting indexed subpath extraction from " +
                           index_paths.pdx_path);
@@ -711,13 +981,16 @@ int materialize_selected_subgraph(
             subpath_count = emit_subpaths_if_available(
                 out,
                 preserved_paths->path_index,
+                index_paths.pdx_path,
                 *path_node_ranks,
+                node_names,
                 &preserved_paths->path_runs,
                 node_index,
                 options.input_gz,
                 options.lnx_path,
                 options.pcx_path,
-                options.with_walk_coordinates);
+                options.with_walk_coordinates,
+                options.threads);
         } else {
             // BFS extraction has no preloaded reader, so retain the existing
             // lazy path-index construction for its generic node-set query.
@@ -725,13 +998,16 @@ int materialize_selected_subgraph(
             subpath_count = emit_subpaths_if_available(
                 out,
                 path_index,
+                index_paths.pdx_path,
                 *path_node_ranks,
+                node_names,
                 nullptr,
                 node_index,
                 options.input_gz,
                 options.lnx_path,
                 options.pcx_path,
-                options.with_walk_coordinates);
+                options.with_walk_coordinates,
+                options.threads);
         }
         info_get_subgraph("Finished indexed subpath extraction with " +
                           std::to_string(subpath_count) + " P/W records");
@@ -784,6 +1060,11 @@ void configure_get_subgraph_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("maximum number of nodes to include in the BFS neighborhood (default: 100)");
 
+    parser.add_argument("--threads")
+      .default_value(std::string("1"))
+      .nargs(1)
+      .help("number of ordered P/W formatting workers (default: 1)");
+
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
       .help("skip indexed P/W subpath extraction and emit only the graph records");
@@ -807,6 +1088,10 @@ int extract_subgraph_from_seeds(const SubgraphExtractionOptions& options,
     }
     if (options.max_nodes == 0) {
         throw std::runtime_error("--max_nodes must be greater than zero");
+    }
+    if (options.threads == 0 || options.threads > kMaxExtractionThreads) {
+        throw std::runtime_error("--threads must be between 1 and " +
+                                 std::to_string(kMaxExtractionThreads));
     }
     if (options.with_walk_coordinates && !options.include_paths) {
         throw std::runtime_error(
@@ -925,6 +1210,10 @@ int extract_subgraph_from_node_ranks(
     if (node_ranks.empty()) {
         throw std::runtime_error(
             "At least one node rank is required for exact subgraph extraction");
+    }
+    if (options.threads == 0 || options.threads > kMaxExtractionThreads) {
+        throw std::runtime_error("--threads must be between 1 and " +
+                                 std::to_string(kMaxExtractionThreads));
     }
     if (options.with_walk_coordinates && !options.include_paths) {
         // Keep the shared library-facing extraction entry points consistent
@@ -1064,6 +1353,11 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
             std::numeric_limits<std::uint32_t>::max());
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_coords;
+        options.threads = utils::parse_u32_strict(
+            program.get<std::string>("threads"),
+            "--threads",
+            1,
+            kMaxExtractionThreads);
         options.debug_trace = program.get<bool>("debug_trace");
         return extract_subgraph_from_seeds(
             options,

@@ -1,10 +1,13 @@
 #include "coordinates/coordinate_commands.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -12,9 +15,10 @@
 
 #include "chunk/get_subgraph_command.h"
 #include "coordinates/coordinate_index.h"
-#include "coordinates/path_haplotype_query.h"
 #include "coordinates/path_coordinate_query.h"
+#include "coordinates/path_haplotype_query.h"
 #include "fs/fs_helpers.h"
+#include "indexer/node_length_index.h"
 #include "paths/p_path_coordinates.h"
 #include "paths/path_index.h"
 #include "utils/Timer.h"
@@ -269,6 +273,45 @@ std::uint32_t parse_max_nodes(const std::string& value) {
                                    true);
 }
 
+std::optional<std::uint64_t> parse_haplotype_gap_bases(
+    const std::string& value) {
+    // An empty parser default distinguishes an omitted flag from an explicit
+    // zero, which means that only directly adjacent anchor occurrences join.
+    if (value.empty()) return std::nullopt;
+
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](const unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+
+    // Use decimal SI units, matching common genomic command-line notation.
+    // Bare values and the bp suffix are already measured in bases.
+    std::uint64_t multiplier = 1;
+    std::size_t suffix_size = 0;
+    if (utils::has_suffix(normalized, "kb")) {
+        multiplier = 1000ULL;
+        suffix_size = 2;
+    } else if (utils::has_suffix(normalized, "mb")) {
+        multiplier = 1000ULL * 1000ULL;
+        suffix_size = 2;
+    } else if (utils::has_suffix(normalized, "gb")) {
+        multiplier = 1000ULL * 1000ULL * 1000ULL;
+        suffix_size = 2;
+    } else if (utils::has_suffix(normalized, "bp")) {
+        suffix_size = 2;
+    }
+
+    const auto amount = utils::parse_u64_strict(
+        normalized.substr(0, normalized.size() - suffix_size),
+        "--haplotype_gap",
+        true);
+    if (amount > std::numeric_limits<std::uint64_t>::max() / multiplier) {
+        throw std::runtime_error("--haplotype_gap is too large");
+    }
+    return amount * multiplier;
+}
+
 ParsedRegion parse_region(const std::string& region) {
     // Region strings use the same 0-based, half-open coordinates stored by W
     // records: sequence:start-end.
@@ -466,9 +509,19 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
       .nargs(1)
       .help("maximum total seeds plus BFS nodes; not used with --all_haplotypes");
 
+    parser.add_argument("--threads")
+      .default_value(std::string("1"))
+      .nargs(1)
+      .help("number of ordered P/W formatting workers (default: 1)");
+
     parser.add_argument("--all_haplotypes").default_value(false)
       .implicit_value(true)
       .help("select the exact reference interval and anchor-supported P/W spans instead of BFS");
+
+    parser.add_argument("--haplotype_gap")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("optional maximum unanchored gap for local --all_haplotypes runs; accepts bases or bp/kb/mb/gb suffixes");
 
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
@@ -505,6 +558,8 @@ int run_get_region(const argparse::ArgumentParser& program) {
         const bool no_paths = program.get<bool>("no_paths");
         const bool with_coords = program.get<bool>("with_coords");
         const bool all_haplotypes = program.get<bool>("all_haplotypes");
+        const auto haplotype_gap_bases = parse_haplotype_gap_bases(
+            program.get<std::string>("haplotype_gap"));
 
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
@@ -557,6 +612,16 @@ int run_get_region(const argparse::ArgumentParser& program) {
 
         if (no_paths && with_coords) {
             throw std::runtime_error("--with_coords requires path output; remove --no_paths");
+        }
+
+        if (haplotype_gap_bases.has_value() && !all_haplotypes) {
+            throw std::runtime_error(
+                "--haplotype_gap requires --all_haplotypes");
+        }
+        if (haplotype_gap_bases.has_value() &&
+            !file_exists(lnx_path.c_str())) {
+            throw std::runtime_error(
+                "--haplotype_gap requires a node length index: " + lnx_path);
         }
 
         const auto region_arg = program.get<std::string>("region");
@@ -674,25 +739,64 @@ int run_get_region(const argparse::ArgumentParser& program) {
         // indexes by using the previous bounded path-prefix scan.
         options.pcx_path = file_exists(pcx_path.c_str()) ? pcx_path : std::string{};
         options.max_nodes = parse_max_nodes(program.get<std::string>("max_nodes"));
+        options.threads = utils::parse_u32_strict(
+            program.get<std::string>("threads"),
+            "--threads",
+            1,
+            chunk::kMaxExtractionThreads);
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_coords;
         options.debug_trace = program.get<bool>("debug_trace");
 
         if (all_haplotypes) {
-            // Use the .pdx posting table as an inverted index from every
-            // reference interval node to its path occurrences. The coordinate
-            // source keeps exact bounds; other paths use conservative min/max.
+            // Omitted gap limits preserve the original min/max implementation
+            // without constructing a length reader or local-anchor bitset.
+            PathHaplotypeQueryOptions query_options;
+            std::unique_ptr<indexer::NodeLengthIndexReader> gap_node_lengths;
+            if (haplotype_gap_bases.has_value()) {
+                gap_node_lengths =
+                    std::make_unique<indexer::NodeLengthIndexReader>(lnx_path);
+                query_options.max_gap_bases = haplotype_gap_bases;
+                query_options.node_lengths = gap_node_lengths.get();
+            }
+
+            // Use .pdx postings as an inverted index from reference anchors to
+            // their path occurrences. The coordinate source stays exact;
+            // optional gap clustering splits distant non-reference repeats.
             const auto selection =
                 query_path_haplotype_nodes(path_index,
                                            ranks,
-                                           exact_reference_path_runs);
+                                           exact_reference_path_runs,
+                                           query_options);
+            std::cerr << get_time()
+                      << ": All-haplotype phases: postings="
+                      << std::fixed << std::setprecision(3)
+                      << selection.posting_seconds
+                      << "s, selected_steps="
+                      << selection.selected_step_seconds
+                      << "s, rank_materialization="
+                      << selection.node_rank_materialization_seconds
+                      << "s" << std::endl;
             std::cout << get_time() << ": All-haplotype path selection read "
                       << selection.posting_count << " postings across "
                       << selection.matched_path_count << " P/W records and selected "
                       << selection.node_ranks.size() << " unique nodes from "
                       << selection.selected_path_step_count << " path steps"
                       << std::endl;
-            if (selection.exact_reference_path_count > 0) {
+            // Local-mode diagnostics are useful even if a future coordinate
+            // source cannot identify an exact P/W run for separate reporting.
+            if (haplotype_gap_bases.has_value()) {
+                std::cout << get_time()
+                          << ": Local all-haplotype interval resolution used a "
+                          << *haplotype_gap_bases
+                          << " bp maximum gap and emitted "
+                          << selection.local_non_reference_run_count
+                          << " non-reference interval(s); "
+                          << selection.local_split_path_count
+                          << " path(s) were split, while "
+                          << selection.exact_reference_path_count
+                          << " coordinate path(s) remained exact" << std::endl;
+            } else if (selection.exact_reference_path_count > 0) {
                 std::cout << get_time() << ": All-haplotype interval resolution preserved "
                           << selection.exact_reference_path_count
                           << " exact coordinate path(s); other paths retained "

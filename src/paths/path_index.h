@@ -3,10 +3,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <iosfwd>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -181,6 +183,7 @@ private:
 
     [[nodiscard]] NodeMeta read_node_meta(std::uint32_t node_id) const;
     [[nodiscard]] std::string read_string(std::uint64_t offset, std::uint64_t len) const;
+    void promote_node_name_cache() const;
     void read_exact(std::uint64_t offset, void* dst, std::size_t bytes) const;
 
     std::string index_path_;
@@ -196,6 +199,48 @@ private:
     std::unordered_map<std::string, std::uint32_t> path_name_to_id_;
     mutable std::unordered_map<std::uint32_t, NodeMeta> node_meta_cache_;
     mutable std::unordered_map<std::uint32_t, std::string> node_name_cache_;
+    // Large scans promote the sparse hash cache into a rank-to-dense-name
+    // lookup. The deque keeps returned string views stable as more names are
+    // loaded, while the uint32 rank table avoids one string object per graph
+    // node and is not allocated for ordinary small queries.
+    mutable std::vector<std::uint32_t> node_name_rank_to_dense_;
+    mutable std::deque<std::string> dense_node_names_;
+};
+
+// Immutable rank-to-name lookup over names already owned by extraction. Small
+// selections use a sparse map; large selections use one direct rank table.
+// Keeping only name indexes here avoids rereading or duplicating node strings,
+// and all lookup state is read-only while formatter threads are active.
+class SelectedNodeNameLookup {
+public:
+    SelectedNodeNameLookup(std::uint32_t node_count,
+                           const std::vector<std::uint32_t>& node_ids,
+                           const std::vector<std::string>& node_names);
+
+    [[nodiscard]] std::string_view get_node_name(std::uint32_t node_id) const {
+        if (node_id >= node_count_) {
+            throw std::runtime_error("Node id out of range");
+        }
+
+        std::uint32_t name_index = std::numeric_limits<std::uint32_t>::max();
+        if (!rank_to_name_.empty()) {
+            name_index = rank_to_name_[node_id];
+        } else {
+            const auto it = sparse_rank_to_name_.find(node_id);
+            if (it != sparse_rank_to_name_.end()) name_index = it->second;
+        }
+        if (name_index == std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error(
+                "Selected node-name lookup is missing a selected node");
+        }
+        return (*node_names_)[name_index];
+    }
+
+private:
+    std::uint32_t node_count_{};
+    const std::vector<std::string>* node_names_{};
+    std::unordered_map<std::uint32_t, std::uint32_t> sparse_rank_to_name_;
+    std::vector<std::uint32_t> rank_to_name_;
 };
 
 // Resolve a node set into all path runs that remain contiguous inside that set.
@@ -214,6 +259,26 @@ void write_subpath_as_gfa_line(std::ostream& out,
                                std::uint64_t start_step,
                                std::uint64_t step_count,
                                std::string_view output_name);
+
+// Format one subpath into an owned buffer. Step reads and node-name lookup are
+// explicit so callers can use either a reader cache or the selected-name table.
+std::string format_subpath_as_gfa_line(
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name);
+
+// Parallel and optimized serial extraction use names already owned by the
+// selected-node vector instead of building a second PathIndexReader cache.
+std::string format_subpath_as_gfa_line(
+    const PathIndexReader& step_index,
+    const SelectedNodeNameLookup& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name);
 
 }  // namespace gfaidx::paths
 

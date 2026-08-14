@@ -12,6 +12,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 find_package(ZLIB REQUIRED)
+find_package(Threads REQUIRED)
 
 # Linker flags from Makefile
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
@@ -55,7 +56,7 @@ add_executable(gfaidx
 )
 # Keep warnings enabled for this target without forcing a specific optimization/debug profile.
 target_compile_options(gfaidx PRIVATE -Wall)
-target_link_libraries(gfaidx louvain_method ZLIB::ZLIB)
+target_link_libraries(gfaidx louvain_method ZLIB::ZLIB Threads::Threads)
 
 # Install the CLI into the standard binary directory so package managers can use
 # `cmake --install` with their own CMAKE_INSTALL_PREFIX.

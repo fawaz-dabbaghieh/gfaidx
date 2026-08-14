@@ -20,6 +20,28 @@ indexed_gfa="$work_dir/graph.gfa.gz"
     --max_nodes 3 \
     --with_coords >/dev/null
 
+# Multiple workers must preserve the serial byte order even though the P and W
+# records are formatted concurrently.
+"$gfaidx" get_subgraph \
+    "$indexed_gfa" \
+    1 \
+    "$work_dir/with_coords_parallel.gfa" \
+    --max_nodes 3 \
+    --with_coords \
+    --threads 4 >/dev/null
+cmp "$work_dir/with_coords.gfa" "$work_dir/with_coords_parallel.gfa"
+
+# Exercise the ordinary, non-coordinate fallback formatter through the same
+# ordered worker pool.
+"$gfaidx" get_subgraph \
+    "$indexed_gfa" 1 "$work_dir/without_coords.gfa" \
+    --max_nodes 3 >/dev/null
+"$gfaidx" get_subgraph \
+    "$indexed_gfa" 1 "$work_dir/without_coords_parallel.gfa" \
+    --max_nodes 3 --threads 4 >/dev/null
+cmp "$work_dir/without_coords.gfa" \
+    "$work_dir/without_coords_parallel.gfa"
+
 awk -F '\t' '$1 == "P" {print $2 "\t" $3}' \
     "$work_dir/with_coords.gfa" >"$work_dir/actual_p.tsv"
 cat >"$work_dir/expected_p.tsv" <<'EOF'
@@ -53,3 +75,16 @@ if "$gfaidx" get_subgraph \
     exit 1
 fi
 grep -F -- "--with_coords requires path output" "$work_dir/invalid.stderr" >/dev/null
+
+# Reject zero before extraction starts rather than silently reverting to the
+# serial implementation or constructing an empty worker pool.
+if "$gfaidx" get_subgraph \
+    "$indexed_gfa" \
+    1 \
+    "$work_dir/invalid_threads.gfa" \
+    --threads 0 >"$work_dir/invalid_threads.stdout" \
+    2>"$work_dir/invalid_threads.stderr"; then
+    echo "get_subgraph unexpectedly accepted --threads 0" >&2
+    exit 1
+fi
+grep -F -- "--threads" "$work_dir/invalid_threads.stderr" >/dev/null

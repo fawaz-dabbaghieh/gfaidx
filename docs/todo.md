@@ -41,68 +41,29 @@ Performance constraint:
 
 ### Parallelize Path-Supported Subgraph And Region Extraction
 
-**Status:** deferred
+**Status:** completed in version 1.9.4 for P/W formatting and coordinates
 
-Large `get_subgraph` and `get_region --all_haplotypes` queries currently
-perform posting decoding, selected path-step retrieval, coordinate calculation,
-and P/W formatting serially. Queries that touch tens of millions of postings
-and path steps can therefore spend substantial time after the initial graph or
-coordinate selection has completed.
+Version 1.9.4 parallelizes the dominant P/W phase for `get_subgraph` and
+`get_region` while retaining deterministic main-thread output.
 
-Initial profiling work:
+Implemented:
 
-- add separate timers around posting decoding, selected path-step retrieval,
-  node-rank sorting and deduplication, coordinate calculation, and P/W output
-- benchmark local SSD and network storage separately, because parallel random
-  reads may not improve both environments
-- record peak memory as thread count increases
+- `--threads` defaults to one and accepts 1 through 256 workers
+- workers own independent `PathIndexReader` streams and share a frozen,
+  immutable selected-node-name cache
+- short records use bounded batches; chromosome-scale records remain separate
+- a bounded ring preserves record order and limits in-flight output memory
+- CMake `Threads::Threads` supplies portable Linux/macOS thread linkage
 
-Recommended implementation:
+BFS, shared-edge construction, `.cdx` lookup, graph materialization, and the
+final output writer intentionally remain serial.
 
-- add a `--threads` option with a default of one to preserve current behavior
-- divide reference-node posting blocks among workers and merge thread-local
-  minimum/maximum path-step bounds
-- divide selected path intervals among workers and fill disjoint portions of a
-  preallocated node-rank array
-- group subpath runs by path and calculate coordinates and formatted P/W
-  records in parallel
-- buffer formatted records in bounded batches and write them in deterministic
-  path order from the main thread
-- reuse the posting-parallelization machinery for generic `get_subgraph`
-  subpath discovery if profiling shows that stage remains expensive
+Posting decoding and all-haplotype selected-step scanning were already small in
+the measured workload. Parallelizing them remains deferred until new profiling
+shows that either phase is a material bottleneck.
 
-Current implementation constraints:
-
-- `PathIndexReader` owns one seek-based `std::ifstream` and mutable node
-  metadata/name caches, so one shared reader is not currently thread-safe
-- the least invasive first implementation can give each worker its own
-  `PathIndexReader`; a later offset-based `pread` reader could avoid duplicated
-  path metadata and caches
-- `.lnx` and `.pcx` are read-only memory mappings and can be shared by workers
-- direct writes from workers to one output stream must be avoided because they
-  would either corrupt output or require a lock that serializes the work
-
-Keep serial initially:
-
-- BFS expansion, because parallel frontier processing can change which nodes
-  are admitted at `--max_nodes`
-- shared-edge adjacency construction, because its maps and vectors are mutable
-- `.cdx` binary search, because it is normally small relative to posting and
-  step processing
-
-Compatibility requirements:
-
-- do not change `.pdx`, `.lnx`, `.pcx`, or `.cdx` formats
-- do not require index regeneration
-- preserve deterministic node, edge, path, and walk output ordering
-- verify that `--threads 1` and `--threads N` produce byte-identical GFA output
-
-Suggested first benchmark:
-
-- compare 1, 2, 4, and 8 threads on the large chromosome query previously used
-  to exercise tens of millions of postings and selected path steps
-- report posting time, step-reading time, coordinate/output time, total wall
-  time, CPU utilization, peak memory, and bytes read
+See `extraction_optimizations.md` for the design, correctness checks, and full
+1/2/4/8-thread resource tables.
 
 ## Compatibility
 

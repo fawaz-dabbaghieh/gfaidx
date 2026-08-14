@@ -147,6 +147,10 @@ constexpr std::size_t kPostingMergeFanIn = 128;
 
 constexpr std::size_t kFileCopyBufferBytes = 1ULL << 20;
 
+// Hash lookup is cheaper for small node sets; rank-addressed lookup wins once
+// coordinate output repeatedly visits a substantial number of distinct nodes.
+constexpr std::size_t kDenseNodeNamePromotionThreshold = 1ULL << 16;
+
 using detail::PostingHeapGreater;
 using detail::PostingHeapItem;
 using detail::PostingRunBuilder;
@@ -1184,18 +1188,59 @@ std::string_view PathIndexReader::get_path_name(std::uint32_t path_id) const {
     return rec.name;
 }
 
+void PathIndexReader::promote_node_name_cache() const {
+    const auto missing = std::numeric_limits<std::uint32_t>::max();
+    node_name_rank_to_dense_.assign(node_count_, missing);
+    for (auto& entry : node_name_cache_) {
+        if (dense_node_names_.size() >= missing) {
+            throw std::runtime_error("Dense node-name cache exceeds uint32 range");
+        }
+        const auto dense_id =
+            static_cast<std::uint32_t>(dense_node_names_.size());
+        node_name_rank_to_dense_[entry.first] = dense_id;
+        dense_node_names_.push_back(std::move(entry.second));
+    }
+
+    // Release both hash nodes and buckets after moving their strings. Future
+    // repeated lookups use one rank-table access and one deque access.
+    std::unordered_map<std::uint32_t, std::string>().swap(node_name_cache_);
+}
+
 std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
     if (node_id >= node_count_) {
         throw std::runtime_error("Node id out of range");
     }
+
+    if (!node_name_rank_to_dense_.empty()) {
+        auto& dense_id = node_name_rank_to_dense_[node_id];
+        const auto missing = std::numeric_limits<std::uint32_t>::max();
+        if (dense_id == missing) {
+            if (dense_node_names_.size() >= missing) {
+                throw std::runtime_error(
+                    "Dense node-name cache exceeds uint32 range");
+            }
+            dense_id = static_cast<std::uint32_t>(dense_node_names_.size());
+            // Node names are consumed repeatedly but their node metadata is
+            // not, so bypass the separate metadata hash cache on this miss.
+            dense_node_names_.push_back(copy_node_name(node_id));
+        }
+        return dense_node_names_[dense_id];
+    }
+
     const auto it = node_name_cache_.find(node_id);
     if (it != node_name_cache_.end()) {
         return it->second;
     }
 
-    const auto rec = read_node_meta(node_id);
-    auto [inserted_it, inserted] = node_name_cache_.emplace(node_id, read_string(rec.name_offset, rec.name_len));
+    // Name lookup does not need to retain NodeMeta: the owned name itself is
+    // sufficient for all later hits and avoids a second large hash table.
+    auto [inserted_it, inserted] =
+        node_name_cache_.emplace(node_id, copy_node_name(node_id));
     (void)inserted;
+    if (node_name_cache_.size() == kDenseNodeNamePromotionThreshold) {
+        promote_node_name_cache();
+        return dense_node_names_[node_name_rank_to_dense_[node_id]];
+    }
     return inserted_it->second;
 }
 
@@ -1409,6 +1454,55 @@ void PathIndexReader::read_exact(std::uint64_t offset, void* dst, std::size_t by
     }
 }
 
+SelectedNodeNameLookup::SelectedNodeNameLookup(
+    std::uint32_t node_count,
+    const std::vector<std::uint32_t>& node_ids,
+    const std::vector<std::string>& node_names)
+    : node_count_(node_count), node_names_(&node_names) {
+    if (node_ids.size() != node_names.size()) {
+        throw std::runtime_error(
+            "Selected node ranks and names have different counts");
+    }
+    if (node_names.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error("Selected node-name lookup exceeds uint32 range");
+    }
+
+    // Match PathIndexReader's adaptive policy: avoid a graph-sized table for
+    // ordinary small queries, but use direct indexing when billions of steps
+    // repeatedly visit a large selected node set.
+    if (node_ids.size() < kDenseNodeNamePromotionThreshold) {
+        sparse_rank_to_name_.reserve(node_ids.size());
+        for (std::size_t i = 0; i < node_ids.size(); ++i) {
+            if (node_ids[i] >= node_count_) {
+                throw std::runtime_error(
+                    "Selected node rank is outside the path index");
+            }
+            const auto inserted = sparse_rank_to_name_.emplace(
+                node_ids[i], static_cast<std::uint32_t>(i));
+            if (!inserted.second) {
+                throw std::runtime_error(
+                    "Selected node-name lookup contains a duplicate rank");
+            }
+        }
+        return;
+    }
+
+    const auto missing = std::numeric_limits<std::uint32_t>::max();
+    rank_to_name_.assign(node_count_, missing);
+    for (std::size_t i = 0; i < node_ids.size(); ++i) {
+        const auto node_id = node_ids[i];
+        if (node_id >= node_count_) {
+            throw std::runtime_error(
+                "Selected node rank is outside the path index");
+        }
+        if (rank_to_name_[node_id] != missing) {
+            throw std::runtime_error(
+                "Selected node-name lookup contains a duplicate rank");
+        }
+        rank_to_name_[node_id] = static_cast<std::uint32_t>(i);
+    }
+}
+
 std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
                                                    const std::vector<std::uint32_t>& node_ids) {
     std::unordered_set<std::uint32_t> unique_nodes;
@@ -1503,6 +1597,82 @@ void write_path_as_gfa_line(std::ostream& out,
         }
     }
     out << '\n';
+}
+
+// Both reader-backed and selected-vector-backed name lookups expose the same
+// small API, so one typed formatter keeps their byte-level output identical.
+template <typename NodeNameLookup>
+std::string format_subpath_as_gfa_line_impl(
+    const PathIndexReader& step_index,
+    const NodeNameLookup& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name) {
+    const auto info = step_index.get_path_info(path_id);
+    const auto steps = step_index.read_steps(path_id, start_step, step_count);
+
+    // Build one complete record so the ordered writer performs one checked
+    // write and never interleaves fields from different worker threads.
+    std::string line;
+    line.reserve(64 + output_name.size() + info.tags.size() +
+                 info.overlap_field.size() + steps.size() * 12);
+    line.push_back(info.record_type);
+    line.push_back('\t');
+    if (info.record_type == 'W') {
+        line.append(info.sample_id);
+        line.push_back('\t');
+        line.append(std::to_string(info.hap_index));
+        line.push_back('\t');
+        line.append(output_name);
+        line.append("\t*\t*\t");
+        for (const auto& step : steps) {
+            line.push_back(step.is_reverse ? '<' : '>');
+            line.append(node_name_index.get_node_name(step.node_id));
+        }
+    } else {
+        line.append(output_name);
+        line.push_back('\t');
+        for (std::size_t i = 0; i < steps.size(); ++i) {
+            if (i > 0) line.push_back(',');
+            line.append(node_name_index.get_node_name(steps[i].node_id));
+            line.push_back(steps[i].is_reverse ? '-' : '+');
+        }
+        line.push_back('\t');
+        line.append(make_overlap_slice(info.overlap_field,
+                                       start_step,
+                                       step_count > 0 ? step_count - 1 : 0));
+    }
+    if (!info.tags.empty()) {
+        line.push_back('\t');
+        line.append(info.tags);
+    }
+    line.push_back('\n');
+    return line;
+}
+
+std::string format_subpath_as_gfa_line(
+    const PathIndexReader& step_index,
+    const PathIndexReader& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name) {
+    return format_subpath_as_gfa_line_impl(
+        step_index, node_name_index, path_id, start_step, step_count,
+        output_name);
+}
+
+std::string format_subpath_as_gfa_line(
+    const PathIndexReader& step_index,
+    const SelectedNodeNameLookup& node_name_index,
+    std::uint32_t path_id,
+    std::uint64_t start_step,
+    std::uint64_t step_count,
+    std::string_view output_name) {
+    return format_subpath_as_gfa_line_impl(
+        step_index, node_name_index, path_id, start_step, step_count,
+        output_name);
 }
 
 void write_subpath_as_gfa_line(std::ostream& out,
