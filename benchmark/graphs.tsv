@@ -11,5 +11,5 @@
 #
 # odgi_path_indexes defaults to true. Set it to 0/false for graphs with no P/W
 # paths, because odgi pathindex can abort on pathless graphs.
-graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra
-hprc_v2_mc_chr1	/mnt/scratch/fawaz/hprc_mc_v2_indexed/chr1/hprc_v2_mc_chr1.gfa	""	CHM13	1	""	""	--ref-sample CHM13	""	""	""
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_chunk_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra	gbz_gbwt_extra
+hprc_v2_mc_chr1	/mnt/scratch/fawaz/hprc_mc_v2_indexed/chr1/hprc_v2_mc_chr1.gfa	""	CHM13	1	""	""	--ref-sample CHM13	""	""	""	""	""

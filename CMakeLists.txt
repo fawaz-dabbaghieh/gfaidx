@@ -133,6 +133,18 @@ if(BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/data/benchmark_odgi_path_names.txt
     )
 
+    # Validate the separate benchmark resolver for unsuffixed PanSN P paths,
+    # including GBZ reference metadata and inclusive VG chunk coordinates.
+    add_test(
+        NAME benchmark_p_locus_resolution
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_benchmark_p_locus_resolution.sh
+                ${CMAKE_SOURCE_DIR}/benchmark/scripts/resolve_p_locus.py
+                ${CMAKE_SOURCE_DIR}/benchmark/scripts/select_p_paths.py
+                ${CMAKE_SOURCE_DIR}/tests/data/benchmark_p_path_names.txt
+                ${CMAKE_SOURCE_DIR}/tests/data/benchmark_p_gbz_metadata.tsv
+    )
+
     # Verify terminal P-name coordinate intervals in both CDX and PDX/LNX
     # lookup paths, including fragmented tracks and coordinate-bearing output.
     add_test(

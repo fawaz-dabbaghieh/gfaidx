@@ -16,7 +16,7 @@ threads: 1
 # Node-neighborhood context sweeps.
 #
 # node_contexts_steps: context as a number of expansion steps (vg -c, odgi -c).
-# node_contexts_bases: context as a base-pair budget (vg -c -L, odgi -L,
+# node_contexts_bases: context as a base-pair budget (vg chunk -l, odgi -L,
 #   gbz-base --context). This second track exists because gbz-base only
 #   expresses context in bp.
 #
@@ -50,7 +50,8 @@ gfaidx:
 
 vg:
   convert_extra: ""
-  find_extra: ""
+  # Applied to both node and coordinate extraction with vg chunk.
+  chunk_extra: ""
 
 odgi:
   build_extra: ""

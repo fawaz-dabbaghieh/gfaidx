@@ -1,0 +1,47 @@
+# Configuration for benchmarking native, unsuffixed PanSN P-line graphs.
+# Relative graph paths are resolved against data_root. Relative manifest paths
+# and results_dir are resolved under benchmark/.
+
+data_root: /home/user3/gfaidx_benchmark
+results_dir: results_p
+
+graphs_tsv: graphs.p.tsv
+loci_tsv: loci.p.tsv
+
+# Keep tool threading at one for single-threaded comparisons. Snakemake --cores
+# controls how many independent benchmark jobs may run concurrently.
+threads: 1
+
+node_contexts_steps: [1, 10, 100, 1000, 5000, 10000]
+node_contexts_bases: [1000, 10000, 100000, 1000000, 5000000, 10000000]
+sample_interval_seconds: 0.05
+
+tools:
+  gfaidx: /home/user3/tools/gfaidx/build/gfaidx
+  vg: vg
+  odgi: odgi
+  gbz_base: /home/user3/tools/gbz-base/target/release/gbz-base
+  python: python3
+
+gfaidx:
+  index_extra: "--progress_every 0 --checkpoint_steps 1024 --max_chunk_nodes 10000 --min_chunk_nodes 1000"
+  coordinate_extra: "--progress_every 0"
+  get_subgraph_extra: ""
+  get_region_extra: ""
+
+vg:
+  convert_extra: ""
+  chunk_extra: ""
+
+odgi:
+  build_extra: ""
+  pathindex_extra: ""
+  stepindex_extra: ""
+  extract_extra: ""
+
+gbz:
+  # Keep numeric GFA IDs stable for node-based cross-tool queries. The P
+  # workflow adds PanSN metadata parsing and --set-reference automatically.
+  gbwt_extra: "--max-node 0"
+  construct_extra: ""
+  query_extra: ""

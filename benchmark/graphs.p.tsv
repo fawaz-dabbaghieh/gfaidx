@@ -1,0 +1,8 @@
+# One row per native P-line graph. P names must have the unsuffixed PanSN form
+# sample#haplotype#contig, for example CHM13#0#chr1.
+#
+# reference_sample is promoted to REFERENCE while building GBZ so gbz-base can
+# perform coordinate queries. gfaidx_path_names_file is optional; when empty,
+# the workflow selects the exact P paths referenced by loci.p.tsv.
+graph	gfa	reference_sample	gfaidx_path_names_file	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_chunk_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra	gbz_gbwt_extra
+pggb_chr1	/path/to/pggb_chr1.gfa	CHM13		1								

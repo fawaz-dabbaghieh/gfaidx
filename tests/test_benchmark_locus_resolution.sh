@@ -41,7 +41,7 @@ expected = {
     "vg_node_region": "GRCh38#0#chr1[10-16]:2",
     "odgi_node_position": "GRCh38#0#chr1:10-16,2",
     "gfaidx_region": "chr1:11-15",
-    "vg_region": "GRCh38#0#chr1[10-16]:1-5",
+    "vg_region": "GRCh38#0#chr1[10-16]:1-4",
     "odgi_region": "GRCh38#0#chr1:10-16:1-5",
     "gbz_interval": "11..15",
 }

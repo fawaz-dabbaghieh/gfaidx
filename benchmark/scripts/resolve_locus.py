@@ -218,7 +218,9 @@ def resolve(args: argparse.Namespace) -> dict[str, object]:
         result["gfaidx_region"] = (
             f"{args.seq_id}:{args.region_start}-{args.region_end}"
         )
-        result["vg_region"] = f"{vg_path}:{local_start}-{local_end}"
+        # gfaidx/ODGI/GBZ-base use the half-open manifest interval, while
+        # `vg chunk -p` documents an inclusive end coordinate.
+        result["vg_region"] = f"{vg_path}:{local_start}-{local_end - 1}"
         result["odgi_region"] = f"{odgi_path}:{local_start}-{local_end}"
         result["gbz_interval"] = f"{args.region_start}..{args.region_end}"
 

@@ -298,11 +298,12 @@ node-seeded comparison is possible at all. It should be stated in the paper's me
 </div>
 
 <div class="find">
-<h3>3. odgi silently drops W-line paths</h3>
-<p><code>odgi build</code> on a W-line GFA exits 0 and produces a graph with
-<strong>zero paths</strong> rather than reporting an error. The W&nbsp;→&nbsp;P conversion is a
-correctness requirement, not a convenience, so it is a measured pipeline step attributed
-to odgi.</p>
+<h3>3. W and P records need different path setup</h3>
+<p>In the W workflow, <code>odgi build</code> on the source W-line GFA exits 0 but
+produces a graph with <strong>zero paths</strong>. The W&nbsp;→&nbsp;P conversion is therefore
+a measured indexing step attributed to odgi. The P workflow uses its source paths
+directly. It also parses PanSN path names and promotes the configured reference sample
+while constructing the GBZ used by gbz-base.</p>
 </div>
 """
 
@@ -313,13 +314,13 @@ def methods_section() -> str:
 <p>The four tools do not share query semantics, so the workflow runs three tracks and
 records what each tool natively supports:</p>
 <ul>
-<li><strong>node_steps</strong> — context as expansion steps: <code>vg find -n N -c K</code>,
+<li><strong>node_steps</strong> — context as expansion steps: <code>vg chunk -r N:N -c K</code>,
 <code>odgi extract -n N -c K</code>. gbz-base has no step-context query.</li>
 <li><strong>node_bases</strong> — context as a base-pair budget:
-<code>vg find -n N -c BP -L</code>, <code>odgi extract -n N -L BP</code>,
+<code>vg chunk -r N:N -l BP</code>, <code>odgi extract -n N -L BP</code>,
 <code>gbz-base query --node N --context BP</code>. This is the only track where all four
 tools appear, and it exists because gbz-base expresses context solely in bp.</li>
-<li><strong>region</strong> — coordinate intervals: <code>vg find -p</code>,
+<li><strong>region</strong> — coordinate intervals: <code>vg chunk -p -c 0</code>,
 <code>odgi extract -r</code>, <code>gbz-base query --interval</code>,
 <code>gfaidx get_region --all_haplotypes --with_coords</code>.</li>
 </ul>
@@ -341,9 +342,10 @@ compacted node IDs, so node <em>counts</em> are comparable across tools while no
 <p>Each command is wrapped by <code>scripts/measure.py</code>, which records wall time and
 peak RSS sampled across the whole process tree (so helper processes are counted) and
 combined with <code>wait4</code> accounting so very short commands still report memory.
-Format conversions needed only for counting output records run <em>outside</em> the timed
-command. All jobs run with <code>--cores 1</code>: concurrent jobs would make the timing and
-memory numbers meaningless.</p>
+Every timed query produces GFA text. VG writes GFA directly, while odgi extraction and
+<code>odgi view -g</code> run inside one measured process tree. All jobs run with
+<code>--cores 1</code>: concurrent jobs would make the timing and memory numbers
+meaningless.</p>
 """
 
 
@@ -359,8 +361,9 @@ def build_report(results: Path, title: str, partial: bool = False) -> str:
     facts_path = results / "dataset_facts.json"
     if facts_path.exists():
         facts = json.loads(facts_path.read_text())
-    gfa = Path("/home/user2/fawaz/chr22.gfa")
-    gfa_bytes = gfa.stat().st_size if gfa.exists() else 0
+    # Dataset facts are optional; avoid embedding a machine-specific source
+    # path in reports produced for other W- or P-line graphs.
+    gfa_bytes = int(facts.get("gfa_bytes", 0)) if facts else 0
 
     failures = sum(1 for r in index_rows + query_rows if r.get("exit_code") not in ("0", "", None))
     have_data = bool(index_rows) and bool(query_rows)
@@ -381,8 +384,8 @@ def build_report(results: Path, title: str, partial: bool = False) -> str:
         status = '<span class="pill">partial run</span>'
     out.append(f"""<header class="top">
 <h1>{esc(title)}</h1>
-<p class="sub">Indexing and subgraph-extraction cost for four genome-graph tools on an
-HPRC chr22 pangenome graph, measured with a Snakemake workflow.</p>
+<p class="sub">Indexing and subgraph-extraction cost for four genome-graph tools,
+measured with a Snakemake workflow.</p>
 <div class="meta">
 <span><b>Generated</b> {esc(stamp)}</span>
 <span><b>Host</b> {esc(socket.gethostname())}</span>
@@ -513,11 +516,11 @@ gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p
     # ---- reproducing ------------------------------------------------------
     out.append("<h2>Reproducing this</h2>")
     out.append("""<pre><code>conda activate gfaidx_bench
-cd /home/user2/fawaz/benchmark
-snakemake -s Snakefile --cores 1
-python3 scripts/make_report.py --results results --out report.html</code></pre>
-<p>Context sweeps live in <code>config.yaml</code>; queries live in
-<code>loci.tsv</code>, while resolved tool coordinates and node IDs are recorded in
+# Choose Snakefile.w/config.yaml or Snakefile.p/config.p.yaml.
+snakemake -s benchmark/Snakefile.w --configfile benchmark/config.yaml --cores 1
+python3 benchmark/scripts/make_report.py --results benchmark/results --out benchmark/results/report.html</code></pre>
+<p>Context sweeps live in the selected config file; queries live in its locus
+manifest, while resolved tool coordinates and node IDs are recorded in
 <code>results/maps/resolved_loci.tsv</code>. Every command is stored
 verbatim in <code>results/metrics/**.json</code> and copied into
 <code>results/tables/*.tsv</code>, which are the machine-readable source for this page.</p>""")
