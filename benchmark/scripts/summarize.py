@@ -92,26 +92,44 @@ def main() -> int:
             continue
         print(f"\n## {track}\n")
         rows = []
-        for r in sorted(subset, key=lambda r: (r["query_id"], num(r["context"]), r["tool"])):
+        for r in sorted(subset, key=lambda r: (
+            r["query_id"], num(r["context"]), r["tool"],
+            num(r.get("threads")), num(r.get("haplotype_gap_bp")),
+            num(r.get("merging_iterations")), r.get("query_variant", ""),
+        )):
             rows.append([r["query_id"], r["context"] or "-", r["tool"],
+                         r.get("threads", "NA"),
+                         r.get("haplotype_gap_bp", "NA"),
+                         r.get("merging_iterations", "NA"),
+                         r.get("query_variant", "legacy"),
                          f"{num(r['wall_seconds']):.3f}", gib(r["peak_rss_kb"]),
                          r["out_nodes"] or "-", r["exit_code"]])
-        print(table(["query", "context", "tool", "seconds", "peak RSS GiB",
+        print(table(["query", "context", "tool", "threads", "gap bp",
+                     "ODGI iterations", "variant", "seconds", "peak RSS GiB",
                      "out nodes", "exit"], rows))
 
     print("\n## Mean query cost per tool and track\n")
     agg = defaultdict(lambda: [0.0, 0.0, 0, 0.0])
     for r in queries:
-        key = (r["track"], r["tool"])
+        # Keep every experimental setting separate; averaging across thread or
+        # haplotype-gap values would make the summary scientifically ambiguous.
+        key = (
+            r["track"], r["tool"], r.get("threads", "NA"),
+            r.get("haplotype_gap_bp", "NA"),
+            r.get("merging_iterations", "NA"),
+            r.get("query_variant", "legacy"),
+        )
         agg[key][0] += num(r["wall_seconds"])
         agg[key][1] = max(agg[key][1], num(r["peak_rss_kb"]))
         agg[key][2] += 1
         agg[key][3] += num(r["out_nodes"])
     rows = []
-    for (track, tool), (secs, rss, n, nodes) in sorted(agg.items()):
-        rows.append([track, tool, n, f"{secs / n:.3f}", f"{rss / 1048576:.2f}",
+    for (track, tool, threads, gap, iterations, variant), (secs, rss, n, nodes) in sorted(agg.items()):
+        rows.append([track, tool, threads, gap, iterations, variant, n,
+                     f"{secs / n:.3f}", f"{rss / 1048576:.2f}",
                      f"{nodes / n:,.0f}"])
-    print(table(["track", "tool", "queries", "mean seconds", "max peak RSS GiB",
+    print(table(["track", "tool", "threads", "gap bp", "ODGI iterations",
+                 "variant", "queries", "mean seconds", "max peak RSS GiB",
                  "mean out nodes"], rows))
     return 0
 

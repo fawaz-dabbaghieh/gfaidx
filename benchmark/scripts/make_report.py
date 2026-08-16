@@ -321,7 +321,7 @@ records what each tool natively supports:</p>
 <code>gbz-base query --node N --context BP</code>. This is the only track where all four
 tools appear, and it exists because gbz-base expresses context solely in bp.</li>
 <li><strong>region</strong> — coordinate intervals: <code>vg chunk -p -c 0</code>,
-<code>odgi extract -r</code>, <code>gbz-base query --interval</code>,
+<code>odgi extract -r</code>, <code>gbz-base query --interval --context 0</code>,
 <code>gfaidx get_region --all_haplotypes --with_coords</code>.</li>
 </ul>
 <p>For the two node-context tracks, <code>gfaidx get_subgraph</code> bounds a BFS by node
@@ -339,13 +339,19 @@ matched node counts apply only to the node-context tracks, not the region track.
 compacted node IDs, so node <em>counts</em> are comparable across tools while node
 <em>identity</em> is not, without inverting the odgi map.</p>
 </div>
+<p>gfaidx, VG, and ODGI queries are repeated for every configured thread count.
+Region queries additionally retain separate gfaidx no-gap results, explicit
+gfaidx and ODGI gap values, and ODGI merge-iteration counts. gbz-base has no
+query-thread or haplotype-gap option and is measured once; its interval context
+is explicitly zero to avoid adding graph-neighborhood nodes outside the requested
+path interval.</p>
 <p>Each command is wrapped by <code>scripts/measure.py</code>, which records wall time and
 peak RSS sampled across the whole process tree (so helper processes are counted) and
 combined with <code>wait4</code> accounting so very short commands still report memory.
 Every timed query produces GFA text. VG writes GFA directly, while odgi extraction and
-<code>odgi view -g</code> run inside one measured process tree. All jobs run with
-<code>--cores 1</code>: concurrent jobs would make the timing and memory numbers
-meaningless.</p>
+<code>odgi view -g</code> run inside one measured process tree. Snakemake is given enough
+cores for the largest thread setting, while the custom <code>benchmark_job=1</code>
+resource serializes measured jobs so they do not compete with one another.</p>
 """
 
 
@@ -369,6 +375,16 @@ def build_report(results: Path, title: str, partial: bool = False) -> str:
     have_data = bool(index_rows) and bool(query_rows)
     complete = have_data and not partial
 
+    # The long-form query table can contain both numeric thread sweeps and
+    # threadless gbz-base rows. Report the actual numeric values rather than a
+    # fixed core count that becomes incorrect as soon as the config changes.
+    query_threads = sorted({
+        int(num(r.get("threads")))
+        for r in query_rows
+        if str(r.get("threads", "")).isdigit()
+    })
+    thread_summary = ", ".join(str(value) for value in query_threads) or "not recorded"
+
     out: list[str] = []
     out.append(f"<title>{esc(title)}</title>")
     out.append(f"<style>{CSS}</style>")
@@ -390,7 +406,7 @@ measured with a Snakemake workflow.</p>
 <span><b>Generated</b> {esc(stamp)}</span>
 <span><b>Host</b> {esc(socket.gethostname())}</span>
 <span><b>Platform</b> {esc(platform.machine())} / {esc(platform.system())}</span>
-<span><b>Cores used</b> 1</span>
+<span><b>Query threads</b> {esc(thread_summary)}</span>
 <span>{status}</span>
 </div></header>""")
 
@@ -465,28 +481,29 @@ gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p
     if query_rows:
         agg = defaultdict(lambda: [0.0, 0.0, 0, 0.0])
         for r in query_rows:
-            key = (r["track"], r["tool"])
+            # Never mix thread counts or region semantics in a mean. Every
+            # configuration remains an independently readable report row.
+            key = (
+                r["track"], r["tool"], r.get("threads", "NA"),
+                r.get("haplotype_gap_bp", "NA"),
+                r.get("merging_iterations", "NA"),
+                r.get("query_variant", "legacy"),
+            )
             agg[key][0] += num(r["wall_seconds"])
             agg[key][1] = max(agg[key][1], num(r["peak_rss_kb"]))
             agg[key][2] += 1
             agg[key][3] += num(r["out_nodes"])
 
-        out.append("<h3>Mean cost per tool and track</h3>")
+        out.append("<h3>Mean cost per tool and query setting</h3>")
         rows = []
-        for (track, tool), (secs, rss, n, nodes) in sorted(agg.items()):
+        for (track, tool, threads, gap, iterations, variant), (secs, rss, n, nodes) in sorted(agg.items()):
             dot = f'<span class="dot" style="background:{tool_color(tool)}"></span>'
-            rows.append([track, dot + esc(tool), n, fmt_secs(secs / n),
+            rows.append([track, dot + esc(tool), threads, gap, iterations, variant,
+                         n, fmt_secs(secs / n),
                          fmt_gib(rss), f"{nodes / n:,.0f}"])
-        out.append(table(["track", "tool", "queries", "mean seconds",
+        out.append(table(["track", "tool", "threads", "gap (bp)",
+                          "ODGI iterations", "variant", "queries", "mean seconds",
                           "max peak RSS (GiB)", "mean out nodes"], rows, 2))
-
-        for track in ("node_steps", "node_bases", "region"):
-            keys = [(t, tl) for (t, tl) in agg if t == track]
-            if not keys:
-                continue
-            items = [(tl, agg[(track, tl)][0] / agg[(track, tl)][2], tool_color(tl))
-                     for (_, tl) in sorted(keys, key=lambda k: k[1])]
-            out.append(bar_chart(items, "s", f"Mean query wall time — {track}."))
 
         for track, heading in TRACK_TITLES.items():
             subset = [r for r in query_rows if r["track"] == track]
@@ -494,15 +511,24 @@ gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p
                 continue
             out.append(f"<h3>{esc(heading)}</h3>")
             rows = []
-            for r in sorted(subset, key=lambda r: (r["query_id"], num(r["context"]), r["tool"])):
+            for r in sorted(subset, key=lambda r: (
+                r["query_id"], num(r["context"]), r["tool"],
+                num(r.get("threads")), num(r.get("haplotype_gap_bp")),
+                num(r.get("merging_iterations")), r.get("query_variant", ""),
+            )):
                 dot = f'<span class="dot" style="background:{tool_color(r["tool"])}"></span>'
                 rows.append([r["query_id"], r["context"] or "—", dot + esc(r["tool"]),
+                             r.get("threads", "NA"),
+                             r.get("haplotype_gap_bp", "NA"),
+                             r.get("merging_iterations", "NA"),
+                             r.get("query_variant", "legacy"),
                              fmt_secs(r["wall_seconds"]), fmt_gib(r["peak_rss_kb"]),
                              f"{int(num(r['out_nodes'])):,}" if r["out_nodes"] else "—",
                              f"{int(num(r['out_paths'])):,}" if r["out_paths"] else "—",
                              r["exit_code"]])
-            out.append(table(["query", "context", "tool", "seconds", "peak RSS (GiB)",
-                              "out nodes", "out paths", "exit"], rows, 3))
+            out.append(table(["query", "context", "tool", "threads", "gap (bp)",
+                              "ODGI iterations", "variant", "seconds",
+                              "peak RSS (GiB)", "out nodes", "out paths", "exit"], rows, 3))
     else:
         out.append('<p class="empty">Not yet collected.</p>')
 
@@ -517,7 +543,8 @@ gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p
     out.append("<h2>Reproducing this</h2>")
     out.append("""<pre><code>conda activate gfaidx_bench
 # Choose Snakefile.w/config.yaml or Snakefile.p/config.p.yaml.
-snakemake -s benchmark/Snakefile.w --configfile benchmark/config.yaml --cores 1
+snakemake -s benchmark/Snakefile.w --configfile benchmark/config.yaml \
+  --cores 8 --resources benchmark_job=1
 python3 benchmark/scripts/make_report.py --results benchmark/results --out benchmark/results/report.html</code></pre>
 <p>Context sweeps live in the selected config file; queries live in its locus
 manifest, while resolved tool coordinates and node IDs are recorded in

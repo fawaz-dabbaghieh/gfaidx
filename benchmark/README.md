@@ -36,8 +36,12 @@ Install Snakemake 9 and the four benchmarked tools:
 The tools may be installed in different environments. Configure an absolute
 path for each executable when it is not available on `PATH`.
 
-For reproducible resource measurements, run one benchmark job at a time with
-`--cores 1`. Concurrent jobs compete for CPU, memory, and storage bandwidth.
+For reproducible resource measurements, allow enough cores for the largest
+configured query thread count and serialize benchmark jobs with the custom
+resource `benchmark_job=1`. For the default eight-thread maximum, use
+`--cores 8 --resources benchmark_job=1`. This lets one measured command use
+eight threads without allowing multiple measurements to compete for CPU,
+memory, or storage bandwidth.
 
 ## Workflow files
 
@@ -70,7 +74,8 @@ records:
 
 ```bash
 snakemake --snakefile benchmark/Snakefile.w \
-  --configfile benchmark/config.yaml --cores 1 --dry-run
+  --configfile benchmark/config.yaml --cores 8 \
+  --resources benchmark_job=1 --dry-run
 ```
 
 `benchmark/Snakefile` remains an alias for this workflow so existing commands
@@ -89,7 +94,8 @@ The P workflow currently rejects fragmented coordinate-bearing names such as
 
 ```bash
 snakemake --snakefile benchmark/Snakefile.p \
-  --configfile benchmark/config.p.yaml --cores 1 --dry-run
+  --configfile benchmark/config.p.yaml --cores 8 \
+  --resources benchmark_job=1 --dry-run
 ```
 
 ## Configure the tools
@@ -113,13 +119,26 @@ results_dir: results_chr1
 graphs_tsv: graphs.tsv
 loci_tsv: loci.tsv
 threads: 1
+query_threads: [1, 2, 4, 8]
+haplotype_gaps_bp: [50000, 100000, 200000, 500000]
+odgi_merging_iterations: [1, 3, 6]
+include_gfaidx_no_gap: true
+include_odgi_default: true
 
 node_contexts_steps: [1, 10, 100, 1000]
 node_contexts_bases: [1000, 10000, 100000, 1000000]
 ```
 
+`threads` is the fixed indexing and setup thread count. `query_threads` is an
+independent extraction sweep. Region queries use every numeric value in
+`haplotype_gaps_bp` for gfaidx and ODGI; ODGI also runs every configured merge
+iteration. The two `include_*` switches retain the tools' special nonnumeric
+baselines alongside the explicit parameter sweep.
+
 Use `graphs.p.tsv` and `loci.p.tsv` with `Snakefile.p`. Large contexts can
-produce very large subgraphs, so start with a short sweep on a new graph.
+produce very large subgraphs, and every additional context, thread, gap, locus,
+or ODGI iteration multiplies the job count. Start with short arrays on a new
+graph, then expand them for the final run.
 
 Optional global tool arguments live in the `gfaidx`, `vg`, `odgi`, and `gbz`
 sections. `vg.chunk_extra` is applied to VG node and interval extraction.
@@ -268,6 +287,12 @@ configured contexts. Use separate region rows for several interval widths,
 preferably sharing a start coordinate. Do not add one row per node context;
 the config arrays create that sweep automatically.
 
+Repeated loci are supported. Several region rows may have the same interval
+length at different coordinates, and several node-only rows may identify
+different seed nodes. All individual runs stay in `query_metrics.tsv`; the
+overview plots average replicates with the same interval length or node
+context.
+
 ## Run the workflow
 
 From the repository root, dry-run and execute the W workflow with:
@@ -277,11 +302,11 @@ conda activate extgfa
 
 snakemake --snakefile benchmark/Snakefile.w \
   --configfile benchmark/config.yaml \
-  --cores 1 --dry-run --printshellcmds
+  --cores 8 --resources benchmark_job=1 --dry-run --printshellcmds
 
 snakemake --snakefile benchmark/Snakefile.w \
   --configfile benchmark/config.yaml \
-  --cores 1 --printshellcmds
+  --cores 8 --resources benchmark_job=1 --printshellcmds
 ```
 
 For a P graph, change both files:
@@ -289,27 +314,33 @@ For a P graph, change both files:
 ```bash
 snakemake --snakefile benchmark/Snakefile.p \
   --configfile benchmark/config.p.yaml \
-  --cores 1 --dry-run --printshellcmds
+  --cores 8 --resources benchmark_job=1 --dry-run --printshellcmds
 
 snakemake --snakefile benchmark/Snakefile.p \
   --configfile benchmark/config.p.yaml \
-  --cores 1 --printshellcmds
+  --cores 8 --resources benchmark_job=1 --printshellcmds
 ```
 
 A custom config may be stored anywhere:
 
 ```bash
 snakemake --snakefile benchmark/Snakefile.p \
-  --configfile /path/to/config.pggb.yaml --cores 1
+  --configfile /path/to/config.pggb.yaml \
+  --cores 8 --resources benchmark_job=1
 ```
 
 Generate a DAG for either workflow with Graphviz:
 
 ```bash
 snakemake --snakefile benchmark/Snakefile.w \
-  --configfile benchmark/config.yaml --dag |
+  --configfile benchmark/config.yaml --cores 8 \
+  --resources benchmark_job=1 --dag |
 dot -Tpng > benchmark/dag.w.png
 ```
+
+Set `--cores` to at least the largest value in `query_threads`. Keep
+`--resources benchmark_job=1`; without it, Snakemake may run independent
+measurements concurrently and distort timing and memory results.
 
 ## What is measured
 
@@ -341,12 +372,25 @@ run first, its output S lines are counted, and gfaidx is run with that count as
 `--max_nodes` plus `--with_coords`. Results are named
 `gfaidx_matched_vg`, `gfaidx_matched_odgi`, and `gfaidx_matched_gbz`.
 
+VG, ODGI, and the matched gfaidx query are run at every `query_threads` value.
+gbz-base has no query thread option, so its source extraction is measured once;
+the matched gfaidx side still runs at every thread value. The gfaidx thread
+setting applies to its indexed path/subpath formatting work, so scaling may be
+small when graph traversal or materialization dominates.
+
 ### Region queries
 
-- VG uses `vg chunk -p PATH:START-END -c 0 -O gfa`.
-- ODGI uses `odgi extract -r PATH:START-END` followed by `odgi view -g`.
-- gbz-base uses a reference sample, contig, and interval.
-- gfaidx uses `get_region --all_haplotypes --with_coords`.
+- VG uses `vg chunk -p PATH:START-END -c 0 -O gfa -t THREADS`. It has no
+  haplotype-gap equivalent.
+- ODGI uses `odgi extract -r PATH:START-END -t THREADS`, followed by
+  `odgi view -g -t THREADS`. Explicit sweep rows add
+  `-d GAP_BP -e ITERATIONS`; a separate `default` variant omits both flags.
+- gbz-base uses a reference sample, contig, and interval with `--context 0`.
+  It has no query thread or haplotype-gap option, so it is measured once per
+  locus.
+- gfaidx uses `get_region --all_haplotypes --with_coords --threads THREADS`.
+  Explicit sweep rows add `--haplotype_gap GAP_BP`; a separate `no_gap`
+  variant omits the flag and preserves gfaidx's outermost-anchor behavior.
 
 Manifest intervals are half-open. `vg chunk -p` uses an inclusive end, so the
 resolver sends `region_end - 1` only to VG.
@@ -375,7 +419,7 @@ report.html                    self-contained summary report
 tables/index_metrics.tsv       indexing time and memory
 tables/index_sizes.tsv         index file sizes and per-tool totals
 tables/query_metrics.tsv       long-form query measurements
-tables/query_comparison.tsv    source and matched-gfaidx comparisons
+tables/query_comparison.tsv    parameter-keyed wide comparison/audit table
 tables/tool_versions.tsv       executable versions
 maps/resolved_loci.tsv         resolved coordinates and both node-ID spaces
 metrics/                       raw JSON measurements and exact commands
@@ -388,6 +432,13 @@ For W graphs, `inputs/<graph>/<graph>.w_to_p.tsv` records every W fragment and
 its generated ODGI P name. For P graphs,
 `inputs/<graph>/<graph>.coordinate_paths.tsv` records the P paths selected for
 gfaidx coordinate indexing, unless an explicit names file was supplied.
+
+`query_metrics.tsv` records `threads`, `haplotype_gap_bp`,
+`merging_iterations`, and `query_variant` on every row. `NA` means that a
+parameter is not available for that tool. Use this long table for custom sweep
+plots. `query_comparison.tsv` pivots only exactly matching parameter keys, so
+cells are intentionally empty or `NA` where tools do not expose equivalent
+settings.
 
 ## Plot the results
 
@@ -405,6 +456,24 @@ The plots cover indexing time and memory, total and component index sizes,
 interval scaling, node-context scaling, output size, and the relative cost of
 each source query and its node-count-matched gfaidx query. `plots.tsv` lists all
 generated figures.
+
+When several region queries have the same requested length, interval plots show
+one arithmetic-mean point per tool and length. Time, peak memory, output scale,
+and per-query relative-cost ratios are averaged independently. The unaggregated
+measurements remain available in `query_metrics.tsv` and
+`query_comparison.tsv`.
+
+Node plots similarly combine all node-query rows for a graph. At each step or
+base-pair context, they show the arithmetic-mean time and peak memory across the
+seed nodes in `loci.tsv`. Relative-cost plots calculate each seed node's source
+tool to matched-gfaidx ratio first and then average those ratios. Individual
+node measurements remain in the result tables.
+
+The existing overview plots select the smallest configured numeric query
+thread, the gfaidx `no_gap` variant, the ODGI `default` variant, standard VG,
+and gbz-base with context zero. They therefore do not mix experimental
+settings. All other thread/gap/iteration combinations remain in the TSVs for
+dedicated scaling and supplementary plots.
 
 ## Tool differences
 
@@ -439,6 +508,17 @@ Path intervals, graph-step context, base-pair context, and a node-count-bounded
 BFS do not have identical semantics. The workflow therefore records output
 nodes, links, paths, and bytes rather than claiming that all extracted node sets
 must match.
+
+### Region context and haplotype gaps
+
+VG's `-c 0` and gbz-base's `--context 0` suppress graph-neighborhood expansion
+around the requested path interval. This prevents gbz-base's nonzero default
+context from silently adding extra nodes. ODGI's `-d` and gfaidx's
+`--haplotype_gap` both use base-pair thresholds for nearby path-supported
+pieces, but their algorithms are not identical; the table records the numeric
+settings without claiming identical output node sets. gfaidx's omitted-gap
+behavior is a separate baseline rather than being treated as another numeric
+gap.
 
 ### GBZ node chopping
 

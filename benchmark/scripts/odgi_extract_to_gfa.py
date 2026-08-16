@@ -41,15 +41,28 @@ def main() -> int:
             args.input,
             "-o",
             str(graph),
+            *args.extract_args,
+            # Append the benchmark-controlled thread setting last so a stale
+            # extract_extra value cannot override the requested sweep point.
             "-t",
             str(args.threads),
-            *args.extract_args,
         ]
         # Record both commands because the outer metrics file names this
         # wrapper rather than its two ODGI child processes.
         print(f"+ {shlex.join(extract)}", file=sys.stderr, flush=True)
         subprocess.run(extract, check=True)
-        view = [args.odgi, "view", "-i", str(graph), "-g"]
+        # GFA serialization is part of the measured operation, so give odgi
+        # view the same thread budget as extraction instead of leaving the
+        # second half of a nominally threaded query at its one-thread default.
+        view = [
+            args.odgi,
+            "view",
+            "-i",
+            str(graph),
+            "-g",
+            "-t",
+            str(args.threads),
+        ]
         print(f"+ {shlex.join(view)}", file=sys.stderr, flush=True)
         subprocess.run(
             view,

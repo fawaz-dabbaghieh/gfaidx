@@ -6,9 +6,9 @@ the GFA statistics of the output it produced (when there is one). The layout is
 parsed from the file path, so adding a tool or a track needs no change here:
 
     metrics/index/<tool>/<graph>/<step>.json
-    metrics/queries/node_steps/<tool>/<graph>/<query>/context_<K>.json
-    metrics/queries/node_bases/<tool>/<graph>/<query>/context_<BP>.json
-    metrics/queries/region/<tool>/<graph>/<query>.json
+    metrics/queries/node_steps/<tool>/<graph>/<query>/context_<K>/threads_<T>.json
+    metrics/queries/node_bases/<tool>/<graph>/<query>/context_<BP>/threads_<T>.json
+    metrics/queries/region/<tool>/<graph>/<query>/threads_<T>/gap_<G>/iterations_<I>.json
 
 Four tables are produced:
 
@@ -133,12 +133,40 @@ def collect_index(results: Path, graphs: set[str] | None = None) -> tuple[list[l
 
 
 def query_stats_path(results: Path, track: str, tool: str, graph: str,
-                     query: str, param: str) -> Path:
+                     query: str, param: str, thread_token: str,
+                     gap_token: str, iteration_token: str,
+                     legacy: bool = False) -> Path:
     """Return the stats JSON that belongs to one query metrics record."""
     base = results / "queries" / track / tool / graph / query
     if track in NODE_TRACKS:
-        return base / f"context_{param}" / "subgraph.stats.json"
-    return base / "subgraph.stats.json"
+        if legacy:
+            return base / f"context_{param}" / "subgraph.stats.json"
+        return base / f"context_{param}" / f"threads_{thread_token}" / "subgraph.stats.json"
+    if legacy:
+        return base / "subgraph.stats.json"
+    return (base / f"threads_{thread_token}" / f"gap_{gap_token}" /
+            f"iterations_{iteration_token}" / "subgraph.stats.json")
+
+
+def numeric_token(token: str) -> str:
+    """Return a numeric path token or NA for a named/unsupported setting."""
+    return token if token.isdigit() else "NA"
+
+
+def query_variant(track: str, tool: str, gap_token: str,
+                  legacy: bool = False) -> str:
+    """Name the semantics represented by one query metrics path."""
+    if legacy:
+        return "legacy"
+    if track in NODE_TRACKS:
+        return "standard"
+    if tool == "gfaidx_all_haplotypes":
+        return "no_gap" if gap_token == "none" else "gap"
+    if tool == "odgi":
+        return "default" if gap_token == "default" else "gap"
+    if tool == "gbz":
+        return "context0"
+    return "standard"
 
 
 def region_labels(path_value: str) -> dict[tuple[str, str], str]:
@@ -170,8 +198,10 @@ def collect_queries(results: Path, labels: dict | None = None,
     """Build the per-query table and the per-query tool comparison table."""
     labels = labels or {}
     rows: list[list[object]] = []
-    # (graph, track, query, param) -> tool -> (secs, rss, nodes)
-    pivot: dict[tuple[str, str, str, str], dict[str, tuple]] = defaultdict(dict)
+    # Parameter columns are part of the comparison key so independent sweep
+    # points never overwrite one another in the wide audit table.
+    # (graph, track, query, context, threads, gap, iterations, variant)
+    pivot: dict[tuple[str, ...], dict[str, tuple]] = defaultdict(dict)
 
     metrics_root = results / "metrics" / "queries"
     for path in sorted(metrics_root.rglob("*.json")):
@@ -185,28 +215,62 @@ def collect_queries(results: Path, labels: dict | None = None,
             continue
         if track in NODE_TRACKS:
             query = rel[3]
-            param = path.stem.removeprefix("context_")
+            if len(rel) >= 6 and rel[4].startswith("context_"):
+                param = rel[4].removeprefix("context_")
+                thread_token = path.stem.removeprefix("threads_")
+                gap_token = "na"
+                iteration_token = "na"
+                legacy = False
+            else:
+                # Accept pre-sweep result trees so existing completed runs can
+                # still be recollected after this workflow update.
+                param = path.stem.removeprefix("context_")
+                thread_token = "na"
+                gap_token = "na"
+                iteration_token = "na"
+                legacy = True
         else:
-            query = path.stem
+            if len(rel) >= 7 and rel[4].startswith("threads_"):
+                query = rel[3]
+                thread_token = rel[4].removeprefix("threads_")
+                gap_token = rel[5].removeprefix("gap_")
+                iteration_token = path.stem.removeprefix("iterations_")
+                legacy = False
+            else:
+                query = path.stem
+                thread_token = "na"
+                gap_token = "na"
+                iteration_token = "na"
+                legacy = True
             # Region queries have no context parameter; label them with the
             # interval instead of leaving the column blank.
             param = labels.get((graph, query), "")
 
         m = load_json(path)
-        stats = load_json(query_stats_path(results, track, tool, graph, query, param))
+        threads = numeric_token(thread_token)
+        gap = numeric_token(gap_token)
+        iterations = numeric_token(iteration_token)
+        variant = query_variant(track, tool, gap_token, legacy)
+        stats = load_json(query_stats_path(
+            results, track, tool, graph, query, param,
+            thread_token, gap_token, iteration_token, legacy,
+        ))
         rows.append([
-            graph, track, query, param, tool,
+            graph, track, query, param, tool, threads, gap, iterations, variant,
             seconds(m), m.get("peak_rss_kb"), m.get("exit_code"),
             stats.get("nodes"), stats.get("edges"),
             stats.get("paths"), stats.get("walks"), stats.get("bytes"),
             m.get("command"),
         ])
-        pivot[(graph, track, query, param)][tool] = (
+        pivot[(graph, track, query, param, threads, gap, iterations, variant)][tool] = (
             seconds(m), m.get("peak_rss_kb"), stats.get("nodes"),
         )
 
     tools = sorted({tool for per_tool in pivot.values() for tool in per_tool})
-    header = ["graph", "track", "query_id", "context"]
+    header = [
+        "graph", "track", "query_id", "context", "threads",
+        "haplotype_gap_bp", "merging_iterations", "query_variant",
+    ]
     for tool in tools:
         header += [f"{tool}_seconds", f"{tool}_peak_rss_kb", f"{tool}_nodes"]
 
@@ -251,9 +315,10 @@ def main() -> int:
     )
     write_tsv(
         Path(args.query_out),
-        ["graph", "track", "query_id", "context", "tool", "wall_seconds",
-         "peak_rss_kb", "exit_code", "out_nodes", "out_edges", "out_paths",
-         "out_walks", "out_bytes", "command"],
+        ["graph", "track", "query_id", "context", "tool", "threads",
+         "haplotype_gap_bp", "merging_iterations", "query_variant",
+         "wall_seconds", "peak_rss_kb", "exit_code", "out_nodes",
+         "out_edges", "out_paths", "out_walks", "out_bytes", "command"],
         query_rows,
     )
     write_tsv(Path(args.comparison_out), comp_header, comp_rows)

@@ -83,13 +83,13 @@ PLOT_DESCRIPTIONS = {
     "indexing_summary_all_steps": "Supplementary index construction plot containing every recorded step.",
     "indexing_summary": "Primary index construction plot using only odgi build -O for ODGI.",
     "index_size_components": "All index artifacts recorded in index_sizes.tsv, split into components.",
-    "interval_scaling": "Interval length versus extraction wall time and peak RSS.",
-    "interval_output": "Interval length versus output nodes and serialized GFA bytes.",
-    "interval_relative_to_gfaidx": "Source-tool cost divided by exact all-haplotype gfaidx cost.",
-    "node_steps_scaling": "Step context versus node-query wall time and peak RSS.",
-    "node_bases_scaling": "Base-pair context versus node-query wall time and peak RSS.",
-    "node_steps_speedup": "Source-tool cost divided by node-count-matched gfaidx cost.",
-    "node_bases_speedup": "Source-tool cost divided by node-count-matched gfaidx cost.",
+    "interval_scaling": "Interval length versus mean extraction wall time and peak RSS.",
+    "interval_output": "Interval length versus mean output nodes and serialized GFA bytes.",
+    "interval_relative_to_gfaidx": "Mean source-tool cost ratio relative to exact all-haplotype gfaidx cost.",
+    "node_steps_scaling": "Step context versus mean node-query wall time and peak RSS across seed nodes.",
+    "node_bases_scaling": "Base-pair context versus mean node-query wall time and peak RSS across seed nodes.",
+    "node_steps_speedup": "Mean per-seed source-tool cost ratio relative to node-count-matched gfaidx.",
+    "node_bases_speedup": "Mean per-seed source-tool cost ratio relative to node-count-matched gfaidx.",
 }
 
 
@@ -666,12 +666,81 @@ def plot_index_size_totals(
 def interval_rows(
     rows: list[dict[str, str]], graph: str
 ) -> list[tuple[dict[str, str], str, int, int]]:
-    """Return successful region rows annotated with start and interval length."""
+    """Return the primary region slice annotated with interval coordinates.
+
+    The sweep data remain in the TSV. Existing overview plots deliberately use
+    the smallest numeric thread count, gfaidx no-gap, ODGI default behavior,
+    standard VG extraction, and the context-zero gbz-base query.
+    """
+    candidates = [
+        row for row in rows
+        if row.get("graph") == graph
+        and row.get("track") == "region"
+        and successful(row)
+    ]
+    if any(row.get("query_variant", "") not in {"", "legacy"} for row in candidates):
+        candidates = [row for row in candidates if row.get("query_variant") != "legacy"]
+
+    numeric_threads = [
+        int(value) for row in candidates
+        if (value := number(row.get("threads"))) is not None
+    ]
+    primary_thread = min(numeric_threads) if numeric_threads else None
+
+    gfaidx_has_no_gap = any(
+        row.get("tool") == "gfaidx_all_haplotypes"
+        and row.get("query_variant") == "no_gap"
+        for row in candidates
+    )
+    odgi_has_default = any(
+        row.get("tool") == "odgi" and row.get("query_variant") == "default"
+        for row in candidates
+    )
+    minimum_gap = {
+        tool: min(
+            int(value)
+            for row in candidates
+            if row.get("tool") == tool
+            and (value := number(row.get("haplotype_gap_bp"))) is not None
+        )
+        for tool in ("gfaidx_all_haplotypes", "odgi")
+        if any(
+            row.get("tool") == tool
+            and number(row.get("haplotype_gap_bp")) is not None
+            for row in candidates
+        )
+    }
+    minimum_odgi_iterations = min(
+        (
+            int(value)
+            for row in candidates
+            if row.get("tool") == "odgi"
+            and (value := number(row.get("merging_iterations"))) is not None
+        ),
+        default=None,
+    )
+
     parsed_rows = []
-    for row in rows:
-        if row.get("graph") != graph or row.get("track") != "region":
+    for row in candidates:
+        thread = number(row.get("threads"))
+        if thread is not None and primary_thread is not None and int(thread) != primary_thread:
             continue
-        if not successful(row):
+        tool = row.get("tool")
+        variant = row.get("query_variant", "legacy")
+        if tool == "gfaidx_all_haplotypes":
+            if gfaidx_has_no_gap and variant != "no_gap":
+                continue
+            if not gfaidx_has_no_gap and number(row.get("haplotype_gap_bp")) != minimum_gap.get(tool):
+                continue
+        elif tool == "odgi":
+            if odgi_has_default and variant != "default":
+                continue
+            if not odgi_has_default:
+                if number(row.get("haplotype_gap_bp")) != minimum_gap.get(tool):
+                    continue
+                if number(row.get("merging_iterations")) != minimum_odgi_iterations:
+                    continue
+        if row.get("graph") != graph or row.get("track") != "region":
             continue
         parsed = parse_interval(row.get("context", ""))
         if parsed is None:
@@ -679,6 +748,68 @@ def interval_rows(
         sequence, start, _end, length = parsed
         parsed_rows.append((row, sequence, start, length))
     return parsed_rows
+
+
+def primary_node_rows(
+    rows: list[dict[str, str]], graph: str, track: str
+) -> list[dict[str, str]]:
+    """Select the smallest-thread node slice for legacy overview plots."""
+    selected = [
+        row for row in rows
+        if row.get("graph") == graph
+        and row.get("track") == track
+        and successful(row)
+        and number(row.get("context")) is not None
+    ]
+    if any(row.get("query_variant", "") not in {"", "legacy"} for row in selected):
+        selected = [row for row in selected if row.get("query_variant") != "legacy"]
+    numeric_threads = [
+        int(value) for row in selected
+        if (value := number(row.get("threads"))) is not None
+    ]
+    if not numeric_threads:
+        return selected
+    primary_thread = min(numeric_threads)
+    return [
+        row for row in selected
+        if number(row.get("threads")) is None
+        or int(number(row.get("threads")) or 0) == primary_thread
+    ]
+
+
+def mean_by_x_value(
+    values: list[tuple[int, float]],
+) -> list[tuple[int, float]]:
+    """Average repeated measurements into one point per x-axis value.
+
+    The result tables retain every individual locus. Aggregation happens only
+    in the plotting layer so repeated regions and seed nodes remain available
+    for later statistical analysis.
+    """
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for length, value in values:
+        grouped[length].append(value)
+    return [
+        (length, sum(measurements) / len(measurements))
+        for length, measurements in sorted(grouped.items())
+    ]
+
+
+def interval_plot_note(
+    selected: list[tuple[dict[str, str], str, int, int]],
+) -> str:
+    """Describe cross-locus connections and repeated-length averaging."""
+    starts = {(sequence, start) for _row, sequence, start, _length in selected}
+    queries_by_length: dict[int, set[str]] = defaultdict(set)
+    for row, _sequence, _start, length in selected:
+        queries_by_length[length].add(row["query_id"])
+
+    notes: list[str] = []
+    if len(starts) > 1:
+        notes.append("points span multiple genomic starts")
+    if any(len(queries) > 1 for queries in queries_by_length.values()):
+        notes.append("equal lengths show arithmetic means")
+    return f"\n{'; '.join(notes)}" if notes else ""
 
 
 def plot_interval_scaling(
@@ -693,7 +824,6 @@ def plot_interval_scaling(
     selected = interval_rows(rows, graph)
     if not selected:
         return
-    starts = {(sequence, start) for _row, sequence, start, _length in selected}
     lengths = {length for _row, _sequence, _start, length in selected}
     groups: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
     for row, _sequence, _start, length in selected:
@@ -706,11 +836,13 @@ def plot_interval_scaling(
     ]
     for axis, (field, ylabel, scale) in zip(axes, metrics):
         for tool, entries in sorted(groups.items(), key=lambda item: tool_sort_key(item[0])):
-            points = sorted(
+            # Collapse replicate loci of the same requested length before
+            # drawing, leaving one mean point per tool and interval size.
+            points = mean_by_x_value([
                 (length, (number(row.get(field)) or 0.0) * scale)
                 for length, row in entries
                 if (number(row.get(field)) or 0.0) > 0
-            )
+            ])
             if not points:
                 continue
             axis.plot(
@@ -724,9 +856,9 @@ def plot_interval_scaling(
         )
         label_tested_x_values(axis, lengths)
     axes[1].legend(fontsize=7, ncol=2)
-    locus_note = "\nConnected points span multiple genomic starts" if len(starts) > 1 else ""
     figure.suptitle(
-        f"Coordinate-interval extraction scaling: {graph}{locus_note}", fontsize=14
+        f"Coordinate-interval extraction scaling: {graph}{interval_plot_note(selected)}",
+        fontsize=14,
     )
     save_figure(
         figure,
@@ -750,7 +882,6 @@ def plot_interval_output(
     selected = interval_rows(rows, graph)
     if not selected:
         return
-    starts = {(sequence, start) for _row, sequence, start, _length in selected}
     lengths = {length for _row, _sequence, _start, length in selected}
     groups: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
     for row, _sequence, _start, length in selected:
@@ -762,11 +893,13 @@ def plot_interval_output(
         (axes[1], "out_bytes", "Output GFA size (MiB)", 1.0 / (1024.0**2)),
     ):
         for tool, entries in sorted(groups.items(), key=lambda item: tool_sort_key(item[0])):
-            points = sorted(
+            # Output scale is averaged in the same way as time and memory so
+            # each requested length has a single visual point per tool.
+            points = mean_by_x_value([
                 (length, (number(row.get(field)) or 0.0) * scale)
                 for length, row in entries
                 if (number(row.get(field)) or 0.0) > 0
-            )
+            ])
             if points:
                 axis.plot(
                     [point[0] for point in points],
@@ -779,8 +912,10 @@ def plot_interval_output(
         )
         label_tested_x_values(axis, lengths)
     axes[1].legend(fontsize=7, ncol=2)
-    locus_note = "\nConnected points span multiple genomic starts" if len(starts) > 1 else ""
-    figure.suptitle(f"Coordinate-interval output scale: {graph}{locus_note}", fontsize=14)
+    figure.suptitle(
+        f"Coordinate-interval output scale: {graph}{interval_plot_note(selected)}",
+        fontsize=14,
+    )
     save_figure(
         figure,
         output_dir,
@@ -806,7 +941,6 @@ def plot_interval_relative(
         row["query_id"]: (sequence, start, length)
         for row, sequence, start, length in selected
     }
-    starts = {(sequence, start) for sequence, start, _length in interval_by_query.values()}
     lengths = {length for _sequence, _start, length in interval_by_query.values()}
     groups: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
     for query, (_sequence, _start, length) in interval_by_query.items():
@@ -837,10 +971,14 @@ def plot_interval_relative(
     ):
         axis.axhline(1.0, color="#555555", linestyle="--", linewidth=1)
         for tool, points in sorted(groups.items(), key=lambda item: tool_sort_key(item[0])):
-            points = sorted(points)
+            # Preserve the previous per-query ratio definition, then average
+            # those ratios for replicate intervals of the same length.
+            averaged = mean_by_x_value([
+                (point[0], point[value_index]) for point in points
+            ])
             axis.plot(
-                [point[0] for point in points],
-                [point[value_index] for point in points],
+                [point[0] for point in averaged],
+                [point[1] for point in averaged],
                 label=tool_label(tool),
                 **line_style(tool),
             )
@@ -849,9 +987,9 @@ def plot_interval_relative(
         )
         label_tested_x_values(axis, lengths)
     axes[1].legend(fontsize=7, ncol=2)
-    locus_note = "\nConnected points span multiple genomic starts" if len(starts) > 1 else ""
     figure.suptitle(
-        f"Coordinate extraction relative to gfaidx: {graph}{locus_note}", fontsize=14
+        f"Coordinate extraction relative to gfaidx: {graph}{interval_plot_note(selected)}",
+        fontsize=14,
     )
     save_figure(
         figure,
@@ -866,23 +1004,14 @@ def plot_interval_relative(
 def plot_node_scaling(
     rows: list[dict[str, str]],
     graph: str,
-    query: str,
     track: str,
     output_dir: Path,
     formats: list[str],
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot time, memory, and output size for one node-context series."""
-    selected = [
-        row
-        for row in rows
-        if row.get("graph") == graph
-        and row.get("query_id") == query
-        and row.get("track") == track
-        and successful(row)
-        and number(row.get("context")) is not None
-    ]
+    """Plot mean time and memory across seed nodes for one context series."""
+    selected = primary_node_rows(rows, graph, track)
     if not selected:
         return
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -901,15 +1030,17 @@ def plot_node_scaling(
     }
     for axis, (field, ylabel, scale) in zip(axes, metrics):
         for tool in sorted(groups, key=tool_sort_key):
-            points = sorted(
+            # Every query_id represents one seed node. Average all successful
+            # seeds at the same configured context into one point per tool.
+            points = mean_by_x_value([
                 (
-                    number(row.get("context")) or 0.0,
+                    int(number(row.get("context")) or 0.0),
                     (number(row.get(field)) or 0.0) * scale,
                 )
                 for row in groups[tool]
                 if (number(row.get("context")) or 0.0) > 0
                 and (number(row.get(field)) or 0.0) > 0
-            )
+            ])
             if points:
                 axis.plot(
                     [point[0] for point in points],
@@ -922,13 +1053,19 @@ def plot_node_scaling(
         label_tested_x_values(axis, contexts)
     axes[1].legend(fontsize=7)
     track_label = "step" if track == "node_steps" else "base-pair"
+    seed_count = len({row["query_id"] for row in selected})
+    seed_note = (
+        f"\nArithmetic mean across {seed_count} seed nodes"
+        if seed_count > 1
+        else ""
+    )
     figure.suptitle(
-        f"Node extraction by {track_label} context: {graph} / {query}", fontsize=14
+        f"Node extraction by {track_label} context: {graph}{seed_note}", fontsize=14
     )
     save_figure(
         figure,
         output_dir,
-        f"{track}_scaling__{safe_name(graph)}__{safe_name(query)}",
+        f"{track}_scaling__{safe_name(graph)}",
         formats,
         dpi,
         generated,
@@ -938,40 +1075,27 @@ def plot_node_scaling(
 def plot_node_speedup(
     rows: list[dict[str, str]],
     graph: str,
-    query: str,
     track: str,
     output_dir: Path,
     formats: list[str],
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot source/matched-gfaidx ratios for one node-context series."""
-    selected = [
-        row
-        for row in rows
-        if row.get("graph") == graph
-        and row.get("query_id") == query
-        and row.get("track") == track
-        and successful(row)
-        and number(row.get("context")) is not None
-    ]
-    by_tool_context = {
-        (row["tool"], row["context"]): row for row in selected
+    """Plot mean per-seed source/matched-gfaidx ratios by context."""
+    selected = primary_node_rows(rows, graph, track)
+    by_query_tool_context = {
+        (row["query_id"], row["tool"], row["context"]): row for row in selected
     }
     ratios: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     for matched, source in MATCHED_SOURCES.items():
-        contexts = sorted(
-            {
-                row["context"]
-                for row in selected
-                if row["tool"] in {matched, source}
-            },
-            key=float,
-        )
-        for context in contexts:
-            source_row = by_tool_context.get((source, context))
-            matched_row = by_tool_context.get((matched, context))
-            if source_row is None or matched_row is None:
+        # Compute the ratio within each seed first. Averaging these ratios by
+        # context gives every seed equal weight and avoids a ratio-of-means bias.
+        source_rows = [row for row in selected if row["tool"] == source]
+        for source_row in source_rows:
+            query = source_row["query_id"]
+            context = source_row["context"]
+            matched_row = by_query_tool_context.get((query, matched, context))
+            if matched_row is None:
                 continue
             source_time = number(source_row.get("wall_seconds"))
             matched_time = number(matched_row.get("wall_seconds"))
@@ -996,10 +1120,12 @@ def plot_node_speedup(
     ):
         axis.axhline(1.0, color="#555555", linestyle="--", linewidth=1)
         for source in sorted(ratios, key=tool_sort_key):
-            points = sorted(ratios[source])
+            points = mean_by_x_value([
+                (int(point[0]), point[value_index]) for point in ratios[source]
+            ])
             axis.plot(
                 [point[0] for point in points],
-                [point[value_index] for point in points],
+                [point[1] for point in points],
                 label=f"{tool_label(source)} / gfaidx",
                 **line_style(source),
             )
@@ -1007,13 +1133,19 @@ def plot_node_speedup(
         configure_axis(axis, x_label, ylabel, log_x=True, log_y=True)
         label_tested_x_values(axis, contexts)
     axes[1].legend(fontsize=8)
+    seed_count = len({row["query_id"] for row in selected})
+    seed_note = (
+        f"\nArithmetic mean across {seed_count} seed nodes"
+        if seed_count > 1
+        else ""
+    )
     figure.suptitle(
-        f"Matched node-query cost ratios: {graph} / {query}", fontsize=14
+        f"Matched node-query cost ratios: {graph}{seed_note}", fontsize=14
     )
     save_figure(
         figure,
         output_dir,
-        f"{track}_speedup__{safe_name(graph)}__{safe_name(query)}",
+        f"{track}_speedup__{safe_name(graph)}",
         formats,
         dpi,
         generated,
@@ -1098,19 +1230,18 @@ def main() -> int:
             query_rows, graph, output_dir, formats, args.dpi, generated
         )
 
-        node_queries = sorted(
+        node_tracks = sorted(
             {
-                (row["query_id"], row["track"])
+                row["track"]
                 for row in query_rows
                 if row.get("graph") == graph
                 and row.get("track") in {"node_steps", "node_bases"}
             }
         )
-        for query, track in node_queries:
+        for track in node_tracks:
             plot_node_scaling(
                 query_rows,
                 graph,
-                query,
                 track,
                 output_dir,
                 formats,
@@ -1120,7 +1251,6 @@ def main() -> int:
             plot_node_speedup(
                 query_rows,
                 graph,
-                query,
                 track,
                 output_dir,
                 formats,

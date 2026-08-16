@@ -8,9 +8,23 @@ results_dir: results_p
 graphs_tsv: graphs.p.tsv
 loci_tsv: loci.p.tsv
 
-# Keep tool threading at one for single-threaded comparisons. Snakemake --cores
-# controls how many independent benchmark jobs may run concurrently.
+# Fixed thread count for indexing and untimed setup operations.
 threads: 1
+
+# Query-level thread sweep. gfaidx, VG, and ODGI are measured at every value.
+# gbz-base has no query thread option and is measured once per query.
+query_threads: [1, 2, 4, 8]
+
+# Region-only local haplotype sweep, expressed in bases for both tools.
+haplotype_gaps_bp: [50000, 100000, 200000, 500000]
+
+# Keep a single pass, the currently documented default of three iterations,
+# and a larger six-iteration setting.
+odgi_merging_iterations: [1, 3, 6]
+
+# Preserve named baselines that are not equivalent to a numeric gap.
+include_gfaidx_no_gap: true
+include_odgi_default: true
 
 node_contexts_steps: [1, 10, 100, 1000, 5000, 10000]
 node_contexts_bases: [1000, 10000, 100000, 1000000, 5000000, 10000000]

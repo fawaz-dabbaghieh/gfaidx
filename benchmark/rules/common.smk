@@ -35,8 +35,77 @@ VG = config.get("tools", {}).get("vg", "vg")
 ODGI = config.get("tools", {}).get("odgi", "odgi")
 GBZ = config.get("tools", {}).get("gbz_base", "gbz-base")
 
-THREADS = int(config.get("threads", 1))
+INDEX_THREADS = int(config.get("threads", 1))
 SAMPLE_INTERVAL = str(config.get("sample_interval_seconds", 0.10))
+
+
+def positive_integer_sweep(name, values):
+    """Validate and de-duplicate a configured positive-integer sweep."""
+    parsed = []
+    for value in values:
+        number = int(value)
+        if number < 1:
+            raise ValueError(f"{name} values must be positive integers")
+        if number not in parsed:
+            parsed.append(number)
+    if not parsed:
+        raise ValueError(f"{name} must contain at least one value")
+    return [str(value) for value in parsed]
+
+
+def nonnegative_integer_sweep(name, values):
+    """Validate and de-duplicate a configured non-negative-integer sweep."""
+    parsed = []
+    for value in values:
+        number = int(value)
+        if number < 0:
+            raise ValueError(f"{name} values must be non-negative integers")
+        if number not in parsed:
+            parsed.append(number)
+    if not parsed:
+        raise ValueError(f"{name} must contain at least one value")
+    return [str(value) for value in parsed]
+
+
+def boolean_setting(name, value):
+    """Parse a boolean config value before manifest helpers are initialized."""
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
+if INDEX_THREADS < 1:
+    raise ValueError("threads must be a positive indexing/setup thread count")
+
+# Query threads are an experimental dimension, separate from the fixed thread
+# count used to construct each index. Keeping the indexes shared prevents the
+# thread sweep from rebuilding identical on-disk data for every query setting.
+QUERY_THREADS = positive_integer_sweep(
+    "query_threads", config.get("query_threads", [1, 2, 4, 8])
+)
+
+# Numeric gaps are shared by gfaidx and ODGI. The gfaidx no-gap behavior and
+# ODGI's version-specific defaults are separate named baselines, because they
+# are not equivalent to any finite numeric gap.
+HAPLOTYPE_GAPS = nonnegative_integer_sweep(
+    "haplotype_gaps_bp",
+    config.get("haplotype_gaps_bp", [50000, 100000, 200000, 500000]),
+)
+ODGI_MERGE_ITERATIONS = positive_integer_sweep(
+    "odgi_merging_iterations",
+    config.get("odgi_merging_iterations", [1, 3, 6]),
+)
+INCLUDE_GFAIDX_NO_GAP = boolean_setting(
+    "include_gfaidx_no_gap", config.get("include_gfaidx_no_gap", True)
+)
+INCLUDE_ODGI_DEFAULT = boolean_setting(
+    "include_odgi_default", config.get("include_odgi_default", True)
+)
 
 # Two node-query tracks with different context semantics.
 STEP_CONTEXTS = [str(v) for v in config.get("node_contexts_steps", [])]
@@ -53,6 +122,9 @@ wildcard_constraints:
     graph=r"[^/]+",
     query=r"[^/]+",
     context=r"[^/]+",
+    qthreads=r"[1-9][0-9]*",
+    gap=r"[0-9]+",
+    iterations=r"[1-9][0-9]*",
     source=r"vg|odgi|gbz",
     track=r"node_steps|node_bases",
 
@@ -412,22 +484,33 @@ def gfaidx_sidecars(graph):
     }
 
 
-def node_gfa(track, tool, graph, query, context):
+def node_gfa(track, tool, graph, query, context, qthreads):
     """Return the GFA output of one node query."""
-    return RESULTS / "queries" / track / tool / graph / query / f"context_{context}" / "subgraph.gfa"
+    return (RESULTS / "queries" / track / tool / graph / query /
+            f"context_{context}" / f"threads_{qthreads}" / "subgraph.gfa")
 
 
-def region_gfa(tool, graph, query):
+def region_gfa(tool, graph, query, qthreads, gap, iterations):
     """Return the GFA output of one region query."""
-    return RESULTS / "queries" / "region" / tool / graph / query / "subgraph.gfa"
+    return (RESULTS / "queries" / "region" / tool / graph / query /
+            f"threads_{qthreads}" / f"gap_{gap}" /
+            f"iterations_{iterations}" / "subgraph.gfa")
 
 
-def node_metrics(track, tool, graph, query, context):
-    return RESULTS / "metrics" / "queries" / track / tool / graph / query / f"context_{context}.json"
+def node_metrics(track, tool, graph, query, context, qthreads):
+    return (RESULTS / "metrics" / "queries" / track / tool / graph / query /
+            f"context_{context}" / f"threads_{qthreads}.json")
 
 
-def region_metrics(tool, graph, query):
-    return RESULTS / "metrics" / "queries" / "region" / tool / graph / f"{query}.json"
+def region_metrics(tool, graph, query, qthreads, gap, iterations):
+    return (RESULTS / "metrics" / "queries" / "region" / tool / graph / query /
+            f"threads_{qthreads}" / f"gap_{gap}" /
+            f"iterations_{iterations}.json")
+
+
+def source_query_thread(source, qthreads):
+    """Return the source run used by one matched-gfaidx node query."""
+    return "na" if source == "gbz" else qthreads
 
 
 def source_region_available(row, source):
@@ -542,27 +625,62 @@ for row in NODE_QUERIES:
     for track, contexts in TRACK_CONTEXTS.items():
         for context in contexts:
             for source in TRACK_SOURCES[track]:
-                TARGETS += [
-                    node_metrics(track, source, graph, query, context),
-                    node_gfa(track, source, graph, query, context).with_suffix(".stats.json"),
-                    node_metrics(track, f"gfaidx_matched_{source}", graph, query, context),
-                    node_gfa(track, f"gfaidx_matched_{source}", graph, query, context).with_suffix(".stats.json"),
-                ]
+                # VG and ODGI are rerun at every thread count. gbz-base has no
+                # query thread option, so its source result is produced once
+                # and reused while gfaidx still runs its full thread sweep.
+                source_threads = QUERY_THREADS if source != "gbz" else ["na"]
+                for qthreads in source_threads:
+                    TARGETS += [
+                        node_metrics(track, source, graph, query, context, qthreads),
+                        node_gfa(track, source, graph, query, context, qthreads).with_suffix(".stats.json"),
+                    ]
+                for qthreads in QUERY_THREADS:
+                    TARGETS += [
+                        node_metrics(track, f"gfaidx_matched_{source}", graph, query, context, qthreads),
+                        node_gfa(track, f"gfaidx_matched_{source}", graph, query, context, qthreads).with_suffix(".stats.json"),
+                    ]
 
 for row in REGION_QUERIES:
     graph, query = row["graph"], row["query_id"]
     TARGETS.append(locus_resolution_file(graph, query))
-    TARGETS += [
-        region_metrics("gfaidx_all_haplotypes", graph, query),
-        region_gfa("gfaidx_all_haplotypes", graph, query).with_suffix(".stats.json"),
-    ]
-    for source in REGION_SOURCES:
-        if not source_region_available(row, source):
-            continue
+    for qthreads in QUERY_THREADS:
+        if INCLUDE_GFAIDX_NO_GAP:
+            TARGETS += [
+                region_metrics("gfaidx_all_haplotypes", graph, query, qthreads, "none", "na"),
+                region_gfa("gfaidx_all_haplotypes", graph, query, qthreads, "none", "na").with_suffix(".stats.json"),
+            ]
+        for gap in HAPLOTYPE_GAPS:
+            TARGETS += [
+                region_metrics("gfaidx_all_haplotypes", graph, query, qthreads, gap, "na"),
+                region_gfa("gfaidx_all_haplotypes", graph, query, qthreads, gap, "na").with_suffix(".stats.json"),
+            ]
+
+        # VG supports query threads but has no haplotype-gap parameter.
         TARGETS += [
-            region_metrics(source, graph, query),
-            region_gfa(source, graph, query).with_suffix(".stats.json"),
+            region_metrics("vg", graph, query, qthreads, "na", "na"),
+            region_gfa("vg", graph, query, qthreads, "na", "na").with_suffix(".stats.json"),
         ]
+
+        # Keep ODGI's version-specific defaults as a named baseline, then run
+        # every explicit gap/iteration pair for auditable comparisons.
+        if INCLUDE_ODGI_DEFAULT:
+            TARGETS += [
+                region_metrics("odgi", graph, query, qthreads, "default", "default"),
+                region_gfa("odgi", graph, query, qthreads, "default", "default").with_suffix(".stats.json"),
+            ]
+        for gap in HAPLOTYPE_GAPS:
+            for iterations in ODGI_MERGE_ITERATIONS:
+                TARGETS += [
+                    region_metrics("odgi", graph, query, qthreads, gap, iterations),
+                    region_gfa("odgi", graph, query, qthreads, gap, iterations).with_suffix(".stats.json"),
+                ]
+
+    # gbz-base has neither query threads nor a haplotype-gap parameter. Its
+    # interval query is measured once with an explicit zero graph context.
+    TARGETS += [
+        region_metrics("gbz", graph, query, "na", "na", "na"),
+        region_gfa("gbz", graph, query, "na", "na", "na").with_suffix(".stats.json"),
+    ]
 
 # Deduplicate setup artifacts when one locus requests both node and region work.
 TARGETS = list(dict.fromkeys(TARGETS))
@@ -601,6 +719,8 @@ rule html_report:
 rule tool_versions:
     output:
         TABLES / "tool_versions.tsv"
+    resources:
+        benchmark_job=1
     shell:
         """
         {PYTHON} {SCRIPTS}/tool_versions.py \
@@ -644,6 +764,8 @@ rule collect_loci:
         tsv=RESULTS / "maps" / "resolved_loci.tsv"
     params:
         graphs=lambda w: " ".join(shlex.quote(graph) for graph in GRAPHS),
+    resources:
+        benchmark_job=1
     shell:
         """
         {PYTHON} {SCRIPTS}/collect_loci.py \
@@ -668,6 +790,8 @@ rule w_to_p:
         mapping=f"{RESULTS}/inputs/{{graph}}/{{graph}}.w_to_p.tsv",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/w_to_p.json",
         log=f"{RESULTS}/logs/index/odgi/{{graph}}/w_to_p.log",
+    resources:
+        benchmark_job=1
     shell:
         """
         {PYTHON} {SCRIPTS}/measure.py \
@@ -694,7 +818,9 @@ rule gfaidx_index:
         pcx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.pcx",
         metrics=f"{RESULTS}/metrics/index/gfaidx/{{graph}}/index_gfa.json",
         log=f"{RESULTS}/logs/index/gfaidx/{{graph}}/index_gfa.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: join_options(extra("gfaidx", "index_extra"), graph_extra(w, "gfaidx_index_extra"))
     shell:
@@ -716,6 +842,8 @@ rule p_gfaidx_path_selection:
         paths=f"{RESULTS}/inputs/{{graph}}/{{graph}}.coordinate_paths.tsv"
     params:
         requested=lambda w: shlex.join(p_requested_path_names(w.graph))
+    resources:
+        benchmark_job=1
     shell:
         """
         {GFAIDX} get_path {input.gz:q} --pdx {input.pdx:q} --print_path_names |
@@ -731,7 +859,9 @@ rule gfaidx_coordinates:
         cdx=f"{RESULTS}/indexes/gfaidx/{{graph}}/{{graph}}.indexed.gfa.gz.cdx",
         metrics=f"{RESULTS}/metrics/index/gfaidx/{{graph}}/index_coordinates.json",
         log=f"{RESULTS}/logs/index/gfaidx/{{graph}}/index_coordinates.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         reference=lambda w: gfaidx_reference_arg(w.graph),
         extra=lambda w: join_options(extra("gfaidx", "coordinate_extra"), graph_extra(w, "gfaidx_coord_extra"))
@@ -752,7 +882,9 @@ rule vg_convert_xg:
         xg=f"{RESULTS}/indexes/vg/{{graph}}/{{graph}}.xg",
         metrics=f"{RESULTS}/metrics/index/vg/{{graph}}/convert_xg.json",
         log=f"{RESULTS}/logs/index/vg/{{graph}}/convert_xg.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=vg_convert_options
     shell:
@@ -773,7 +905,9 @@ rule vg_gbwt_gbz:
         gbz=f"{RESULTS}/indexes/gbz/{{graph}}/{{graph}}.gbz",
         metrics=f"{RESULTS}/metrics/index/gbz/{{graph}}/vg_gbwt_gbz.json",
         log=f"{RESULTS}/logs/index/gbz/{{graph}}/vg_gbwt_gbz.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=vg_gbwt_options,
         path_format=PATH_FORMAT,
@@ -797,7 +931,9 @@ rule gbz_construct_db:
         db=f"{RESULTS}/indexes/gbz/{{graph}}/{{graph}}.gbz.db",
         metrics=f"{RESULTS}/metrics/index/gbz/{{graph}}/construct_db.json",
         log=f"{RESULTS}/logs/index/gbz/{{graph}}/construct_db.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: extra("gbz", "construct_extra")
     shell:
@@ -819,7 +955,9 @@ rule odgi_build:
         og=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.og",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/build.json",
         log=f"{RESULTS}/logs/index/odgi/{{graph}}/build.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: join_options(extra("odgi", "build_extra"), graph_extra(w, "odgi_build_extra"))
     shell:
@@ -843,7 +981,9 @@ rule odgi_build_optimized:
         og=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.opt.og",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/build_optimized.json",
         log=f"{RESULTS}/logs/index/odgi/{{graph}}/build_optimized.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: join_options(extra("odgi", "build_extra"), graph_extra(w, "odgi_build_extra"))
     shell:
@@ -863,6 +1003,8 @@ rule vg_path_names:
     output:
         paths=f"{RESULTS}/maps/vg/{{graph}}/path_names.txt",
         log=f"{RESULTS}/logs/maps/vg/{{graph}}/path_names.log",
+    resources:
+        benchmark_job=1
     shell:
         """
         {VG} paths -x {input.xg} -L > {output.paths} 2> {output.log}
@@ -876,6 +1018,8 @@ rule odgi_path_names:
     output:
         paths=f"{RESULTS}/maps/odgi/{{graph}}/path_names.txt",
         log=f"{RESULTS}/logs/maps/odgi/{{graph}}/path_names.log",
+    resources:
+        benchmark_job=1
     shell:
         """
         {ODGI} paths -i {input.og} -L > {output.paths} 2> {output.log}
@@ -890,6 +1034,8 @@ rule gbz_path_metadata:
     output:
         metadata=f"{RESULTS}/maps/gbz/{{graph}}/path_metadata.tsv",
         log=f"{RESULTS}/logs/maps/gbz/{{graph}}/path_metadata.log",
+    resources:
+        benchmark_job=1
     shell:
         """
         {VG} paths -M -x {input.gbz} > {output.metadata} 2> {output.log}
@@ -906,6 +1052,8 @@ rule resolve_locus:
     params:
         resolver=locus_resolver_command,
         args=locus_resolver_args,
+    resources:
+        benchmark_job=1
     shell:
         """
         {PYTHON} {params.resolver} {params.args} --out {output.json:q}
@@ -923,7 +1071,9 @@ rule original_node_map:
         node_id=f"{RESULTS}/maps/nodes/original/{{graph}}/{{query}}.node_id",
         gfa=f"{RESULTS}/maps/nodes/original/{{graph}}/{{query}}.position.gfa",
         log=f"{RESULTS}/logs/maps/nodes/original/{{graph}}/{{query}}.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     shell:
         """
         region="$({PYTHON} {SCRIPTS}/json_value.py \
@@ -945,6 +1095,8 @@ rule odgi_node_map:
         node_id=f"{RESULTS}/maps/odgi/{{graph}}/{{query}}.node_id",
         position=f"{RESULTS}/maps/odgi/{{graph}}/{{query}}.position.tsv",
         log=f"{RESULTS}/logs/maps/odgi/{{graph}}/{{query}}.log",
+    resources:
+        benchmark_job=1
     shell:
         """
         locus="$({PYTHON} {SCRIPTS}/json_value.py \
@@ -963,7 +1115,9 @@ rule odgi_pathindex:
         xp=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.xp",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/pathindex.json",
         log=f"{RESULTS}/logs/index/odgi/{{graph}}/pathindex.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: join_options(extra("odgi", "pathindex_extra"), graph_extra(w, "odgi_pathindex_extra"))
     shell:
@@ -982,7 +1136,9 @@ rule odgi_stepindex:
         stpidx=f"{RESULTS}/indexes/odgi/{{graph}}/{{graph}}.stpidx",
         metrics=f"{RESULTS}/metrics/index/odgi/{{graph}}/stepindex.json",
         log=f"{RESULTS}/logs/index/odgi/{{graph}}/stepindex.log",
-    threads: THREADS
+    threads: INDEX_THREADS
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: join_options(extra("odgi", "stepindex_extra"), graph_extra(w, "odgi_stepindex_extra"))
     shell:
@@ -1017,10 +1173,12 @@ rule vg_node_query:
         xg=lambda w: vg_xg(w.graph),
         node_map=lambda w: original_node_map_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}.json",
-        log=f"{RESULTS}/logs/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.json",
+        log=f"{RESULTS}/logs/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
     params:
         context=vg_context_flags,
         extra=vg_chunk_options,
@@ -1030,8 +1188,8 @@ rule vg_node_query:
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} chunk -x {input.xg} -r "$node:$node" {params.context} \
-             -O gfa -t {threads} {params.extra}
+          -- {VG} chunk -x {input.xg} -r "$node:$node" {params.extra} \
+             {params.context} -O gfa -t {threads}
         """
 
 
@@ -1040,14 +1198,16 @@ rule odgi_node_query:
         og=lambda w: odgi_og_opt(w.graph),
         node_map=lambda w: odgi_node_map_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/{{track}}/odgi/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/{{track}}/odgi/{{graph}}/{{query}}/context_{{context}}.json",
-        log=f"{RESULTS}/logs/queries/{{track}}/odgi/{{graph}}/{{query}}/context_{{context}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/{{track}}/odgi/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/{{track}}/odgi/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.json",
+        log=f"{RESULTS}/logs/queries/{{track}}/odgi/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
     params:
         context=odgi_context_flags,
         extra=lambda w: extra("odgi", "extract_extra"),
-        temp=lambda w: str(node_gfa(w.track, "odgi", w.graph, w.query, w.context).parent),
+        temp=lambda w: str(node_gfa(w.track, "odgi", w.graph, w.query, w.context, w.qthreads).parent),
     shell:
         """
         node="$(cat {input.node_map})"
@@ -1067,10 +1227,12 @@ rule gbz_node_query:
         db=lambda w: gbz_db(w.graph),
         node_map=lambda w: original_node_map_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}.json",
-        log=f"{RESULTS}/logs/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}/threads_na/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}/threads_na.json",
+        log=f"{RESULTS}/logs/queries/node_bases/gbz/{{graph}}/{{query}}/context_{{context}}/threads_na.log",
+    threads: 1
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: extra("gbz", "query_extra"),
     shell:
@@ -1079,8 +1241,8 @@ rule gbz_node_query:
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {GBZ} query --node "$node" --context {wildcards.context} \
-             {input.db} {params.extra}
+          -- {GBZ} query --node "$node" {params.extra} \
+             --context {wildcards.context} {input.db}
         """
 
 
@@ -1091,12 +1253,17 @@ rule gfaidx_node_matched:
     input:
         unpack(lambda w: gfaidx_sidecars(w.graph)),
         node_map=lambda w: original_node_map_file(w.graph, w.query),
-        source_stats=lambda w: node_gfa(w.track, w.source, w.graph, w.query, w.context).with_suffix(".stats.json"),
+        source_stats=lambda w: node_gfa(
+            w.track, w.source, w.graph, w.query, w.context,
+            source_query_thread(w.source, w.qthreads)
+        ).with_suffix(".stats.json"),
     output:
-        gfa=f"{RESULTS}/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}.json",
-        log=f"{RESULTS}/logs/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.json",
+        log=f"{RESULTS}/logs/queries/{{track}}/gfaidx_matched_{{source}}/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: extra("gfaidx", "get_subgraph_extra"),
     shell:
@@ -1108,8 +1275,8 @@ rule gfaidx_node_matched:
           --sample-interval {SAMPLE_INTERVAL} \
           -- {GFAIDX} get_subgraph {input.gz} "$node" {output.gfa} \
              --idx {input.idx} --ndx {input.ndx} --pdx {input.pdx} \
-             --lnx {input.lnx} --pcx {input.pcx} \
-             --max_nodes "$max_nodes" --with_coords {params.extra}
+             --lnx {input.lnx} --pcx {input.pcx} {params.extra} \
+             --max_nodes "$max_nodes" --with_coords --threads {threads} \
         """
 
 
@@ -1122,10 +1289,12 @@ rule vg_region_query:
         xg=lambda w: vg_xg(w.graph),
         locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/region/vg/{{graph}}/{{query}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/region/vg/{{graph}}/{{query}}.json",
-        log=f"{RESULTS}/logs/queries/region/vg/{{graph}}/{{query}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/region/vg/{{graph}}/{{query}}/threads_{{qthreads}}/gap_na/iterations_na/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/vg/{{graph}}/{{query}}/threads_{{qthreads}}/gap_na/iterations_na.json",
+        log=f"{RESULTS}/logs/queries/region/vg/{{graph}}/{{query}}/threads_{{qthreads}}/gap_na/iterations_na.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
     params:
         extra=vg_chunk_options,
     shell:
@@ -1135,23 +1304,59 @@ rule vg_region_query:
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} chunk -x {input.xg} -p "$region" -c 0 \
-             -O gfa -t {threads} {params.extra}
+          -- {VG} chunk -x {input.xg} -p "$region" {params.extra} \
+             -c 0 -O gfa -t {threads}
         """
 
 
-rule odgi_region_query:
+rule odgi_region_gap_query:
     input:
         og=lambda w: odgi_og_opt(w.graph),
         locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/region/odgi/{{graph}}/{{query}}.json",
-        log=f"{RESULTS}/logs/queries/region/odgi/{{graph}}/{{query}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/threads_{{qthreads}}/gap_{{gap}}/iterations_{{iterations}}/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/odgi/{{graph}}/{{query}}/threads_{{qthreads}}/gap_{{gap}}/iterations_{{iterations}}.json",
+        log=f"{RESULTS}/logs/queries/region/odgi/{{graph}}/{{query}}/threads_{{qthreads}}/gap_{{gap}}/iterations_{{iterations}}.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: extra("odgi", "extract_extra"),
-        temp=lambda w: str(region_gfa("odgi", w.graph, w.query).parent),
+        temp=lambda w: str(region_gfa(
+            "odgi", w.graph, w.query, w.qthreads, w.gap, w.iterations
+        ).parent),
+    shell:
+        """
+        region="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key odgi_region)"
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} --log {output.log} \
+          --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
+          -- {PYTHON} {SCRIPTS}/odgi_extract_to_gfa.py \
+             --odgi {ODGI} --input {input.og} --threads {threads} \
+             --temp-dir {params.temp:q} -- -r "$region" {params.extra} \
+             -d {wildcards.gap} -e {wildcards.iterations}
+        """
+
+
+rule odgi_region_default_query:
+    # This named baseline deliberately leaves -d/-e unset. ODGI defaults have
+    # changed between releases, and the exact command remains in the TSV.
+    input:
+        og=lambda w: odgi_og_opt(w.graph),
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
+    output:
+        gfa=f"{RESULTS}/queries/region/odgi/{{graph}}/{{query}}/threads_{{qthreads}}/gap_default/iterations_default/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/odgi/{{graph}}/{{query}}/threads_{{qthreads}}/gap_default/iterations_default.json",
+        log=f"{RESULTS}/logs/queries/region/odgi/{{graph}}/{{query}}/threads_{{qthreads}}/gap_default/iterations_default.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
+    params:
+        extra=lambda w: extra("odgi", "extract_extra"),
+        temp=lambda w: str(region_gfa(
+            "odgi", w.graph, w.query, w.qthreads, "default", "default"
+        ).parent),
     shell:
         """
         region="$({PYTHON} {SCRIPTS}/json_value.py \
@@ -1170,10 +1375,12 @@ rule gbz_region_query:
         db=lambda w: gbz_db(w.graph),
         locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/region/gbz/{{graph}}/{{query}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/region/gbz/{{graph}}/{{query}}.json",
-        log=f"{RESULTS}/logs/queries/region/gbz/{{graph}}/{{query}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/region/gbz/{{graph}}/{{query}}/threads_na/gap_na/iterations_na/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/gbz/{{graph}}/{{query}}/threads_na/gap_na/iterations_na.json",
+        log=f"{RESULTS}/logs/queries/region/gbz/{{graph}}/{{query}}/threads_na/gap_na/iterations_na.log",
+    threads: 1
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: extra("gbz", "query_extra"),
     shell:
@@ -1188,11 +1395,11 @@ rule gbz_region_query:
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
           -- {GBZ} query --sample "$sample" --contig "$contig" \
-             --interval "$interval" {input.db} {params.extra}
+             --interval "$interval" {params.extra} --context 0 {input.db}
         """
 
 
-rule gfaidx_region_all_haplotypes:
+rule gfaidx_region_gap_query:
     # Coordinate intervals use exact path-supported selection. This is a
     # different operation from the node-count-bounded BFS used by get_subgraph,
     # so no --max_nodes value is supplied or matched to another tool.
@@ -1201,10 +1408,12 @@ rule gfaidx_region_all_haplotypes:
         cdx=lambda w: str(gfaidx_prefix(w.graph)) + ".cdx",
         locus=lambda w: locus_resolution_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}.json",
-        log=f"{RESULTS}/logs/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}.log",
-    threads: THREADS
+        gfa=f"{RESULTS}/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/threads_{{qthreads}}/gap_{{gap}}/iterations_na/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/threads_{{qthreads}}/gap_{{gap}}/iterations_na.json",
+        log=f"{RESULTS}/logs/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/threads_{{qthreads}}/gap_{{gap}}/iterations_na.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
     params:
         extra=lambda w: extra("gfaidx", "get_region_extra"),
         reference=gfaidx_region_reference_arg,
@@ -1218,8 +1427,40 @@ rule gfaidx_region_all_haplotypes:
           -- {GFAIDX} get_region {input.gz} "$region" {output.gfa} \
              --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} \
              --pdx {input.pdx} --lnx {input.lnx} --pcx {input.pcx} \
-             {params.reference} --with_coords --all_haplotypes \
-             {params.extra}
+             {params.reference} {params.extra} --with_coords --all_haplotypes \
+             --haplotype_gap {wildcards.gap} --threads {threads}
+        """
+
+
+rule gfaidx_region_no_gap_query:
+    # Omitting --haplotype_gap preserves gfaidx's outermost-anchor behavior,
+    # which is intentionally kept separate from every finite numeric gap.
+    input:
+        unpack(lambda w: gfaidx_sidecars(w.graph)),
+        cdx=lambda w: str(gfaidx_prefix(w.graph)) + ".cdx",
+        locus=lambda w: locus_resolution_file(w.graph, w.query),
+    output:
+        gfa=f"{RESULTS}/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/threads_{{qthreads}}/gap_none/iterations_na/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/threads_{{qthreads}}/gap_none/iterations_na.json",
+        log=f"{RESULTS}/logs/queries/region/gfaidx_all_haplotypes/{{graph}}/{{query}}/threads_{{qthreads}}/gap_none/iterations_na.log",
+    threads: lambda w: int(w.qthreads)
+    resources:
+        benchmark_job=1
+    params:
+        extra=lambda w: extra("gfaidx", "get_region_extra"),
+        reference=gfaidx_region_reference_arg,
+    shell:
+        """
+        region="$({PYTHON} {SCRIPTS}/json_value.py \
+          --input {input.locus:q} --key gfaidx_region)"
+        {PYTHON} {SCRIPTS}/measure.py \
+          --metrics {output.metrics} --log {output.log} \
+          --sample-interval {SAMPLE_INTERVAL} \
+          -- {GFAIDX} get_region {input.gz} "$region" {output.gfa} \
+             --cdx {input.cdx} --idx {input.idx} --ndx {input.ndx} \
+             --pdx {input.pdx} --lnx {input.lnx} --pcx {input.pcx} \
+             {params.reference} {params.extra} --with_coords --all_haplotypes \
+             --threads {threads}
         """
 
 
@@ -1228,5 +1469,7 @@ rule gfa_stats:
         gfa="{prefix}.gfa"
     output:
         stats="{prefix}.stats.json"
+    resources:
+        benchmark_job=1
     shell:
         "{PYTHON} {SCRIPTS}/graph_stats.py --gfa {input.gfa} --out {output.stats}"
