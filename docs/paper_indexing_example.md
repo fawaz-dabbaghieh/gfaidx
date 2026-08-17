@@ -3,10 +3,27 @@
 This document gives a complete small example that can be adapted into the
 first panel of a gfaidx paper figure. It follows the current path-index format,
 `.pdx` version 4. The byte counts and query outputs were verified with gfaidx
-1.8.3.
+2.0.0.
 
 Coordinates in this document are 0-based and half-open. For example,
 `chr1:106-114` includes bases 106 through 113.
+
+The example distinguishes three kinds of quantities:
+
+- **Stable format values**, such as the 96-byte `.pdx` header, the 4-byte
+  packed step width, and the formula used to locate a checkpoint.
+- **Values calculated from this input**, such as node ranks, path step ranges,
+  cumulative lengths, and posting blocks.
+- **Partition- and compression-dependent values**, such as numeric Louvain
+  community labels and compressed gzip member sizes. The values shown below
+  are from the verified 2.0.0 run. A different gfaidx version, gzip setting, or
+  equivalent relabeling of the Louvain communities can change these values
+  without changing the query algorithm.
+
+In formulas, a **path-local step rank** is the zero-based position inside one
+P/W record. A **global step index** is the position in the flat `.pdx` step
+table. A **node rank** is the position of a node's 16-byte record in the sorted
+`.ndx` array. These are three different integer spaces.
 
 ## Panel-level summary
 
@@ -39,30 +56,31 @@ stored in `.pdx` instead of being copied into the indexed gzip.
 
 ## 1. Example input graph
 
-Save the following as `paper_example.gfa`:
+Save the following as `paper_example.gfa`. The fields below are separated by
+literal tab characters, as required by GFA:
 
 ```gfa
-H    VN:Z:1.1    RS:Z:REF
-S    A    AAAA
-S    B    CCC
-S    C    GGGGG
-S    D    TT
-S    E    AAAA
-S    F    CCCCC
-S    G    GG
-L    A    +    B    +    0M
-L    B    +    C    +    0M
-L    C    +    D    +    0M
-L    D    +    E    +    0M
-L    B    +    F    +    0M
-L    F    +    D    +    0M
-L    B    +    G    +    0M
-L    G    +    C    -    0M
-L    C    -    C    +    0M
-L    C    -    D    +    0M
-W    REF    0    chr1    100    118    >A>B>C>D>E
-W    HAP1    0    chr1    100    118    >A>B>F>D>E
-P    HAP2    A+,B+,G+,C-,C+,D+,E+    *
+H	VN:Z:1.1	RS:Z:REF
+S	A	AAAA
+S	B	CCC
+S	C	GGGGG
+S	D	TT
+S	E	AAAA
+S	F	CCCCC
+S	G	GG
+L	A	+	B	+	0M
+L	B	+	C	+	0M
+L	C	+	D	+	0M
+L	D	+	E	+	0M
+L	B	+	F	+	0M
+L	F	+	D	+	0M
+L	B	+	G	+	0M
+L	G	+	C	-	0M
+L	C	-	C	+	0M
+L	C	-	D	+	0M
+W	REF	0	chr1	100	118	>A>B>C>D>E
+W	HAP1	0	chr1	100	118	>A>B>F>D>E
+P	HAP2	A+,B+,G+,C-,C+,D+,E+	*
 ```
 
 The node lengths are:
@@ -137,13 +155,55 @@ The second command adds:
 paper_example.indexed.gfa.gz.cdx
 ```
 
+### 2.1 What `index_gfa` does, in order
+
+The graph and sidecars share ranks and community assignments, so they are not
+built as unrelated files. The top-level construction order is:
+
+1. **Scan links and assign temporary integer node IDs.** gfaidx reads every
+   `L` record, assigns an integer ID to each endpoint name on first sight,
+   and writes an undirected integer edge pair. Each pair is normalized as
+   `(min_id,max_id)`; GFA endpoint orientations are irrelevant to community
+   detection but remain in the original `L` record for later output.
+2. **Sort and deduplicate the edge list.** The external `sort` command orders
+   the normalized pairs numerically and removes duplicate topology pairs. The
+   sorted text is converted to the binary graph consumed by Louvain.
+3. **Partition the topology.** Louvain local-moving and graph-contraction
+   levels run until no further improvement is found or the implementation's
+   iteration bound is reached. Nodes absent from every `L` record are found
+   in a later `S`-line scan and placed in a singleton community. Optional
+   `--max_chunk_nodes` refinement and `--min_chunk_nodes` coarsening occur
+   before any final index uses the partition.
+4. **Split graph records.** gfaidx scans the input again. An `S` record goes
+   to its node's community. An `L` record whose endpoints share a community
+   goes to that community; a cross-community `L` goes to the final shared
+   member. `H` records go to community 0. `P` and `W` records are not
+   copied into these graph members; the separate path-index scan handles them.
+5. **Compress and index members.** Every nonempty temporary community file is
+   deflated as one complete gzip member and appended to the output stream.
+   Before and after each append, `tellp()` gives the compressed start and end,
+   so `gz_size = end - gz_offset`. These values form `.idx`.
+6. **Build aligned sidecars.** The final node-to-community mapping creates
+   `.ndx`; an `S`-line scan creates rank-aligned `.lnx`; two further GFA
+   scans plus an external posting sort create `.pdx`; finally `.pdx` and
+   `.lnx` are scanned to create `.pcx`.
+7. **Publish complete files.** gfaidx builds the graph and sidecars under
+   staged sibling names. It renames the sidecars first and the indexed
+   `.gfa.gz` last, so the visible graph path is the signal that the complete
+   bundle was successfully produced.
+
+`index_coordinates` is separate because users may choose only particular
+reference samples or paths. For this command, it reads the selected REF walk
+from the already built `.pdx`, reads segment lengths from the indexed GFA,
+resolves each segment through the same `.ndx` ranks, and writes `.cdx`.
+
 ## 3. Graph communities and gzip members
 
 For this example, Louvain partitioning produced:
 
 ```text
-community 0: D, E, F
-community 1: A, B, C, G
+community 0: A, B, C, G
+community 1: D, E, F
 shared-link member 2: links whose endpoints are in different communities
 ```
 
@@ -152,13 +212,6 @@ The uncompressed logical content of the members is:
 ```gfa
 # Member 0
 H    VN:Z:1.1    RS:Z:REF
-S    D    TT
-S    E    AAAA
-S    F    CCCCC
-L    D    +    E    +    0M
-L    F    +    D    +    0M
-
-# Member 1
 S    A    AAAA
 S    B    CCC
 S    C    GGGGG
@@ -168,6 +221,13 @@ L    B    +    C    +    0M
 L    B    +    G    +    0M
 L    G    +    C    -    0M
 L    C    -    C    +    0M
+
+# Member 1
+S    D    TT
+S    E    AAAA
+S    F    CCCCC
+L    D    +    E    +    0M
+L    F    +    D    +    0M
 
 # Member 2: shared links
 L    C    +    D    +    0M
@@ -179,14 +239,30 @@ The `.idx` file maps each member to its compressed byte range:
 
 ```text
 #community_id    gz_offset    gz_size
-0    0    75
-1    75    74
+0    0    92
+1    92    57
 2    149    44
 ```
 
 These exact compressed sizes can change with compression settings. The
 important fields are the member offset and compressed size. They let gfaidx
 seek to and inflate one member without inflating every earlier member.
+
+For example, member 1 is the half-open compressed byte interval
+`[92,149)`, because `92 + 57 = 149`. To read it, gfaidx:
+
+1. opens the multi-member gzip as a binary file;
+2. seeks directly to byte 92;
+3. reads at most 57 compressed bytes, in 64 KiB input blocks;
+4. initializes zlib with `inflateInit2(15 + 16)`, which expects a gzip
+   wrapper;
+5. inflates into 64 KiB output blocks and yields complete newline-delimited
+   GFA records to the query;
+6. stops when the requested compressed range is exhausted.
+
+The range reader can also handle more than one gzip member in a supplied
+range: after `Z_STREAM_END`, it reinitializes zlib and continues with any
+unconsumed input bytes. Normal `.idx` records describe one member each.
 
 The `P` and `W` records are not present in these members. They are represented
 by `.pdx`.
@@ -208,20 +284,41 @@ For this example:
 
 | Rank | Node | Community |
 | ----:| ---- | ---------:|
-| 0    | C    | 1         |
-| 1    | B    | 1         |
-| 2    | A    | 1         |
-| 3    | G    | 1         |
-| 4    | F    | 0         |
-| 5    | E    | 0         |
-| 6    | D    | 0         |
+| 0    | C    | 0         |
+| 1    | B    | 0         |
+| 2    | A    | 0         |
+| 3    | G    | 0         |
+| 4    | F    | 1         |
+| 5    | E    | 1         |
+| 6    | D    | 1         |
 
 The ranks do not follow the order of the `S` lines. They follow the sorted
 hash order in `.ndx`.
 
+To look up a name such as `B`, gfaidx does not scan strings:
 
+1. It calculates both the 64-bit and 32-bit FNV-1a hashes of the bytes in
+   `"B"`.
+2. It binary-searches the memory-mapped 16-byte records by the 64-bit hash.
+3. If that hash is present, it walks left to the first equal 64-bit hash and
+   scans the equal-hash run for the 32-bit hash.
+4. The matching record's array position is rank 1, and its final `uint32`
+   gives community 0.
 
-`.lnx` starts with a 24-byte header and then stores one rank-aligned `uint32`
+The second hash makes an accidental collision much less likely, but `.ndx`
+does not retain the original node string; a collision in both hashes cannot be
+distinguished at lookup time. During index construction, duplicate resolved
+ranks are rejected when `.lnx` and `.pdx` are aligned.
+
+`.ndx` has no header. Its file size must be a multiple of 16, and the number
+of records is therefore:
+
+```text
+112 bytes / 16 bytes per node = 7 nodes
+```
+
+`.lnx` starts with a 24-byte header containing magic `GFALNX01`, version 1,
+value width 4, and node count 7. It then stores one rank-aligned `uint32`
 length per node. The example length array is:
 
 ```text
@@ -230,8 +327,17 @@ node:    C  B  A  G  F  E  D
 length:  5  3  4  2  5  4  2
 ```
 
-Thus, `length[1] = 3` gives the length of node `B`. `.lnx` is memory-mapped;
-gfaidx does not parse the complete array into a separate in-memory structure.
+Thus, `length[1] = 3` gives the length of node `B`. Its byte address in the
+file is:
+
+```text
+24-byte header + rank(1) * 4 bytes = byte offset 28
+```
+
+`.lnx` is memory-mapped; gfaidx does not parse the complete array into a
+separate in-memory structure. Accessing `length[rank]` is one bounds check and
+one rank-addressed mapped load. The operating system brings in the containing
+memory page on demand.
 
 ## 5. Complete `.pdx` layout for the example
 
