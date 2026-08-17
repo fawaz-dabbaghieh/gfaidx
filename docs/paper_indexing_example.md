@@ -356,6 +356,35 @@ The current `.pdx` is one binary file with six sections:
 The `.pdx` file itself is not gzip-compressed. Compression is applied only to
 the posting table, while the step table uses fixed-width bit packing.
 
+The section offsets are calculated, not searched for:
+
+```text
+path_table_offset    = sizeof(header)
+                     = 96
+
+node_table_offset    = 96 + path_count(3) * path_record_size(128)
+                     = 480
+
+step_table_offset    = 480 + node_count(7) * node_record_size(32)
+                     = 704
+
+posting_table_offset = 704 + step_count(17) * step_record_size(4)
+                     = 772
+
+strings_offset       = 772 + compressed_posting_bytes(49)
+                     = 821
+
+file_size            = 821 + strings_size(64)
+                     = 885
+```
+
+When a `PathIndexReader` opens this file, it reads and validates the header,
+then eagerly reads the three path records and their referenced metadata
+strings. It builds an in-memory path-name-to-ID map because path names are
+queried repeatedly. In contrast, node records, node names, step slices, and
+posting blocks remain on disk and are read on demand. Queried node metadata
+and names are cached by rank.
+
 ### 5.1 Header
 
 The 96-byte header contains:
@@ -379,6 +408,11 @@ strings_size          64
 There is one posting for every path-step occurrence, so this example has 17
 steps and 17 postings.
 
+The header also makes cross-section validation possible before a query uses an
+offset. For example, version 4 must use 4-byte steps, node ranks must fit in
+the low 31 bits of a packed step, and the posting byte extent is
+`strings_offset - posting_table_offset = 49`.
+
 ### 5.2 Path table
 
 Each path record is fixed at 128 bytes. It stores its type, string offsets,
@@ -399,6 +433,25 @@ sample|haplotype|sequence|start|end
 
 The original fields remain separately available, so reconstructing the `W`
 line does not depend on parsing this key.
+
+Path-local step `s` of path `p` is stored at global step index:
+
+```text
+global_step = path[p].step_begin + s
+```
+
+For example, local step 1 of HAP2 is `B`. HAP2 begins at global step 10, so:
+
+```text
+global_step = 10 + 1 = 11
+step byte    = step_table_offset + global_step * 4
+             = 704 + 11 * 4
+             = 748
+```
+
+Reading HAP2 local steps 1 through 5 is therefore one 20-byte read from
+`[748,768)`. The path table supplies both numbers needed for this direct
+address; gfaidx does not scan the preceding REF and HAP1 steps.
 
 ### 5.3 String blob
 
@@ -428,6 +481,18 @@ Selected offsets are:
 The blob avoids storing fixed-size character arrays, but it is not otherwise
 compressed or deduplicated. For example, `chr1` occurs twice.
 
+A node name lookup first reads its 32-byte node record, then uses:
+
+```text
+name byte range =
+    [strings_offset + name_offset,
+     strings_offset + name_offset + name_length)
+```
+
+For rank 1, node `B`, this is
+`[821 + 1, 821 + 1 + 1) = [822,823)`. Path metadata strings use the same
+formula with offsets from the 128-byte path record.
+
 ### 5.4 Packed step table
 
 Every path step is one `uint32`:
@@ -449,6 +514,18 @@ keeping direct random access by step rank.
 
 The reverse traversal of rank 0 is `0x80000000`; the forward traversal of the
 same node is `0x00000000`.
+
+On read, gfaidx applies:
+
+```text
+node_rank = packed & 0x7fffffff
+reverse   = (packed & 0x80000000) != 0
+```
+
+`read_steps()` performs one allocation and one contiguous read for a
+requested slice. The streaming `for_each_step()` variant uses the same byte
+formula but reads at most (2^{20}) packed records per chunk, so memory does
+not grow with a chromosome-scale path.
 
 ### 5.5 Node table
 
@@ -478,6 +555,33 @@ occurrences.
 
 This table gives node-level random access to postings. Looking up node `C`
 requires reading only bytes 0 through 6 of the posting table.
+
+More precisely, querying rank `r` performs these accesses:
+
+1. Read the rank's node record at
+   `node_table_offset + r * 32`.
+2. Read the next rank's node record to obtain the exclusive end of the byte
+   block. For the final rank, use the total posting-table byte size instead.
+3. Read exactly
+   `[posting_table_offset + posting_begin,`
+   `posting_table_offset + next_posting_begin)`.
+4. Decode until exactly `posting_count` occurrences have been emitted, then
+   require the byte cursor to equal the end of the block.
+
+For node `B`, rank 1:
+
+```text
+B node record offset       = 480 + 1 * 32 = 512
+next node record offset    = 480 + 2 * 32 = 544
+B relative posting range  = [7,16)
+B absolute .pdx byte range = [772 + 7, 772 + 16)
+                           = [779,788), 9 bytes
+decoded occurrences        = 3
+```
+
+The two 32-byte metadata reads are cached after the first query. Only the
+9-byte compressed B block is decoded for B; blocks for unrelated nodes are not
+touched.
 
 ### 5.6 Compressed posting table
 
@@ -532,6 +636,38 @@ values use continuation bytes. For example, unsigned value 300 is encoded as:
 ```text
 AC 02
 ```
+
+The codec is unsigned little-endian base-128. Each byte contributes seven
+payload bits; bit 7 says that another byte follows:
+
+```text
+300 decimal = 0b1_0010_1100
+low 7 bits  = 0b0101100 = 44; set continuation bit -> 0xAC
+remaining   = 2                                  -> 0x02
+```
+
+For B's block `00 01 01 01 01 01 01 01 01`, decoding proceeds as:
+
+```text
+current_path initially 0
+
+00: path delta 0  -> path 0
+01: group count 1
+01: first step 1  -> emit (0,1)
+
+01: path delta 1  -> path 1
+01: group count 1
+01: first step 1  -> emit (1,1)
+
+01: path delta 1  -> path 2
+01: group count 1
+01: first step 1  -> emit (2,1)
+```
+
+The decoder rejects an empty group, a zero step delta, arithmetic overflow,
+too many decoded postings, truncated varints, or trailing bytes. Thus the
+fixed `posting_count` in the node record acts as a decoded-length check even
+though the block itself is variable width.
 
 The 17 postings would occupy 136 bytes as fixed pairs of two `uint32` values.
 They occupy 49 bytes in this small example. This ratio is illustrative; the
@@ -677,24 +813,70 @@ The rank-aligned entries are:
 The end of an entry is not stored directly. It is the next entry's start, or
 the track's `sequence_end` for the last entry.
 
-`.cdx` uses binary search over these sorted starts to isolate entries
-overlapping a region. It is a fixed-width coordinate index, not part of `.pdx`.
+The complete example `.cdx` is 239 bytes:
+
+| Section | Offset | Size | Contents |
+| ------- | -----: | ---: | -------- |
+| Header | 0 | 72 B | magic/version, 7 nodes, 1 track, 5 entries, section offsets |
+| Track table | 72 | 80 B | REF/chr1 metadata and entry range |
+| Entry table | 152 | 80 B | 5 fixed 16-byte `(start,node_rank)` records |
+| String blob | 232 | 7 B | `REFchr1` |
+
+The reader eagerly loads the small track table and name blob, but not the entry
+table. During binary search, one entry at a time is read with:
+
+```text
+entry byte = entry_table_offset + entry_index * 16
+```
+
+After finding the lower and upper step bounds, it performs one contiguous read
+for the matching entry range. Section 9.1 works through the comparisons and
+byte range for `[106,114)`.
 
 ### Node lengths: `.lnx`
 
 `.lnx` supplies the length of every rank. It lets gfaidx calculate path
-coordinates without scanning all `S` lines in the indexed GFA.
+coordinates without scanning all `S` lines in the indexed GFA. Orientation
+does not change length: both `C-` and `C+` read `length[rank(C)] = 5`.
 
 ### Path coordinate checkpoints: `.pcx`
 
-`.pcx` stores cumulative path length every N steps. With
-`--checkpoint_steps 2`, the example checkpoints are:
+`.pcx` is a memory-mapped, fixed-width acceleration index. It stores a
+cumulative path length at every N-step boundary. It does not store a node name,
+node rank, file seek position, or pointer into the gzip graph. The associated
+`.pdx` path ID and a path-local step boundary are enough to address it.
 
-| Path | Checkpointed cumulative lengths |
-| ---- | ------------------------------- |
-| REF  | `0, 7, 14`                      |
-| HAP1 | `0, 7, 14`                      |
-| HAP2 | `0, 7, 14, 21`                  |
+#### 7.1 Building the checkpoints
+
+The builder first opens the completed `.pdx` and rank-aligned `.lnx`, checks
+that their node counts agree, and scans each path's packed steps in order. For
+one path:
+
+```text
+cumulative = 0
+write checkpoint for boundary step 0: value 0
+
+for each path-local step s:
+    read packed step s from .pdx
+    unpack its node rank
+    read length[node_rank] from .lnx
+    cumulative += length[node_rank]
+    if (s + 1) is divisible by stride:
+        write cumulative as the checkpoint for boundary s + 1
+```
+
+A checkpoint value is therefore the number of bases **before** the
+checkpointed step. A terminal checkpoint may also represent the exclusive
+boundary after the last step when the path length is an exact multiple of the
+stride.
+
+With `--checkpoint_steps 2`, the example checkpoints are:
+
+| Path | Step boundaries | Cumulative lengths |
+| ---- | --------------- | ------------------ |
+| REF  | `0, 2, 4`       | `0, 7, 14`        |
+| HAP1 | `0, 2, 4`       | `0, 7, 14`        |
+| HAP2 | `0, 2, 4, 6`    | `0, 7, 14, 21`    |
 
 For example, the `HAP2` value 14 is the length before step 4:
 
@@ -702,9 +884,134 @@ For example, the `HAP2` value 14 is the length before step 4:
 A(4) + B(3) + G(2) + C-(5) = 14
 ```
 
-At query time gfaidx begins at the nearest checkpoint and scans fewer than N
-remaining prefix steps. The default stride is 4096; the stride of 2 is used
-here only to make the example visible.
+The number of stored values for a path is:
+
+```text
+checkpoint_count = floor(step_count / stride) + 1
+```
+
+Thus the paths with 5, 5, and 7 steps store 3, 3, and 4 values, respectively.
+
+#### 7.2 Complete `.pcx` layout for this example
+
+The 232-byte file has three fixed-width sections:
+
+| Section | Offset | Size | Contents |
+| ------- | -----: | ---: | -------- |
+| Header | 0 | 80 B | magic `GFAPCX01`, version, counts, stride, compatibility hash, offsets |
+| Per-path table | 80 | 72 B | 3 records of 24 bytes |
+| Checkpoint table | 152 | 80 B | 10 contiguous `uint64` values |
+
+Each per-path record is:
+
+```text
+uint64 step_count
+uint64 checkpoint_begin
+uint64 checkpoint_count
+```
+
+For the example:
+
+| Path ID | Steps | `checkpoint_begin` | Count | Flat checkpoint indices |
+| ------: | ----: | -------------------: | ----: | ----------------------- |
+| 0 REF | 5 | 0 | 3 | 0, 1, 2 |
+| 1 HAP1 | 5 | 3 | 3 | 3, 4, 5 |
+| 2 HAP2 | 7 | 6 | 4 | 6, 7, 8, 9 |
+
+The flat value table is:
+
+```text
+index:  0  1   2   3  4   5   6  7   8   9
+value:  0  7  14   0  7  14   0  7  14  21
+path:   REF-------  HAP1------  HAP2----------
+```
+
+The header also records `.pdx` path count, node count, total step count, and
+a 64-bit hash of path layout metadata. On open, gfaidx verifies those values,
+the `.lnx` node count, every path's step count, and every checkpoint slice.
+The layout hash includes path type, step count, W coordinates, and path/sample/
+sequence names. It deliberately does not hash the full step table, because
+doing so would require the expensive full-path read that checkpoints avoid.
+
+If `.pcx` is absent or fails validation, coordinate output remains correct:
+gfaidx warns and falls back to scanning path prefixes from step zero using
+`.pdx` and `.lnx`.
+
+#### 7.3 How gfaidx finds one checkpoint
+
+For path ID `p`, requested path-local boundary `b`, and stride `N`:
+
+```text
+checkpoint_index       = floor(b / N)
+checkpoint_step        = checkpoint_index * N
+absolute_checkpoint    = path[p].checkpoint_begin + checkpoint_index
+prefix_at_checkpoint   = checkpoint_values[absolute_checkpoint]
+```
+
+No binary search is needed because the stride is regular and every path has a
+contiguous checkpoint slice.
+
+For the start of the HAP2 regional run, `p = 2`, `b = 1`, and `N = 2`:
+
+```text
+checkpoint_index     = floor(1 / 2) = 0
+checkpoint_step      = 0 * 2 = 0
+absolute_checkpoint  = checkpoint_begin(HAP2) 6 + 0 = 6
+prefix_at_checkpoint = checkpoint_values[6] = 0
+```
+
+Boundary 1 is one step after that checkpoint. gfaidx asks `.pdx` for HAP2
+local steps `[0,1)`. Using HAP2's `step_begin = 10`, that is global step 10
+at:
+
+```text
+.pdx byte = step_table_offset 704 + global_step 10 * 4
+          = 744
+```
+
+The packed value is rank 2, node A. gfaidx then reads `.lnx[2]` at
+`24 + 2 * 4 = 32`, obtains length 4, and adds it:
+
+```text
+prefix before HAP2 step 1 = checkpoint value 0 + length(A) 4 = 4
+```
+
+For the exclusive end boundary of that run, `b = 6`:
+
+```text
+checkpoint_index     = floor(6 / 2) = 3
+checkpoint_step      = 3 * 2 = 6
+absolute_checkpoint  = 6 + 3 = 9
+prefix_at_checkpoint = checkpoint_values[9] = 21
+```
+
+The checkpoint lies exactly on boundary 6, so no remainder steps or lengths
+are read. HAP2 has no external W offset, giving the final P interval
+`[4,21)`.
+
+In general, the remainder is `b mod N`, so recovering one boundary reads at
+most `N - 1` packed `.pdx` steps and the same number of rank-addressed
+`.lnx` values.
+
+#### 7.4 Short-run and large-run coordinate paths
+
+The formatter has two checkpoint-backed strategies:
+
+- For an output run shorter than two checkpoint strides, it finds the nearest
+  checkpoint at or before `start_step`, then makes one forward step-table
+  scan from that checkpoint through the run's exclusive end. Prefix steps
+  contribute only lengths; selected steps also go into the output step vector.
+  This has low call overhead for short runs.
+- For a run at least two strides long, it recovers the start and end boundaries
+  independently with the formula above. Each endpoint needs fewer than N
+  remainder steps. It then streams the selected `.pdx` steps directly into
+  the final P/W record; the selected interval does not need one `.lnx` access
+  per step or an intermediate step vector.
+
+With stride 2, the five-step HAP2 regional run uses the second strategy because
+`floor(5 / 2) >= 2`. The three-step REF and HAP1 runs use the first strategy.
+With the default stride 4096, the crossover is an output run of at least 8192
+steps. The stride of 2 is used here only to make all calculations visible.
 
 ## 8. Node-centered subgraph query
 
@@ -721,11 +1028,48 @@ gfaidx get_subgraph \
 
 ### 8.1 Find and load the graph chunk
 
-1. `.ndx` maps node `A` to rank 2 and community 1.
-2. `.idx` gives the compressed byte range for community member 1.
-3. gfaidx inflates member 1 and reads its `S/L` records.
-4. The shared-link member is consulted for cross-community links.
-5. BFS starts at `A`, discovers `B`, and reaches the two-node cap.
+Opening the indexed graph first loads the small text `.idx` span table,
+memory-maps `.ndx`, and opens `.pdx`. Because the optional files exist, it
+also opens `.cdx` metadata; `.lnx` and `.pcx` are deferred until
+coordinate-bearing paths actually need them.
+
+The current BFS then does the following:
+
+1. Sort and deduplicate the seed names. The queue initially contains `A`.
+2. Inflate shared-link member 2, compressed range `[149,193)`, once for this
+   query. Every `L` record is inserted into a query-local, orientation-agnostic
+   adjacency map in both directions. This makes cross-community neighbors
+   discoverable before their local community has been loaded.
+3. Pop `A`, add it to the selected set, and hash-lookup `A` in the
+   memory-mapped `.ndx`. The sorted record position is rank 2 and the record
+   says community 0.
+4. Use `.idx[0] = [0,92)` to seek to and inflate community member 0. For BFS,
+   only its `L` records are parsed. Each local link is added in both
+   directions; the original `+`/`-` orientations remain in the gzip member
+   for output but do not affect neighborhood reachability.
+5. Read `adjacency[A]`, discover `B`, and append it to the FIFO queue.
+6. Pop and select `B`. Its community is already loaded. The selection now
+   contains two nodes, so the next loop test reaches `max_nodes = 2` and BFS
+   ends.
+
+The final names are resolved to ranks and distinct community IDs for output:
+
+```text
+A -> rank 2, community 0
+B -> rank 1, community 0
+```
+
+Graph materialization is a second, filtering pass over original records:
+
+1. Read the beginning of member 0 and stop after finding the `H` header.
+2. Re-read member 0, emitting only selected `S` records and `L` records
+   whose two endpoint names are selected.
+3. Re-read shared member 2 and apply the same two-endpoint filter. None of its
+   links has both endpoints in `{A,B}`, so it emits nothing.
+
+The extra pass is intentional: BFS stores only query-local adjacency strings,
+whereas materialization replays the original GFA lines and therefore preserves
+sequences, orientations, overlaps, and tags exactly.
 
 The selected graph is:
 
@@ -751,6 +1095,20 @@ A: (path 0, step 0), (path 1, step 0), (path 2, step 0)
 B: (path 0, step 1), (path 1, step 1), (path 2, step 1)
 ```
 
+The corresponding `.pdx` accesses are:
+
+```text
+B rank 1 node record: byte 480 + 1*32 = 512
+B posting block:      [779,788), 9 bytes
+
+A rank 2 node record: byte 480 + 2*32 = 544
+A posting block:      [788,797), 9 bytes
+```
+
+Each decoded posting is appended to a vector keyed by path ID. gfaidx then
+sorts path IDs, sorts the step ranks within each path, and scans for adjacent
+integers.
+
 Within each path, steps 0 and 1 are consecutive, so each becomes one subpath
 run:
 
@@ -763,9 +1121,37 @@ run:
 For a general node set, gaps split a path into separate runs. One-node runs
 are suppressed.
 
+For example, selected step ranks `0,1,4,5` would become two runs
+`[0,2)` and `[4,6)`; a lone rank 8 would be discarded. Repeated occurrences
+are retained by the posting index, so the grouping is based on occurrences,
+not merely on unique node names.
+
 ### 8.3 Calculate coordinates
 
-For the two `W` runs:
+All three two-step runs use the short-run checkpoint strategy described in
+Section 7.4. For REF:
+
+```text
+path ID                 = 0
+start_step              = 0
+exclusive end_step      = 0 + 2 = 2
+nearest start checkpoint = boundary 0, prefix 0
+
+.pdx step read          = global steps [0,2)
+                        = bytes [704,712)
+unpacked ranks          = 2,1
+.lnx lengths            = length[2]=4, length[1]=3
+
+local start             = 0
+local end               = 0 + 4 + 3 = 7
+```
+
+HAP1 begins at global step 5, so its selected two steps are read from
+`[704 + 5*4, 704 + 7*4) = [724,732)`. HAP2 begins at global step 10, so its
+slice is `[744,752)`. Both unpack to ranks 2 and 1 and therefore accumulate
+the same local interval `[0,7)`.
+
+For the two `W` runs, add the original W coordinate base:
 
 ```text
 start = W SeqStart + prefix before step 0
@@ -786,6 +1172,11 @@ end   = 4 + 3 = 7
 
 Coordinate-bearing `P` output assumes the original path has no overlaps. The
 example uses `*`, so the assumption holds.
+
+Finally, the selected-name lookup converts ranks 2 and 1 back to the already
+owned strings `A` and `B`, and the orientation bit from each packed step
+produces `>A>B` for W or `A+,B+` for P. Path metadata supplies the W sample,
+haplotype, sequence name, and tags.
 
 The complete output is:
 
