@@ -524,8 +524,8 @@ reverse   = (packed & 0x80000000) != 0
 
 `read_steps()` performs one allocation and one contiguous read for a
 requested slice. The streaming `for_each_step()` variant uses the same byte
-formula but reads at most (2^{20}) packed records per chunk, so memory does
-not grow with a chromosome-scale path.
+formula but reads at most `2^20` packed records per chunk, so memory does not
+grow with a chromosome-scale path.
 
 ### 5.5 Node table
 
@@ -1229,6 +1229,56 @@ exact REF run: path 0, steps 1 through 3
 The exact reference occurrence comes from the coordinate track. This matters
 when a reference path visits the same node more than once.
 
+Here is the exact binary search. The track starts are:
+
+```text
+entry index:  0    1    2    3    4
+start:       100  104  107  112  114
+node:          A    B    C    D    E
+```
+
+First, gfaidx searches for the first entry whose **derived end** is greater
+than query begin 106. An entry's end is the next start, except that E ends at
+the track end 118:
+
+```text
+search [0,5): mid 2, end(C)=start(D)=112; 112 > 106 -> high=2
+search [0,2): mid 1, end(B)=start(C)=107; 107 > 106 -> high=1
+search [0,1): mid 0, end(A)=start(B)=104; 104 <= 106 -> low=1
+
+first overlapping step = 1
+```
+
+Second, it finds the first entry whose start is not less than query end 114:
+
+```text
+search [1,5): mid 3, start(D)=112; 112 < 114 -> low=4
+search [4,5): mid 4, start(E)=114; 114 >= 114 -> high=4
+
+exclusive step bound = 4
+```
+
+The individual comparisons read fixed 16-byte entries at
+`entry_table_offset + index*16`. Once the bounds are known, gfaidx reads
+entries `[1,4)` in one 48-byte operation:
+
+```text
+absolute .cdx byte range =
+    [152 + 1*16, 152 + 4*16)
+  = [168,216)
+```
+
+Those three records contain ranks `1,0,6`. gfaidx preserves that ordered
+occurrence slice as `(path 0, start_step 1, step_count 3)`, while separately
+sorting and deduplicating the graph seed ranks to `0,1,6`.
+
+To associate the `.cdx` W track with `.pdx`, it constructs
+`REF|0|chr1|100|118` from the track metadata and looks it up in the in-memory
+path-name map. The result is path ID 0. If `.cdx` is absent, stale, or fails
+this alignment check, gfaidx warns and falls back to scanning matching
+`.pdx` paths with `.lnx` lengths; that fallback builds a start-coordinate
+array for each candidate path and performs equivalent interval binary searches.
+
 ### 9.2 Use `.pdx` postings as an inverted index
 
 gfaidx reads the three node posting blocks:
@@ -1240,6 +1290,18 @@ D: (0,3), (1,3), (2,5)
 ```
 
 This is 9 decoded postings across 3 paths.
+
+The compressed bytes actually read are:
+
+| Anchor | Rank | Node record | Relative block | Absolute `.pdx` block |
+| ------ | ---: | ----------: | -------------- | ----------------------- |
+| C | 0 | byte 480 | `[0,7)` | `[772,779)`, 7 B |
+| B | 1 | byte 512 | `[7,16)` | `[779,788)`, 9 B |
+| D | 6 | byte 672 | `[40,49)` | `[812,821)`, 9 B |
+
+Thus the inverted-index phase decodes 9 occurrences from 25 compressed bytes,
+plus the fixed node metadata records. It does not scan the 17-step table to
+discover which paths contain the anchors.
 
 For the coordinate-source path, gfaidx preserves the exact `.cdx` interval:
 
@@ -1274,58 +1336,146 @@ The union contains five nodes:
 B, C, D, F, G
 ```
 
+Internally, the default all-haplotype mode keeps one `(min_step,max_step,seen)`
+record per indexed path. The nine postings update these bounds:
+
+```text
+path 0 REF:   min=1, max=3, but replace with exact .cdx run [1,4)
+path 1 HAP1:  min=1, max=3 -> selected run [1,4)
+path 2 HAP2:  min=1, max=5 -> selected run [1,6)
+```
+
+It then reads only those three packed step ranges:
+
+```text
+REF:  global steps [1,4),   .pdx bytes [708,720), 12 B
+HAP1: global steps [6,9),   .pdx bytes [728,740), 12 B
+HAP2: global steps [11,16), .pdx bytes [748,768), 20 B
+```
+
+Every unpacked node rank sets one bit in a rank-addressed bitset. For this
+seven-node graph the bitset is one `uint64`. Repeated C occurrences set the
+same bit, so the final ascending bit scan yields ranks `0,1,3,4,6`, or
+`C,B,G,F,D`. F and G enter the result from the selected path intervals even
+though neither was a reference anchor.
+
 With `--all_haplotypes`, this is an exact path-supported selection; BFS is not
 run. Without `--all_haplotypes`, `B,C,D` become multi-source BFS seeds and
 `--max_nodes` controls graph expansion instead.
+
+If `--haplotype_gap N` is also supplied, the outermost-anchor rule becomes a
+local-run rule. gfaidx marks every anchor occurrence in a bitset indexed by
+global `.pdx` step, scans each path between its outermost anchors, and sums
+`.lnx` lengths only for non-anchor steps. Once the unanchored sequence since
+the last anchor exceeds N bases, the next anchor starts a new run. The previous
+run ends at its last anchor, so a distant repeated anchor cannot pull an
+arbitrarily long unrelated interval into one result. Exact `.cdx` source runs
+remain exact and bypass this split. The command in this example omits
+`--haplotype_gap`, so the conservative min/max behavior above applies.
 
 ### 9.3 Materialize graph records
 
 The selected ranks map through `.ndx` to both graph communities:
 
 ```text
-community 0: D,F
-community 1: B,C,G
+community 0: B,C,G
+community 1: D,F
 ```
 
 gfaidx inflates these community members and the shared-link member, then emits
 only `S` records in the selected set and `L` records whose two endpoints are
 selected.
 
+Rank-to-community conversion is direct: because rank is the `.ndx` array
+position, gfaidx reads `ndx[rank].community_id` without hashing a name. Rank
+to name uses the rank's `.pdx` node record and string offset. Communities are
+sorted before replay, so the verified output visits member 0, member 1, and
+then shared member 2.
+
+The exact path runs above are carried alongside the node union. Path output
+does not rerun generic subpath discovery on `{B,C,D,F,G}`; doing so could
+create intervals different from those selected by the coordinate and
+all-haplotype algorithms.
+
 ### 9.4 Calculate the three path intervals
 
 Reference:
 
 ```text
-prefix before B = length(A) = 4
+start boundary = step 1
+checkpoint = boundary 0, prefix 0
+scan .pdx local step 0 -> rank(A)=2
+read .lnx[2] = 4
+prefix before B = 0 + 4 = 4
 start = 100 + 4 = 104
 run length = B(3) + C(5) + D(2) = 10
 end = 104 + 10 = 114
 ```
 
+Because the three-step REF run is shorter than two checkpoint strides, the
+implementation performs one contiguous scan from local step 0 through
+exclusive boundary 4. It reads `.pdx [704,720)` and the four corresponding
+`.lnx` values. The prefix step A establishes the start; B, C, and D establish
+the output steps and end.
+
 HAP1:
 
 ```text
+start boundary = step 1
+checkpoint = boundary 0, prefix 0
+scan A, then selected B,F,D
 prefix before B = length(A) = 4
 start = 100 + 4 = 104
 run length = B(3) + F(5) + D(2) = 10
 end = 114
 ```
 
+This short-run scan reads HAP1 local steps `[0,4)`, which are global steps
+`[5,9)` at `.pdx [724,740)`. The rank sequence `2,1,4,6` addresses
+`.lnx` lengths `4,3,5,2`.
+
 HAP2:
 
 ```text
-prefix before B = length(A) = 4
+start boundary 1:
+  checkpoint boundary 0 = 0
+  scan A -> prefix 4
+
+end boundary 6:
+  checkpoint boundary 6 = 21
+  scan zero remainder steps
+
 start = 4
 run length = B(3) + G(2) + C-(5) + C+(5) + D(2) = 17
 end = 4 + 17 = 21
 ```
 
-The emitted path records are:
+The HAP2 run is long enough for the fused endpoint strategy. After the two
+endpoint calculations, gfaidx streams only its selected packed steps from
+`.pdx [748,768)` into the output record. Those formatting reads provide node
+ranks and orientations; no additional `.lnx` reads are needed for the five
+selected steps because the exclusive end already came from checkpoint 21.
+
+The complete verified output, including graph and path records, is:
 
 ```gfa
-W    REF    0    chr1    104    114    >B>C>D
-W    HAP1    0    chr1    104    114    >B>F>D
-P    HAP2:4-21    B+,G+,C-,C+,D+    *
+H	VN:Z:1.1	RS:Z:REF
+S	B	CCC
+S	C	GGGGG
+S	G	GG
+L	B	+	C	+	0M
+L	B	+	G	+	0M
+L	G	+	C	-	0M
+L	C	-	C	+	0M
+S	D	TT
+S	F	CCCCC
+L	F	+	D	+	0M
+L	C	+	D	+	0M
+L	B	+	F	+	0M
+L	C	-	D	+	0M
+W	REF	0	chr1	104	114	>B>C>D
+W	HAP1	0	chr1	104	114	>B>F>D
+P	HAP2:4-21	B+,G+,C-,C+,D+	*
 ```
 
 This example shows the different roles of the path-index sections:
@@ -1343,7 +1493,28 @@ string blob      restores node and path names
 
 ## 10. Query-time disk access and memory
 
-The complete `.pdx` is not loaded into RAM for a query:
+It is useful to separate opening an index, selecting records, and materializing
+them.
+
+### 10.1 What is read when the index is opened
+
+- `.idx` is small text and is loaded into a vector indexed by community ID.
+- `.ndx` is opened and memory-mapped as a fixed 16-byte record array.
+- `.pdx` reads its 96-byte header, its complete path table, and path metadata
+  strings. It creates the path-name-to-ID hash map. The node table, step table,
+  posting table, and node-name strings remain lazy.
+- `.cdx`, if present, reads its header, track table, and track-name strings.
+  Its fixed-width coordinate entries remain on disk.
+- `.lnx` and `.pcx` are opened and memory-mapped only when
+  coordinate-bearing output needs node lengths and checkpoints.
+
+Memory mapping does not mean every mapped byte is immediately read from the
+storage device. It reserves an address range; the operating system faults and
+caches pages as ranks or checkpoints are accessed.
+
+### 10.2 What is read for a query
+
+The complete `.pdx` is not loaded into RAM:
 
 - The small path metadata table is loaded because path names and ranges are
   used repeatedly.
@@ -1358,8 +1529,59 @@ The complete `.pdx` is not loaded into RAM for a query:
 - Selected gzip community members are inflated for graph materialization.
   Member 0 may also be touched to recover the `H` header when it is not one of
   the selected communities.
-- The current implementation scans the shared-link member during BFS adjacency
-  loading and again filters it during graph materialization.
+- For a BFS query, the current implementation scans the shared-link member
+  during adjacency loading and again filters it during graph materialization.
+
+The exact logical reads for the all-haplotype example are summarized below.
+The operating system may satisfy repeated ranges from its page cache, so this
+is an algorithmic access list rather than a guaranteed count of physical disk
+operations:
+
+| Phase | Index access |
+| ----- | ------------ |
+| Coordinate selection | `.cdx` entry comparisons, then contiguous bytes `[168,216)` |
+| Anchor inversion | `.pdx` node records for ranks 0, 1, 6 and posting bytes `[772,779)`, `[779,788)`, `[812,821)` |
+| Path-supported union | packed step bytes `[708,720)`, `[728,740)`, `[748,768)` |
+| Rank conversion | mapped `.ndx` records and selected `.pdx` node-name strings |
+| Graph output | gzip members 0, 1, and 2, plus the short member-0 header scan |
+| Coordinates | mapped `.pcx` values, bounded packed prefix steps, and mapped `.lnx` lengths |
+| Path output | selected packed steps and selected-name lookup; records emitted one at a time |
+
+### 10.3 Query working memory
+
+The main query-local structures are bounded by the portion of the index being
+used:
+
+- A BFS keeps its queue, selected/queued sets, adjacency for loaded local
+  communities, and the shared-member links. It does not retain S-line
+  sequences during traversal.
+- Generic subpath discovery keeps decoded step occurrences only for the
+  selected node posting blocks, grouped by matched path.
+- All-haplotype selection keeps one small min/max record per path and a
+  node-selection bitset of approximately `node_count / 8` bytes. With
+  `--haplotype_gap`, it also uses a bitset of approximately
+  `total_path_steps / 8` bytes to mark anchor occurrences.
+- Coordinate formatting retains at most one output record per serial worker.
+  Parallel formatting uses one independent `.pdx` reader per worker and a
+  one-slot-per-worker ordered result ring.
+- Materialized C++/Python `Graph` queries additionally own every selected
+  H/S/L/P/W record. Streaming CLI/API queries avoid that final graph object.
+
+### 10.4 Operation costs
+
+Let V be indexed nodes, C the compressed bytes in loaded communities, P the
+number of decoded postings for selected anchors, S the number of selected path
+steps, and N the checkpoint stride:
+
+| Operation | Work |
+| --------- | ---- |
+| Node name to rank/community | `O(log V)` 64-bit hash search plus equal-hash collision scan |
+| Load one graph community | `O(C)` compressed-range read and inflation |
+| Read one node's path occurrences | Its fixed metadata plus its compressed posting-block bytes and decoded occurrences |
+| Read one path interval | `O(S)` packed records through direct contiguous/chunked reads |
+| Recover one checkpointed boundary | `O(1)` checkpoint address plus at most `N-1` step/length accesses |
+| Query one `.cdx` track fragment | Two `O(log steps)` binary searches plus one contiguous matching-entry read |
+| All-haplotype path matching | Selected posting blocks, then the packed steps between chosen anchor bounds |
 
 This is why gfaidx can query an indexed graph without constructing the full
 graph or the full path index as in-memory C++ objects.
