@@ -3,7 +3,7 @@
 # Started from benchmark/Snakefile in the gfaidx repository and extended with:
 #   - gbz-base (vg gbwt -> GBZ, gbz-base construct, node and interval queries)
 #   - a second node-query track measuring context in base pairs, so gbz-base
-#     (whose context is bp) can be compared against vg chunk -l and odgi -L
+#     (whose context is bp) can be compared against vg find -c/-L and odgi -L
 #   - a measured W-line -> P-line conversion step in the W workflow, because
 #     odgi build accepts a W-line GFA but silently produces zero paths
 #
@@ -435,13 +435,19 @@ def vg_convert_options(wildcards):
 
 
 def vg_chunk_options(wildcards):
-    """Return VG chunk options, retaining find_extra as a compatibility fallback."""
-    configured = extra("vg", "chunk_extra") or extra("vg", "find_extra")
-    graph_configured = (
-        graph_extra(wildcards, "vg_chunk_extra")
-        or graph_extra(wildcards, "vg_find_extra")
+    """Return VG options used only by path-coordinate chunk queries."""
+    return join_options(
+        extra("vg", "chunk_extra"),
+        graph_extra(wildcards, "vg_chunk_extra"),
     )
-    return join_options(configured, graph_configured)
+
+
+def vg_find_options(wildcards):
+    """Return VG options used only by node-seeded find queries."""
+    return join_options(
+        extra("vg", "find_extra"),
+        graph_extra(wildcards, "vg_find_extra"),
+    )
 
 
 def vg_gbwt_options(wildcards):
@@ -510,7 +516,9 @@ def region_metrics(tool, graph, query, qthreads, gap, iterations):
 
 def source_query_thread(source, qthreads):
     """Return the source run used by one matched-gfaidx node query."""
-    return "na" if source == "gbz" else qthreads
+    # VG find and gbz-base do not expose query-thread controls. Their source
+    # graphs are measured once and reused to size each gfaidx thread sweep.
+    return "na" if source in {"vg", "gbz"} else qthreads
 
 
 def source_region_available(row, source):
@@ -625,10 +633,10 @@ for row in NODE_QUERIES:
     for track, contexts in TRACK_CONTEXTS.items():
         for context in contexts:
             for source in TRACK_SOURCES[track]:
-                # VG and ODGI are rerun at every thread count. gbz-base has no
-                # query thread option, so its source result is produced once
-                # and reused while gfaidx still runs its full thread sweep.
-                source_threads = QUERY_THREADS if source != "gbz" else ["na"]
+                # Only ODGI exposes a query-thread option in node extraction.
+                # VG find and gbz-base are produced once and reused while
+                # matched gfaidx still runs its full configured thread sweep.
+                source_threads = QUERY_THREADS if source == "odgi" else ["na"]
                 for qthreads in source_threads:
                     TARGETS += [
                         node_metrics(track, source, graph, query, context, qthreads),
@@ -971,10 +979,9 @@ rule odgi_build:
 
 rule odgi_build_optimized:
     # -O compacts node IDs to 1..N. Required because odgi extract and
-    # odgi pathindex both refuse a graph with a non-compacted ID space, which is
-    # what any real HPRC subgraph has (chr22 here: IDs 53303057..56138482 with
-    # gaps). The original-ID graph is still built, for the record and for the
-    # build-cost comparison.
+    # odgi pathindex both refuse a graph with a non-compacted ID space. The
+    # original-ID graph is still built as a supplementary build-cost record;
+    # only this optimized graph is used by timed ODGI queries.
     input:
         gfa=odgi_input_gfa
     output:
@@ -1154,11 +1161,9 @@ rule odgi_stepindex:
 # Node queries
 # --------------------------------------------------------------------------
 
-def vg_context_flags(wildcards):
-    """Return vg chunk context flags for the requested node-query track."""
-    if wildcards.track == "node_bases":
-        return f"-l {wildcards.context}"
-    return f"-c {wildcards.context}"
+def vg_find_length_option(wildcards):
+    """Select base-pair rather than step context for one VG find query."""
+    return "--use-length" if wildcards.track == "node_bases" else ""
 
 
 def odgi_context_flags(wildcards):
@@ -1173,23 +1178,24 @@ rule vg_node_query:
         xg=lambda w: vg_xg(w.graph),
         node_map=lambda w: original_node_map_file(w.graph, w.query),
     output:
-        gfa=f"{RESULTS}/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}/subgraph.gfa",
-        metrics=f"{RESULTS}/metrics/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.json",
-        log=f"{RESULTS}/logs/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_{{qthreads}}.log",
-    threads: lambda w: int(w.qthreads)
+        gfa=f"{RESULTS}/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_na/subgraph.gfa",
+        metrics=f"{RESULTS}/metrics/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_na.json",
+        log=f"{RESULTS}/logs/queries/{{track}}/vg/{{graph}}/{{query}}/context_{{context}}/threads_na.log",
+    threads: 1
     resources:
         benchmark_job=1
     params:
-        context=vg_context_flags,
-        extra=vg_chunk_options,
+        length=vg_find_length_option,
+        extra=vg_find_options,
     shell:
         """
         node="$(cat {input.node_map})"
         {PYTHON} {SCRIPTS}/measure.py \
           --metrics {output.metrics} --log {output.log} \
           --stdout {output.gfa} --sample-interval {SAMPLE_INTERVAL} \
-          -- {VG} chunk -x {input.xg} -r "$node:$node" {params.extra} \
-             {params.context} -O gfa -t {threads}
+          -- {PYTHON} {SCRIPTS}/vg_find_to_gfa.py \
+             --vg {VG} --input {input.xg} --node "$node" \
+             --context {wildcards.context} {params.length} -- {params.extra}
         """
 
 

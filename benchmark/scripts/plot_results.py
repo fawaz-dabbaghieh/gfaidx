@@ -77,12 +77,44 @@ MATCHED_SOURCES = {
     "gfaidx_matched_gbz": "gbz",
 }
 
+# Primary index plots include only construction steps and files needed by the
+# timed query commands. All recorded ODGI steps still have a supplementary plot.
+QUERY_READY_INDEX_STEPS = {
+    "gfaidx": {"index_gfa", "index_coordinates"},
+    "vg": {"convert_xg"},
+    "odgi": {"w_to_p", "build_optimized"},
+    "gbz": {"vg_gbwt_gbz", "construct_db"},
+}
+
+
+def query_ready_index_step(row: dict[str, str]) -> bool:
+    """Return whether an indexing row contributes to primary totals."""
+    return row.get("step") in QUERY_READY_INDEX_STEPS.get(row.get("tool"), set())
+
+
+def query_ready_index_file(row: dict[str, str]) -> bool:
+    """Return whether a size row names a file read by a timed query."""
+    filename = row.get("file", "")
+    tool = row.get("tool", "")
+    if filename == "TOTAL":
+        return False
+    if tool == "gfaidx":
+        return filename.endswith(".gfa.gz") or ".gfa.gz." in filename
+    if tool == "vg":
+        return filename.endswith(".xg")
+    if tool == "odgi":
+        return filename.endswith(".opt.og")
+    if tool == "gbz":
+        return filename.endswith(".gbz.db")
+    return False
+
+
 PLOT_DESCRIPTIONS = {
-    "indexing_totals": "Core indexing wall time and peak RSS as one consistently colored bar per tool.",
-    "index_size_totals": "Core index footprint as one consistently colored bar per tool.",
+    "indexing_totals": "Query-ready indexing wall time and peak RSS as one consistently colored bar per tool.",
+    "index_size_totals": "Query-ready index footprint as one consistently colored bar per tool.",
     "indexing_summary_all_steps": "Supplementary index construction plot containing every recorded step.",
-    "indexing_summary": "Primary index construction plot using only odgi build -O for ODGI.",
-    "index_size_components": "All index artifacts recorded in index_sizes.tsv, split into components.",
+    "indexing_summary": "Primary index construction plot including W-to-P conversion and odgi build -O when required.",
+    "index_size_components": "Files read by timed queries, split into index components.",
     "interval_scaling": "Interval length versus mean extraction wall time and peak RSS.",
     "interval_output": "Interval length versus mean output nodes and serialized GFA bytes.",
     "interval_relative_to_gfaidx": "Mean source-tool cost ratio relative to exact all-haplotype gfaidx cost.",
@@ -299,11 +331,7 @@ def index_metric_rows(
         if row.get("graph") == graph
         and successful(row)
         and number(row.get("wall_seconds")) is not None
-        and (
-            all_odgi_steps
-            or row.get("tool") != "odgi"
-            or row.get("step") == "build_optimized"
-        )
+        and (all_odgi_steps or query_ready_index_step(row))
     ]
 
 
@@ -319,9 +347,9 @@ def plot_indexing_summary(
 ) -> None:
     """Plot indexing time by step and maximum process RSS.
 
-    The primary comparison treats ``odgi build -O`` as ODGI's functional graph
-    construction operation. A separate supplementary invocation retains every
-    measured ODGI preparation and side-index step.
+    The primary comparison includes every step needed to create query inputs,
+    including W-to-P conversion before ODGI's optimized build when present. A
+    supplementary invocation retains every measured ODGI preparation step.
     """
     selected = index_metric_rows(rows, graph, all_odgi_steps=all_odgi_steps)
     if not selected:
@@ -400,8 +428,8 @@ def plot_indexing_summary(
         stem = f"indexing_summary_all_steps__{safe_name(graph)}"
     else:
         title = (
-            f"Core index construction: {graph}\n"
-            "ODGI shows build -O only; this compacts and remaps node IDs"
+            f"Query-ready index construction: {graph}\n"
+            "ODGI includes W-to-P conversion when required, then build -O"
         )
         stem = f"indexing_summary__{safe_name(graph)}"
     figure.suptitle(title, fontsize=14)
@@ -423,7 +451,7 @@ def plot_indexing_totals(
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot one core indexing-time and memory bar per tool."""
+    """Plot one query-ready indexing-time and memory bar per tool."""
     selected = index_metric_rows(rows, graph, all_odgi_steps=False)
     if not selected:
         return
@@ -469,8 +497,8 @@ def plot_indexing_totals(
             )
 
     figure.suptitle(
-        f"Core indexing totals: {graph}\n"
-        "gfaidx includes graph and coordinate indexing; ODGI includes build -O only",
+        f"Query-ready indexing totals: {graph}\n"
+        "ODGI includes W-to-P conversion when required, then build -O",
         fontsize=14,
     )
     save_figure(
@@ -521,7 +549,7 @@ def plot_index_sizes(
         row
         for row in rows
         if row.get("graph") == graph
-        and row.get("file") != "TOTAL"
+        and query_ready_index_file(row)
         and number(row.get("bytes")) is not None
     ]
     if not selected:
@@ -571,7 +599,7 @@ def plot_index_sizes(
             ha="center",
             fontsize=8,
         )
-    axis.set_title(f"Recorded index footprint: {graph}")
+    axis.set_title(f"Query-ready index footprint: {graph}")
     save_figure(
         figure,
         output_dir,
@@ -590,55 +618,36 @@ def plot_index_size_totals(
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot one core index-size bar per tool.
+    """Plot one query-ready index-size bar per tool.
 
-    gfaidx, VG, and gbz-base use their recorded TOTAL rows. ODGI uses only the
-    optimized ``.opt.og`` graph so the primary size figure matches the primary
-    ``odgi build -O`` time and memory comparison.
+    Component rows are filtered directly instead of trusting legacy ``TOTAL``
+    rows, which may include construction intermediates from an older collector.
     """
-    selected = [row for row in rows if row.get("graph") == graph]
+    selected = [
+        row
+        for row in rows
+        if row.get("graph") == graph
+        and query_ready_index_file(row)
+        and number(row.get("bytes")) is not None
+    ]
     if not selected:
         return
-    tools = sorted({row["tool"] for row in selected}, key=tool_sort_key)
-    sizes: list[float] = []
-    plotted_tools: list[str] = []
-    for tool in tools:
-        tool_rows = [row for row in selected if row["tool"] == tool]
-        if tool == "odgi":
-            byte_count = sum(
-                number(row.get("bytes")) or 0.0
-                for row in tool_rows
-                if row.get("file", "").endswith(".opt.og")
-            )
-        else:
-            total = next(
-                (
-                    number(row.get("bytes"))
-                    for row in tool_rows
-                    if row.get("file") == "TOTAL"
-                ),
-                None,
-            )
-            byte_count = total if total is not None else sum(
-                number(row.get("bytes")) or 0.0
-                for row in tool_rows
-                if row.get("file") != "TOTAL"
-            )
-        if byte_count > 0:
-            plotted_tools.append(tool)
-            sizes.append(byte_count / (1024.0**3))
-    if not sizes:
-        return
 
-    colors = [
-        TOOL_COLORS.get(base_tool(tool), "#666666") for tool in plotted_tools
+    tools = sorted({row["tool"] for row in selected}, key=tool_sort_key)
+    sizes = [
+        sum(
+            number(row.get("bytes")) or 0.0
+            for row in selected
+            if row["tool"] == tool
+        )
+        / (1024.0**3)
+        for tool in tools
     ]
+    colors = [TOOL_COLORS.get(base_tool(tool), "#666666") for tool in tools]
     figure, axis = plt.subplots(figsize=(8.8, 5.5))
-    axis.bar(range(len(plotted_tools)), sizes, color=colors)
-    axis.set_xticks(
-        range(len(plotted_tools)), [tool_label(tool) for tool in plotted_tools]
-    )
-    configure_axis(axis, "Tool", "Core index size (GiB)")
+    axis.bar(range(len(tools)), sizes, color=colors)
+    axis.set_xticks(range(len(tools)), [tool_label(tool) for tool in tools])
+    configure_axis(axis, "Tool", "Query-ready index size (GiB)")
     axis.set_ylim(0, max(sizes) * 1.16)
     for index, value in enumerate(sizes):
         axis.annotate(
@@ -650,8 +659,8 @@ def plot_index_size_totals(
             fontsize=8,
         )
     axis.set_title(
-        f"Core index footprint: {graph}\n"
-        "gfaidx sums all sidecars; ODGI includes the optimized .og only"
+        f"Query-ready index footprint: {graph}\n"
+        "ODGI reports .opt.og; construction intermediates are excluded"
     )
     save_figure(
         figure,

@@ -3,7 +3,7 @@
 # Manifest paths are resolved next to the Snakefile. Graph paths in graphs.tsv
 # are resolved against data_root unless they are absolute.
 
-data_root: /home/user3/gfaidx_benchmark
+data_root: /path/to/genome_graphs
 results_dir: results
 
 graphs_tsv: graphs.tsv
@@ -12,8 +12,9 @@ loci_tsv: loci.tsv
 # Fixed thread count for indexing and untimed setup operations.
 threads: 1
 
-# Query-level thread sweep. gfaidx, VG, and ODGI are measured at every value.
-# gbz-base has no query thread option and is measured once per query.
+# Query-level thread sweep. gfaidx and ODGI node queries, plus threaded region
+# queries, use every value. VG find and gbz-base node queries are measured once
+# because those commands expose no query-thread option.
 query_threads: [1, 2, 4, 8]
 
 # Region-only local haplotype sweep. Values are bases and are passed explicitly
@@ -30,8 +31,8 @@ include_odgi_default: true
 
 # Node-neighborhood context sweeps.
 #
-# node_contexts_steps: context as a number of expansion steps (vg -c, odgi -c).
-# node_contexts_bases: context as a base-pair budget (vg chunk -l, odgi -L,
+# node_contexts_steps: context as a number of expansion steps (vg find -c, odgi -c).
+# node_contexts_bases: context as a base-pair budget (vg find -c -L, odgi -L,
 #   gbz-base --context). This second track exists because gbz-base only
 #   expresses context in bp.
 #
@@ -47,10 +48,10 @@ sample_interval_seconds: 0.05
 tools:
   # Point this at the native gfaidx executable to benchmark. It may also be a
   # command available on PATH.
-  gfaidx: /home/user3/tools/gfaidx/build/gfaidx
+  gfaidx: gfaidx
   vg: vg
   odgi: odgi
-  gbz_base: /home/user3/tools/gbz-base/target/release/gbz-base
+  gbz_base: gbz-base
   python: python3
 
 gfaidx:
@@ -65,7 +66,9 @@ gfaidx:
 
 vg:
   convert_extra: ""
-  # Applied to both node and coordinate extraction with vg chunk.
+  # Applied only to node-seeded extraction with vg find.
+  find_extra: ""
+  # Applied only to path-coordinate extraction with vg chunk.
   chunk_extra: ""
 
 odgi:
@@ -75,12 +78,10 @@ odgi:
   extract_extra: ""
 
 gbz:
-  # --max-node 0 disables GBZ segment chopping. By default vg gbwt chops
-  # segments longer than 1024 bp, which adds nodes (2,791,965 vs 2,782,249 on
-  # chr22) and renumbers the whole ID space to 1..N, so `gbz-base query --node
-  # <original id>` fails with "the graph does not contain handle". With chopping
-  # off, the GBZ keeps the input IDs (53303057..56138482) and gbz-base can be
-  # queried with the same node IDs as vg and gfaidx.
+  # --max-node 0 disables GBZ segment chopping. Default chopping adds nodes
+  # and renumbers the ID space, so `gbz-base query --node <original id>` can
+  # fail because that input handle no longer exists. Disabling chopping keeps
+  # the input IDs usable across VG, gbz-base, and gfaidx node queries.
   #
   # If you need a default-chopped GBZ instead, add `--translation FILE` to dump
   # the segment-to-node table and translate query nodes through it.

@@ -32,6 +32,7 @@ Install Snakemake 9 and the four benchmarked tools:
 - `odgi`
 - `gbz-base`
 - `python3`
+- `matplotlib` (only for `scripts/plot_results.py`; the benchmark and HTML report do not require it)
 
 The tools may be installed in different environments. Configure an absolute
 path for each executable when it is not available on `PATH`.
@@ -60,6 +61,7 @@ benchmark/scripts/measure.py         process-tree time and peak-RSS measurement
 benchmark/scripts/resolve_locus.py   W-record coordinate resolver
 benchmark/scripts/resolve_p_locus.py P-path coordinate resolver
 benchmark/scripts/w_to_p.py          W-to-P conversion required by ODGI
+benchmark/scripts/vg_find_to_gfa.py  measured VG find-to-GFA streaming wrapper
 benchmark/scripts/collect_results.py final result tables
 ```
 
@@ -141,8 +143,10 @@ or ODGI iteration multiplies the job count. Start with short arrays on a new
 graph, then expand them for the final run.
 
 Optional global tool arguments live in the `gfaidx`, `vg`, `odgi`, and `gbz`
-sections. `vg.chunk_extra` is applied to VG node and interval extraction.
-Per-graph `*_extra` columns in the graph manifest extend these global values.
+sections. `vg.find_extra` applies only to node-seeded `vg find` queries;
+`vg.chunk_extra` applies only to path-coordinate `vg chunk` queries. Keep them
+separate because the two commands do not accept the same options. Per-graph
+`*_extra` columns in the graph manifest extend these global values.
 
 ## W-line graphs
 
@@ -151,7 +155,7 @@ Per-graph `*_extra` columns in the graph manifest extend these global values.
 Add one row to `graphs.tsv`:
 
 ```tsv
-graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_chunk_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra	gbz_gbwt_extra
+graph	gfa	gfaidx_path_names_file	gfaidx_reference	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_find_extra	vg_chunk_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra	gbz_gbwt_extra
 hprc_chr1	/data/hprc_chr1.gfa		CHM13	1			--ref-sample CHM13
 ```
 
@@ -163,7 +167,7 @@ Important fields:
 | `gfa` | Absolute graph path or a path below `data_root` |
 | `gfaidx_path_names_file` | Optional filtered `get_path --print_path_names` output |
 | `gfaidx_reference` | W sample coordinate-indexed by gfaidx when no names file is supplied |
-| `odgi_path_indexes` | Build `.xp` and `.stpidx`; normally `1` for a graph with paths |
+| `odgi_path_indexes` | Build supplementary `.xp` and `.stpidx` artifacts; timed queries use neither |
 | remaining fields | Optional per-graph tool arguments |
 
 When every locus uses one sample, `gfaidx_reference` may be empty and the
@@ -222,7 +226,7 @@ The P workflow assumes:
 Add one row to `graphs.p.tsv`:
 
 ```tsv
-graph	gfa	reference_sample	gfaidx_path_names_file	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_chunk_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra	gbz_gbwt_extra
+graph	gfa	reference_sample	gfaidx_path_names_file	odgi_path_indexes	gfaidx_index_extra	gfaidx_coord_extra	vg_convert_extra	vg_find_extra	vg_chunk_extra	odgi_build_extra	odgi_pathindex_extra	odgi_stepindex_extra	gbz_gbwt_extra
 pggb_chr1	/data/pggb_chr1.gfa	CHM13		1
 ```
 
@@ -355,28 +359,35 @@ measurements concurrently and distort timing and memory results.
 | gbz-base, W workflow | VG GFA-to-GBZ construction, then `gbz-base construct` |
 | gbz-base, P workflow | VG GFA-to-GBZ construction and reference promotion, then `gbz-base construct` |
 
-The primary index plots combine gfaidx graph and coordinate indexing. They use
-only ODGI's optimized build as the main ODGI index. Detailed tables retain all
-individual measured steps.
+The primary query-ready index plots combine gfaidx graph and coordinate indexing.
+For ODGI, a W-line graph includes the measured W-to-P conversion plus the
+optimized build; a P-line graph includes the optimized build directly. The
+unoptimized build and optional path/step indexes remain in detailed and
+supplementary outputs but are excluded from the query-ready total.
 
 ### Node queries
 
 Two context tracks are generated:
 
-- `node_steps`: `vg chunk -c N` and `odgi extract -c N`.
-- `node_bases`: `vg chunk -l N`, `odgi extract -L N`, and
-  `gbz-base query --context N`.
+- `node_steps`: `vg find -n NODE -c N` and `odgi extract -n NODE -c N`.
+- `node_bases`: `vg find -n NODE -c N -L`, `odgi extract -n NODE -L N`,
+  and `gbz-base query --node NODE --context N`.
+
+`vg find` emits VG protobuf, so the workflow streams it through
+`vg convert -f -`. Both processes run below the same measurement wrapper and
+there is no unmeasured intermediate file.
 
 gfaidx bounds BFS by node count rather than steps or bases. Each source tool is
 run first, its output S lines are counted, and gfaidx is run with that count as
 `--max_nodes` plus `--with_coords`. Results are named
 `gfaidx_matched_vg`, `gfaidx_matched_odgi`, and `gfaidx_matched_gbz`.
 
-VG, ODGI, and the matched gfaidx query are run at every `query_threads` value.
-gbz-base has no query thread option, so its source extraction is measured once;
-the matched gfaidx side still runs at every thread value. The gfaidx thread
-setting applies to its indexed path/subpath formatting work, so scaling may be
-small when graph traversal or materialization dominates.
+ODGI node queries run at every `query_threads` value. `vg find` and gbz-base
+have no node-query thread option, so each of those source extractions is
+measured once and recorded with `threads=NA`; the matched gfaidx side still runs
+at every configured thread value. The gfaidx thread setting applies to its
+indexed path/subpath formatting work, so scaling may be small when graph
+traversal or materialization dominates.
 
 ### Region queries
 
@@ -395,10 +406,11 @@ small when graph traversal or materialization dominates.
 Manifest intervals are half-open. `vg chunk -p` uses an inclusive end, so the
 resolver sends `region_end - 1` only to VG.
 
-All timed query outputs are complete GFA text. VG writes GFA directly; it no
-longer uses `vg find` or an intermediate protobuf graph. ODGI extraction and
-GFA serialization are executed under one measurement, including the temporary
-`.og` output and `odgi view -g`.
+All timed query outputs are complete GFA text. VG node queries run `vg find`
+and stream its protobuf output through `vg convert -f`; VG region queries use
+`vg chunk -O gfa` directly. Extraction and serialization are included in the
+same measurement. ODGI extraction and GFA serialization likewise execute under
+one measurement, including the temporary `.og` output and `odgi view -g`.
 
 Path resolution, original-node lookup, and ODGI node-ID translation are setup
 operations and are not included in query timings. Their results remain in the
@@ -417,7 +429,7 @@ Important files and directories:
 ```text
 report.html                    self-contained summary report
 tables/index_metrics.tsv       indexing time and memory
-tables/index_sizes.tsv         index file sizes and per-tool totals
+tables/index_sizes.tsv         query-ready file sizes and per-tool totals
 tables/query_metrics.tsv       long-form query measurements
 tables/query_comparison.tsv    parameter-keyed wide comparison/audit table
 tables/tool_versions.tsv       executable versions
@@ -477,11 +489,44 @@ dedicated scaling and supplementary plots.
 
 ## Tool differences
 
-### VG chunk semantics
+### Why node queries use `vg find` and regions use `vg chunk`
 
-The workflow uses `vg chunk`, not `vg find`, for node and coordinate queries.
-`chunk` can emit GFA directly and supports explicit step or base-pair context.
-For interval queries, `-c 0` prevents additional graph-step expansion.
+Node-seeded queries deliberately use `vg find`, while path-coordinate queries
+continue to use `vg chunk`:
+
+```bash
+# Node context in graph steps. VG emits protobuf; the workflow converts it to GFA.
+vg find -x graph.xg -n NODE -c STEPS | vg convert -f -t 1 -
+
+# Node context in base pairs (-L changes how -c is interpreted).
+vg find -x graph.xg -n NODE -c BASES -L | vg convert -f -t 1 -
+
+# Exact path interval with no graph-neighborhood expansion.
+vg chunk -x graph.xg -p PATH:START-END -c 0 -O gfa -t THREADS
+```
+
+This split avoids a VG `chunk` node-range bug found while validating the
+benchmark. In affected VG source, the `-l/--context-length` parser correctly
+stores the requested base-pair length and sets step context to `-1`. However,
+`PathChunker::extract_id_range()` calls step expansion unconditionally and then
+passes the step-context variable to length expansion too, instead of passing
+the requested length. Because the expansion APIs take an unsigned value, the
+`-1` sentinel becomes a huge context. A query such as
+`vg chunk -r NODE:NODE -l 1000` can consequently expand over the full connected
+component and produce a graph many orders of magnitude larger than the intended
+1 kb neighborhood. The relevant implementation can be inspected in
+[`src/chunker.cpp` in VG 1.73.0](https://github.com/vgteam/vg/blob/v1.73.0/src/chunker.cpp#L245-L258).
+
+`vg find` implements the desired node-seeded operations directly: `-c N` for
+step context and `-c BP -L` for a minimum base-pair distance. It has no
+query-thread option, so the benchmark measures each VG source node query once
+and includes its `vg convert` process in the same time and peak-RSS result.
+
+The region case is different. `vg chunk -p PATH:START-END -c 0` starts from a
+path interval, emits GFA directly, supports the configured query threads, and
+explicitly disables extra graph-step context. It does not use the problematic
+node-ID range plus length-context code path, so it remains the appropriate
+command for region extraction.
 
 ### ODGI node IDs
 

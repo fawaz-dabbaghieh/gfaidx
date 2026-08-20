@@ -29,10 +29,15 @@ from pathlib import Path
 # reported per file and summed per tool so the footprint comparison is explicit
 # about what it counts.
 INDEX_GLOBS = {
+    # gfaidx needs the indexed BGZF graph plus all generated sidecars.
     "gfaidx": ["*.gfa.gz", "*.gfa.gz.*"],
+    # VG queries the XG directly; source GFA and setup files are excluded.
     "vg": ["*.xg"],
-    "odgi": ["*.og", "*.xp", "*.stpidx"],
-    "gbz": ["*.gbz", "*.gbz.db"],
+    # Timed ODGI queries consume only the optimized graph. The unoptimized OG,
+    # path index, and step index are supplementary construction artifacts.
+    "odgi": ["*.opt.og"],
+    # gbz-base queries its database rather than the intermediate GBZ.
+    "gbz": ["*.gbz.db"],
 }
 
 NODE_TRACKS = ("node_steps", "node_bases")
