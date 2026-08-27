@@ -115,11 +115,11 @@ PLOT_DESCRIPTIONS = {
     "indexing_summary_all_steps": "Supplementary index construction plot containing every recorded step.",
     "indexing_summary": "Primary index construction plot including W-to-P conversion and odgi build -O when required.",
     "index_size_components": "Files read by timed queries, split into index components.",
-    "interval_scaling": "Interval length versus mean extraction wall time and peak RSS.",
+    "interval_scaling": "Interval length versus two-stage mean wall time and mean peak RSS across explicit sweep settings and loci.",
     "interval_output": "Interval length versus mean output nodes and serialized GFA bytes.",
     "interval_relative_to_gfaidx": "Mean source-tool cost ratio relative to exact all-haplotype gfaidx cost.",
-    "node_steps_scaling": "Step context versus mean node-query wall time and peak RSS across seed nodes.",
-    "node_bases_scaling": "Base-pair context versus mean node-query wall time and peak RSS across seed nodes.",
+    "node_steps_scaling": "Step context versus two-stage mean wall time and mean peak RSS across parameter settings and seed nodes.",
+    "node_bases_scaling": "Base-pair context versus two-stage mean wall time and mean peak RSS across parameter settings and seed nodes.",
     "node_steps_speedup": "Mean per-seed source-tool cost ratio relative to node-count-matched gfaidx.",
     "node_bases_speedup": "Mean per-seed source-tool cost ratio relative to node-count-matched gfaidx.",
 }
@@ -762,7 +762,7 @@ def interval_rows(
 def primary_node_rows(
     rows: list[dict[str, str]], graph: str, track: str
 ) -> list[dict[str, str]]:
-    """Select the smallest-thread node slice for legacy overview plots."""
+    """Select the smallest-thread node slice for representative plots."""
     selected = [
         row for row in rows
         if row.get("graph") == graph
@@ -783,6 +783,96 @@ def primary_node_rows(
         row for row in selected
         if number(row.get("threads")) is None
         or int(number(row.get("threads")) or 0) == primary_thread
+    ]
+
+
+def marginal_node_rows(
+    rows: list[dict[str, str]], graph: str, track: str
+) -> list[dict[str, str]]:
+    """Return every successful node-query setting for a marginal-mean plot."""
+    selected = [
+        row
+        for row in rows
+        if row.get("graph") == graph
+        and row.get("track") == track
+        and successful(row)
+        and number(row.get("context")) is not None
+    ]
+    # A reused results directory can contain legacy rows alongside the current
+    # sweep schema. Prefer named current variants so stale measurements are not
+    # silently counted as additional parameter settings.
+    if any(row.get("query_variant", "") not in {"", "legacy"} for row in selected):
+        selected = [row for row in selected if row.get("query_variant") != "legacy"]
+    return selected
+
+
+def marginal_interval_rows(
+    rows: list[dict[str, str]], graph: str
+) -> list[tuple[dict[str, str], str, int, int]]:
+    """Return region rows used by the explicit-sweep marginal-mean plot.
+
+    Numeric gfaidx gap settings and numeric ODGI gap/iteration settings form
+    the explicit factorial sweep. Their special ``no_gap`` and ``default``
+    baselines are intentionally excluded instead of receiving the weight of an
+    extra, artificial numeric setting. Tools without these parameters retain
+    their standard/context-zero rows and all available thread settings.
+    """
+    candidates = [
+        row
+        for row in rows
+        if row.get("graph") == graph
+        and row.get("track") == "region"
+        and successful(row)
+    ]
+    named_variants = any(
+        row.get("query_variant", "") not in {"", "legacy"} for row in candidates
+    )
+    if named_variants:
+        candidates = [row for row in candidates if row.get("query_variant") != "legacy"]
+
+    selected: list[tuple[dict[str, str], str, int, int]] = []
+    for row in candidates:
+        if named_variants:
+            variant = row.get("query_variant", "")
+            if row.get("tool") == "gfaidx_all_haplotypes" and variant != "gap":
+                continue
+            if row.get("tool") == "odgi" and variant != "gap":
+                continue
+        parsed = parse_interval(row.get("context", ""))
+        if parsed is None:
+            continue
+        sequence, start, _end, length = parsed
+        selected.append((row, sequence, start, length))
+    return selected
+
+
+def marginal_mean_by_query(
+    entries: list[tuple[int, dict[str, str]]],
+    field: str,
+    scale: float = 1.0,
+) -> list[tuple[int, float]]:
+    """Calculate a balanced two-stage arithmetic mean for each query size.
+
+    Stage one averages all available parameter settings for one query/tool at a
+    fixed size. Stage two averages those query-level means. This gives every
+    locus or seed equal weight even when a failed or unsupported setting leaves
+    different row counts among queries. Time and peak RSS call this helper
+    independently, as requested, rather than deriving one statistic from the
+    other.
+    """
+    by_query: dict[tuple[int, str], list[float]] = defaultdict(list)
+    for query_size, row in entries:
+        value = number(row.get(field))
+        if value is None or value <= 0:
+            continue
+        by_query[(query_size, row.get("query_id", ""))].append(value * scale)
+
+    by_size: dict[int, list[float]] = defaultdict(list)
+    for (query_size, _query_id), measurements in by_query.items():
+        by_size[query_size].append(sum(measurements) / len(measurements))
+    return [
+        (query_size, sum(query_means) / len(query_means))
+        for query_size, query_means in sorted(by_size.items())
     ]
 
 
@@ -829,8 +919,8 @@ def plot_interval_scaling(
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot extraction time and memory against interval length."""
-    selected = interval_rows(rows, graph)
+    """Plot sweep-averaged time and memory against interval length."""
+    selected = marginal_interval_rows(rows, graph)
     if not selected:
         return
     lengths = {length for _row, _sequence, _start, length in selected}
@@ -840,18 +930,14 @@ def plot_interval_scaling(
 
     figure, axes = plt.subplots(1, 2, figsize=(13, 5.3))
     metrics = [
-        ("wall_seconds", "Wall time (seconds)", 1.0),
-        ("peak_rss_kb", "Peak RSS (GiB)", 1.0 / (1024.0**2)),
+        ("wall_seconds", "Mean wall time (seconds)", 1.0),
+        ("peak_rss_kb", "Mean peak RSS (GiB)", 1.0 / (1024.0**2)),
     ]
     for axis, (field, ylabel, scale) in zip(axes, metrics):
         for tool, entries in sorted(groups.items(), key=lambda item: tool_sort_key(item[0])):
-            # Collapse replicate loci of the same requested length before
-            # drawing, leaving one mean point per tool and interval size.
-            points = mean_by_x_value([
-                (length, (number(row.get(field)) or 0.0) * scale)
-                for length, row in entries
-                if (number(row.get(field)) or 0.0) > 0
-            ])
+            # Average parameter settings within each locus first, then
+            # average loci of the same requested length with equal weight.
+            points = marginal_mean_by_query(entries, field, scale)
             if not points:
                 continue
             axis.plot(
@@ -865,8 +951,12 @@ def plot_interval_scaling(
         )
         label_tested_x_values(axis, lengths)
     axes[1].legend(fontsize=7, ncol=2)
+    query_count = len({row["query_id"] for row, *_rest in selected})
+    locus_label = "locus" if query_count == 1 else "loci"
     figure.suptitle(
-        f"Coordinate-interval extraction scaling: {graph}{interval_plot_note(selected)}",
+        f"Coordinate-interval sweep means: {graph}\n"
+        f"Explicit settings averaged within query, then across "
+        f"{query_count} {locus_label}",
         fontsize=14,
     )
     save_figure(
@@ -902,8 +992,8 @@ def plot_interval_output(
         (axes[1], "out_bytes", "Output GFA size (MiB)", 1.0 / (1024.0**2)),
     ):
         for tool, entries in sorted(groups.items(), key=lambda item: tool_sort_key(item[0])):
-            # Output scale is averaged in the same way as time and memory so
-            # each requested length has a single visual point per tool.
+            # Average replicate loci within the representative parameter
+            # slice, leaving one output-scale point per tool and length.
             points = mean_by_x_value([
                 (length, (number(row.get(field)) or 0.0) * scale)
                 for length, row in entries
@@ -1019,8 +1109,8 @@ def plot_node_scaling(
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot mean time and memory across seed nodes for one context series."""
-    selected = primary_node_rows(rows, graph, track)
+    """Plot parameter- and seed-averaged time and memory by node context."""
+    selected = marginal_node_rows(rows, graph, track)
     if not selected:
         return
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
@@ -1029,8 +1119,8 @@ def plot_node_scaling(
 
     figure, axes = plt.subplots(1, 2, figsize=(12.5, 5.2))
     metrics = [
-        ("wall_seconds", "Wall time (seconds)", 1.0),
-        ("peak_rss_kb", "Peak RSS (GiB)", 1.0 / (1024.0**2)),
+        ("wall_seconds", "Mean wall time (seconds)", 1.0),
+        ("peak_rss_kb", "Mean peak RSS (GiB)", 1.0 / (1024.0**2)),
     ]
     contexts = {
         number(row.get("context")) or 0.0
@@ -1039,17 +1129,14 @@ def plot_node_scaling(
     }
     for axis, (field, ylabel, scale) in zip(axes, metrics):
         for tool in sorted(groups, key=tool_sort_key):
-            # Every query_id represents one seed node. Average all successful
-            # seeds at the same configured context into one point per tool.
-            points = mean_by_x_value([
-                (
-                    int(number(row.get("context")) or 0.0),
-                    (number(row.get(field)) or 0.0) * scale,
-                )
+            # Average thread and other parameter settings within each seed
+            # first, then average seed-level means with equal weight.
+            entries = [
+                (int(number(row.get("context")) or 0.0), row)
                 for row in groups[tool]
                 if (number(row.get("context")) or 0.0) > 0
-                and (number(row.get(field)) or 0.0) > 0
-            ])
+            ]
+            points = marginal_mean_by_query(entries, field, scale)
             if points:
                 axis.plot(
                     [point[0] for point in points],
@@ -1063,13 +1150,11 @@ def plot_node_scaling(
     axes[1].legend(fontsize=7)
     track_label = "step" if track == "node_steps" else "base-pair"
     seed_count = len({row["query_id"] for row in selected})
-    seed_note = (
-        f"\nArithmetic mean across {seed_count} seed nodes"
-        if seed_count > 1
-        else ""
-    )
+    seed_label = "seed" if seed_count == 1 else "seeds"
     figure.suptitle(
-        f"Node extraction by {track_label} context: {graph}{seed_note}", fontsize=14
+        f"Node extraction by {track_label} context: {graph}\n"
+        f"Settings averaged within seed, then across {seed_count} {seed_label}",
+        fontsize=14,
     )
     save_figure(
         figure,

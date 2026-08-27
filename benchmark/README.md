@@ -469,23 +469,30 @@ interval scaling, node-context scaling, output size, and the relative cost of
 each source query and its node-count-matched gfaidx query. `plots.tsv` lists all
 generated figures.
 
-When several region queries have the same requested length, interval plots show
-one arithmetic-mean point per tool and length. Time, peak memory, output scale,
-and per-query relative-cost ratios are averaged independently. The unaggregated
-measurements remain available in `query_metrics.tsv` and
-`query_comparison.tsv`.
+The time-and-memory scaling plots use a balanced two-stage arithmetic mean.
+For each tool, query ID, and fixed query size, they first average every
+successful parameter setting. They then average those query-level means across
+seed nodes or loci of the same size. This gives every queried locus equal
+weight even if an unsupported or failed setting leaves unequal row counts.
+Wall time and peak RSS are averaged independently.
 
-Node plots similarly combine all node-query rows for a graph. At each step or
-base-pair context, they show the arithmetic-mean time and peak memory across the
-seed nodes in `loci.tsv`. Relative-cost plots calculate each seed node's source
-tool to matched-gfaidx ratio first and then average those ratios. Individual
-node measurements remain in the result tables.
+For node queries, query size is the configured step or base-pair context, and
+the first stage averages the available thread settings. A threadless VG find or
+gbz-base query contributes its single measurement. Matched gfaidx variants
+remain separate because each source tool produces a different node-count cap.
 
-The existing overview plots select the smallest configured numeric query
-thread, the gfaidx `no_gap` variant, the ODGI `default` variant, standard VG,
-and gbz-base with context zero. They therefore do not mix experimental
-settings. All other thread/gap/iteration combinations remain in the TSVs for
-dedicated scaling and supplementary plots.
+For regions, query size is the half-open interval length. The marginal-mean
+plot includes numeric gfaidx gap settings and numeric ODGI gap/iteration
+settings, plus all available threads. The special gfaidx `no_gap` and ODGI
+`default` baselines are excluded from this explicit-sweep mean so neither is
+weighted as an artificial extra numeric setting. Tools without those parameters
+retain their standard or context-zero rows.
+
+Output-scale and relative-cost figures retain the representative smallest-thread
+slice with gfaidx `no_gap`, ODGI `default`, standard VG, and context-zero
+gbz-base. Node relative-cost plots likewise calculate each seed's paired ratio
+on the representative slice before averaging ratios. Every unaggregated row
+remains available in `query_metrics.tsv` and `query_comparison.tsv`.
 
 ## Tool differences
 
