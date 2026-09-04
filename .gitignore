@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 
+.DS_store
 main_build/
 current_build/
 
