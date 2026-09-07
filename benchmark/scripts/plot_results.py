@@ -77,6 +77,54 @@ MATCHED_SOURCES = {
     "gfaidx_matched_gbz": "gbz",
 }
 
+# Thread settings shown side by side in the scaling plots. gfaidx and ODGI are
+# the only families with a query-thread option in every track, so only their
+# rows are filtered to one of these values; VG and gbz-base lines are left as
+# they already were (VG's own thread sweep, where present, stays blended into
+# one line; gbz-base has no query-thread option at all). Kept to just the two
+# extremes because at least one benchmarked graph only has 1 and 8 recorded
+# for the node tracks.
+SCALING_THREADS = (1, 8)
+THREADED_TOOL_FAMILIES = ("gfaidx", "odgi")
+
+
+def is_threaded_family(tool: str) -> bool:
+    """Return whether a tool variant has a query-thread option in every track."""
+    return any(tool.startswith(family) for family in THREADED_TOOL_FAMILIES)
+
+
+def line_style_for_thread(tool: str, thread: int | None) -> dict[str, object]:
+    """Return the plotted style for one tool at one query-thread count.
+
+    ``thread`` is None for tools with no query-thread option (VG, gbz-base),
+    which keep the plain per-tool style. gfaidx and ODGI instead get one line
+    per entry in SCALING_THREADS on the same axes: a filled marker for the
+    first (lowest) thread count, a hollow, slightly transparent marker for the
+    second. Color still encodes the tool family and linestyle still encodes
+    source-tool matching in the node tracks, so thread is the only thing this
+    adds.
+    """
+    style = dict(line_style(tool))
+    if thread is None:
+        return style
+    index = SCALING_THREADS.index(thread) if thread in SCALING_THREADS else 0
+    if index == 0:
+        style["markerfacecolor"] = style["color"]
+    else:
+        style["markerfacecolor"] = "none"
+        style["markeredgewidth"] = 1.4
+        style["alpha"] = 0.75
+    return style
+
+
+def label_for_thread(tool: str, thread: int | None) -> str:
+    """Return a legend label, naming the thread count when one applies."""
+    base = tool_label(tool)
+    if thread is None:
+        return base
+    unit = "thread" if thread == 1 else "threads"
+    return f"{base} ({thread} {unit})"
+
 # Primary index plots include only construction steps and files needed by the
 # timed query commands. All recorded ODGI steps still have a supplementary plot.
 QUERY_READY_INDEX_STEPS = {
@@ -115,11 +163,12 @@ PLOT_DESCRIPTIONS = {
     "indexing_summary_all_steps": "Supplementary index construction plot containing every recorded step.",
     "indexing_summary": "Primary index construction plot including W-to-P conversion and odgi build -O when required.",
     "index_size_components": "Files read by timed queries, split into index components.",
-    "interval_scaling": "Interval length versus two-stage mean wall time and mean peak RSS across explicit sweep settings and loci.",
+    "interval_scaling": "Interval length versus two-stage mean wall time and mean peak RSS; gfaidx and ODGI each show one line per query-thread count in SCALING_THREADS (filled vs hollow markers), VG and gbz-base show one line. Whiskers span the min-max range across the explicit gap/iteration sweep at each thread count.",
     "interval_output": "Interval length versus mean output nodes and serialized GFA bytes.",
     "interval_relative_to_gfaidx": "Mean source-tool cost ratio relative to exact all-haplotype gfaidx cost.",
-    "node_steps_scaling": "Step context versus two-stage mean wall time and mean peak RSS across parameter settings and seed nodes.",
-    "node_bases_scaling": "Base-pair context versus two-stage mean wall time and mean peak RSS across parameter settings and seed nodes.",
+    "node_steps_scaling": "Step context versus two-stage mean wall time and mean peak RSS across seed nodes; gfaidx and ODGI each show one line per query-thread count in SCALING_THREADS (filled vs hollow markers), VG find and gbz-base show one line.",
+    "node_bases_scaling": "Base-pair context versus two-stage mean wall time and mean peak RSS across seed nodes; gfaidx and ODGI each show one line per query-thread count in SCALING_THREADS (filled vs hollow markers), VG find and gbz-base show one line.",
+    "gap_tradeoff": "Haplotype-gap sweep as output size versus wall time and peak RSS, one line per locus per tool per query-thread count in SCALING_THREADS (filled vs hollow markers), showing the cost paid for a larger gap.",
     "node_steps_speedup": "Mean per-seed source-tool cost ratio relative to node-count-matched gfaidx.",
     "node_bases_speedup": "Mean per-seed source-tool cost ratio relative to node-count-matched gfaidx.",
 }
@@ -786,10 +835,17 @@ def primary_node_rows(
     ]
 
 
-def marginal_node_rows(
+def node_scaling_series(
     rows: list[dict[str, str]], graph: str, track: str
-) -> list[dict[str, str]]:
-    """Return every successful node-query setting for a marginal-mean plot."""
+) -> dict[tuple[str, int | None], list[tuple[int, dict[str, str]]]]:
+    """Group node-track rows into one plotted line per (tool, thread) pair.
+
+    gfaidx (matched variants) and ODGI, both threaded in the node tracks,
+    contribute one line per entry in SCALING_THREADS on the same axes rather
+    than being split into separate figures. VG find and gbz-base expose no
+    query-thread option and contribute their single existing line (keyed by
+    thread=None).
+    """
     selected = [
         row
         for row in rows
@@ -803,19 +859,38 @@ def marginal_node_rows(
     # silently counted as additional parameter settings.
     if any(row.get("query_variant", "") not in {"", "legacy"} for row in selected):
         selected = [row for row in selected if row.get("query_variant") != "legacy"]
-    return selected
+
+    series: dict[tuple[str, int | None], list[tuple[int, dict[str, str]]]] = defaultdict(list)
+    for row in selected:
+        tool = row.get("tool", "")
+        context = int(number(row.get("context")) or 0.0)
+        if context <= 0:
+            continue
+        if is_threaded_family(tool):
+            thread = number(row.get("threads"))
+            if thread is None or int(thread) not in SCALING_THREADS:
+                continue
+            key = (tool, int(thread))
+        else:
+            key = (tool, None)
+        series[key].append((context, row))
+    return series
 
 
-def marginal_interval_rows(
+def interval_scaling_series(
     rows: list[dict[str, str]], graph: str
-) -> list[tuple[dict[str, str], str, int, int]]:
-    """Return region rows used by the explicit-sweep marginal-mean plot.
+) -> dict[tuple[str, int | None], list[tuple[int, dict[str, str]]]]:
+    """Group region rows into one plotted line per (tool, thread) pair.
 
     Numeric gfaidx gap settings and numeric ODGI gap/iteration settings form
-    the explicit factorial sweep. Their special ``no_gap`` and ``default``
-    baselines are intentionally excluded instead of receiving the weight of an
-    extra, artificial numeric setting. Tools without these parameters retain
-    their standard/context-zero rows and all available thread settings.
+    the explicit factorial sweep; their special ``no_gap`` and ``default``
+    baselines are excluded instead of receiving the weight of an extra,
+    artificial numeric setting. gfaidx and ODGI, both threaded in every track,
+    contribute one line per entry in SCALING_THREADS on the same axes rather
+    than being split into separate figures. VG and gbz-base contribute a
+    single line each (keyed by thread=None): gbz-base has no query-thread
+    option, and VG's own thread sweep, where present, stays blended into one
+    line as it already was before threads were broken out at all.
     """
     candidates = [
         row
@@ -830,20 +905,26 @@ def marginal_interval_rows(
     if named_variants:
         candidates = [row for row in candidates if row.get("query_variant") != "legacy"]
 
-    selected: list[tuple[dict[str, str], str, int, int]] = []
+    series: dict[tuple[str, int | None], list[tuple[int, dict[str, str]]]] = defaultdict(list)
     for row in candidates:
+        tool = row.get("tool", "")
         if named_variants:
             variant = row.get("query_variant", "")
-            if row.get("tool") == "gfaidx_all_haplotypes" and variant != "gap":
-                continue
-            if row.get("tool") == "odgi" and variant != "gap":
+            if tool in {"gfaidx_all_haplotypes", "odgi"} and variant != "gap":
                 continue
         parsed = parse_interval(row.get("context", ""))
         if parsed is None:
             continue
-        sequence, start, _end, length = parsed
-        selected.append((row, sequence, start, length))
-    return selected
+        _sequence, _start, _end, length = parsed
+        if is_threaded_family(tool):
+            thread = number(row.get("threads"))
+            if thread is None or int(thread) not in SCALING_THREADS:
+                continue
+            key = (tool, int(thread))
+        else:
+            key = (tool, None)
+        series[key].append((length, row))
+    return series
 
 
 def marginal_mean_by_query(
@@ -874,6 +955,43 @@ def marginal_mean_by_query(
         (query_size, sum(query_means) / len(query_means))
         for query_size, query_means in sorted(by_size.items())
     ]
+
+
+def marginal_mean_and_range_by_query(
+    entries: list[tuple[int, dict[str, str]]],
+    field: str,
+    scale: float = 1.0,
+) -> list[tuple[int, float, float, float]]:
+    """Like ``marginal_mean_by_query``, plus the raw min/max at each size.
+
+    With one locus per requested length (the normal layout for this benchmark),
+    every point already represents repeated measurements of that same locus
+    across the explicit gap/iteration sweep, so the min/max span is a real
+    whisker rather than an artifact of averaging unrelated loci together. The
+    sample count per point is small (as few as 4 for gfaidx's gap sweep), so a
+    min-max range is reported instead of a standard deviation, which would
+    imply more statistical weight than these few settings support.
+    """
+    by_query: dict[tuple[int, str], list[float]] = defaultdict(list)
+    for query_size, row in entries:
+        value = number(row.get(field))
+        if value is None or value <= 0:
+            continue
+        by_query[(query_size, row.get("query_id", ""))].append(value * scale)
+
+    by_size_means: dict[int, list[float]] = defaultdict(list)
+    by_size_raw: dict[int, list[float]] = defaultdict(list)
+    for (query_size, _query_id), measurements in by_query.items():
+        by_size_means[query_size].append(sum(measurements) / len(measurements))
+        by_size_raw[query_size].extend(measurements)
+
+    points = []
+    for query_size, query_means in sorted(by_size_means.items()):
+        mean = sum(query_means) / len(query_means)
+        raw = by_size_raw[query_size]
+        low, high = (min(raw), max(raw)) if len(raw) > 1 else (mean, mean)
+        points.append((query_size, mean, low, high))
+    return points
 
 
 def mean_by_x_value(
@@ -919,44 +1037,67 @@ def plot_interval_scaling(
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot sweep-averaged time and memory against interval length."""
-    selected = marginal_interval_rows(rows, graph)
-    if not selected:
+    """Plot sweep-averaged time and memory against interval length.
+
+    gfaidx and ODGI each contribute one line per entry in SCALING_THREADS on
+    these same axes (filled marker for the lowest thread count, hollow for the
+    highest); VG and gbz-base contribute their single existing line. Whiskers
+    span the raw min-max of the gap/iteration sweep that already exists at
+    each fixed length and thread, so they are not an extra measurement, just
+    previously discarded data.
+    """
+    series = interval_scaling_series(rows, graph)
+    if not series:
         return
-    lengths = {length for _row, _sequence, _start, length in selected}
-    groups: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
-    for row, _sequence, _start, length in selected:
-        groups[row["tool"]].append((length, row))
+    lengths = {length for entries in series.values() for length, _row in entries}
 
     figure, axes = plt.subplots(1, 2, figsize=(13, 5.3))
     metrics = [
         ("wall_seconds", "Mean wall time (seconds)", 1.0),
         ("peak_rss_kb", "Mean peak RSS (GiB)", 1.0 / (1024.0**2)),
     ]
+    series_sort_key = lambda item: (  # noqa: E731
+        tool_sort_key(item[0][0]), item[0][1] if item[0][1] is not None else -1
+    )
     for axis, (field, ylabel, scale) in zip(axes, metrics):
-        for tool, entries in sorted(groups.items(), key=lambda item: tool_sort_key(item[0])):
+        for (tool, thread), entries in sorted(series.items(), key=series_sort_key):
             # Average parameter settings within each locus first, then
             # average loci of the same requested length with equal weight.
-            points = marginal_mean_by_query(entries, field, scale)
+            # The min/max of those same settings becomes the whisker range.
+            points = marginal_mean_and_range_by_query(entries, field, scale)
             if not points:
                 continue
-            axis.plot(
+            style = line_style_for_thread(tool, thread)
+            alpha = style.pop("alpha", 1.0)
+            axis.errorbar(
                 [point[0] for point in points],
                 [point[1] for point in points],
-                label=tool_label(tool),
-                **line_style(tool),
+                yerr=[
+                    [point[1] - point[2] for point in points],
+                    [point[3] - point[1] for point in points],
+                ],
+                label=label_for_thread(tool, thread),
+                capsize=3,
+                elinewidth=1,
+                alpha=alpha,
+                **style,
             )
         configure_axis(
             axis, "Requested interval length (bp)", ylabel, log_x=True, log_y=True
         )
         label_tested_x_values(axis, lengths)
     axes[1].legend(fontsize=7, ncol=2)
-    query_count = len({row["query_id"] for row, *_rest in selected})
+    query_count = len({
+        row["query_id"] for entries in series.values() for _length, row in entries
+    })
     locus_label = "locus" if query_count == 1 else "loci"
+    threads_text = " and ".join(str(t) for t in SCALING_THREADS)
     figure.suptitle(
         f"Coordinate-interval sweep means: {graph}\n"
-        f"Explicit settings averaged within query, then across "
-        f"{query_count} {locus_label}",
+        f"gfaidx/ODGI shown at {threads_text} query threads (filled = "
+        f"{SCALING_THREADS[0]}, hollow = {SCALING_THREADS[-1]}); settings "
+        f"averaged within query, then across {query_count} {locus_label}; "
+        "whiskers span the raw gap/iteration sweep",
         fontsize=14,
     )
     save_figure(
@@ -1100,6 +1241,153 @@ def plot_interval_relative(
     )
 
 
+def gap_tradeoff_rows(rows: list[dict[str, str]], graph: str) -> list[dict[str, str]]:
+    """Return region rows for the gap-driven cost/size trade-off scatter.
+
+    Restricted to the explicit numeric gap sweep (the no_gap and default
+    baselines are excluded, as in interval_scaling_series), both thread counts
+    in SCALING_THREADS, and — for ODGI — one representative merging-iteration
+    count, so haplotype gap is the only varying parameter along each line.
+    """
+    candidates = [
+        row
+        for row in rows
+        if row.get("graph") == graph
+        and row.get("track") == "region"
+        and row.get("tool") in {"gfaidx_all_haplotypes", "odgi"}
+        and successful(row)
+    ]
+    named_variants = any(
+        row.get("query_variant", "") not in {"", "legacy"} for row in candidates
+    )
+    if named_variants:
+        candidates = [row for row in candidates if row.get("query_variant") == "gap"]
+    else:
+        candidates = [
+            row for row in candidates
+            if number(row.get("haplotype_gap_bp")) is not None
+        ]
+
+    candidates = [
+        row for row in candidates
+        if (value := number(row.get("threads"))) is not None
+        and int(value) in SCALING_THREADS
+    ]
+
+    odgi_iterations = [
+        int(value) for row in candidates
+        if row.get("tool") == "odgi"
+        and (value := number(row.get("merging_iterations"))) is not None
+    ]
+    if odgi_iterations:
+        representative_iterations = min(odgi_iterations)
+        candidates = [
+            row for row in candidates
+            if row.get("tool") != "odgi"
+            or int(number(row.get("merging_iterations")) or -1) == representative_iterations
+        ]
+    return candidates
+
+
+def plot_gap_tradeoff(
+    rows: list[dict[str, str]],
+    graph: str,
+    output_dir: Path,
+    formats: list[str],
+    dpi: int,
+    generated: list[tuple[str, str, str]],
+) -> None:
+    """Plot output size versus cost across the haplotype-gap sweep.
+
+    One point per (locus, gap) pair for gfaidx and ODGI, connected in
+    increasing-gap order within each locus, tool, and query-thread count so
+    each line traces the actual trade-off: a larger gap pulls in more
+    haplotype-divergent sequence (x-axis) at some wall-time and memory cost
+    (y-axis). Each tool contributes one line per entry in SCALING_THREADS
+    (filled marker for the lowest thread count, hollow for the highest). VG
+    and gbz-base have no gap parameter and extract a fixed interval
+    regardless, so they are not part of this comparison.
+    """
+    candidates = gap_tradeoff_rows(rows, graph)
+    if not candidates:
+        return
+
+    by_line: dict[tuple[str, str, int], list[dict[str, str]]] = defaultdict(list)
+    for row in candidates:
+        thread = int(number(row.get("threads")) or 0)
+        by_line[(row["tool"], row["query_id"], thread)].append(row)
+
+    figure, axes = plt.subplots(1, 2, figsize=(13, 5.3))
+    for axis, field, ylabel, scale in (
+        (axes[0], "wall_seconds", "Wall time (seconds)", 1.0),
+        (axes[1], "peak_rss_kb", "Peak RSS (GiB)", 1.0 / (1024.0**2)),
+    ):
+        seen_labels: set[str] = set()
+        for (tool, _query_id, thread), tool_rows in sorted(
+            by_line.items(),
+            key=lambda item: (tool_sort_key(item[0][0]), item[0][1], item[0][2]),
+        ):
+            ordered = sorted(
+                tool_rows, key=lambda r: number(r.get("haplotype_gap_bp")) or 0.0
+            )
+            points = [
+                (number(r.get("out_nodes")), (number(r.get(field)) or 0.0) * scale, r)
+                for r in ordered
+            ]
+            points = [(x, y, r) for x, y, r in points if x and x > 0 and y > 0]
+            if len(points) < 2:
+                continue
+            style = line_style_for_thread(tool, thread)
+            alpha = style.pop("alpha", 0.85)
+            label = label_for_thread(tool, thread)
+            axis.plot(
+                [point[0] for point in points],
+                [point[1] for point in points],
+                label=None if label in seen_labels else label,
+                alpha=alpha,
+                **style,
+            )
+            seen_labels.add(label)
+            # Labeling every gap densely overlaps: several loci barely change
+            # out_nodes across the sweep, so intermediate points can land on
+            # top of each other. The endpoints alone still show the range and
+            # direction of each line; opposite vertical offsets keep the two
+            # labels apart even when the endpoints themselves coincide.
+            endpoint_offsets = ((3, 6), (3, -10))
+            for (x, y, r), offset in zip((points[0], points[-1]), endpoint_offsets):
+                gap = number(r.get("haplotype_gap_bp"))
+                if gap is not None:
+                    axis.annotate(
+                        human_number(gap),
+                        (x, y),
+                        fontsize=6,
+                        color=style["color"],
+                        xytext=offset,
+                        textcoords="offset points",
+                    )
+        configure_axis(axis, "Output nodes", ylabel, log_x=True, log_y=True)
+    axes[1].legend(fontsize=7, ncol=2)
+    query_count = len({row["query_id"] for row in candidates})
+    locus_label = "locus" if query_count == 1 else "loci"
+    threads_text = " and ".join(str(t) for t in SCALING_THREADS)
+    figure.suptitle(
+        f"Haplotype-gap cost/size trade-off: {graph}\n"
+        f"One line per locus per tool at {threads_text} query threads (filled "
+        f"= {SCALING_THREADS[0]}, hollow = {SCALING_THREADS[-1]}) across "
+        f"{query_count} {locus_label}; labels show the gap in bp, increasing "
+        "along each line",
+        fontsize=14,
+    )
+    save_figure(
+        figure,
+        output_dir,
+        f"gap_tradeoff__{safe_name(graph)}",
+        formats,
+        dpi,
+        generated,
+    )
+
+
 def plot_node_scaling(
     rows: list[dict[str, str]],
     graph: str,
@@ -1109,51 +1397,56 @@ def plot_node_scaling(
     dpi: int,
     generated: list[tuple[str, str, str]],
 ) -> None:
-    """Plot parameter- and seed-averaged time and memory by node context."""
-    selected = marginal_node_rows(rows, graph, track)
-    if not selected:
+    """Plot parameter- and seed-averaged time and memory by node context.
+
+    gfaidx and ODGI each contribute one line per entry in SCALING_THREADS on
+    these same axes (filled marker for the lowest thread count, hollow for the
+    highest); VG find and gbz-base, which have no query-thread option in this
+    track, contribute their single existing line.
+    """
+    series = node_scaling_series(rows, graph, track)
+    if not series:
         return
-    groups: dict[str, list[dict[str, str]]] = defaultdict(list)
-    for row in selected:
-        groups[row["tool"]].append(row)
 
     figure, axes = plt.subplots(1, 2, figsize=(12.5, 5.2))
     metrics = [
         ("wall_seconds", "Mean wall time (seconds)", 1.0),
         ("peak_rss_kb", "Mean peak RSS (GiB)", 1.0 / (1024.0**2)),
     ]
-    contexts = {
-        number(row.get("context")) or 0.0
-        for row in selected
-        if (number(row.get("context")) or 0.0) > 0
-    }
+    contexts = {context for entries in series.values() for context, _row in entries}
+    series_sort_key = lambda item: (  # noqa: E731
+        tool_sort_key(item[0][0]), item[0][1] if item[0][1] is not None else -1
+    )
     for axis, (field, ylabel, scale) in zip(axes, metrics):
-        for tool in sorted(groups, key=tool_sort_key):
-            # Average thread and other parameter settings within each seed
-            # first, then average seed-level means with equal weight.
-            entries = [
-                (int(number(row.get("context")) or 0.0), row)
-                for row in groups[tool]
-                if (number(row.get("context")) or 0.0) > 0
-            ]
+        for (tool, thread), entries in sorted(series.items(), key=series_sort_key):
+            # Average remaining repeats within each seed, then average
+            # seed-level means with equal weight.
             points = marginal_mean_by_query(entries, field, scale)
             if points:
+                style = line_style_for_thread(tool, thread)
+                alpha = style.pop("alpha", 1.0)
                 axis.plot(
                     [point[0] for point in points],
                     [point[1] for point in points],
-                    label=tool_label(tool),
-                    **line_style(tool),
+                    label=label_for_thread(tool, thread),
+                    alpha=alpha,
+                    **style,
                 )
         x_label = "Context steps" if track == "node_steps" else "Context bases"
         configure_axis(axis, x_label, ylabel, log_x=True, log_y=True)
         label_tested_x_values(axis, contexts)
-    axes[1].legend(fontsize=7)
+    axes[1].legend(fontsize=6, ncol=2)
     track_label = "step" if track == "node_steps" else "base-pair"
-    seed_count = len({row["query_id"] for row in selected})
+    seed_count = len({
+        row["query_id"] for entries in series.values() for _context, row in entries
+    })
     seed_label = "seed" if seed_count == 1 else "seeds"
+    threads_text = " and ".join(str(t) for t in SCALING_THREADS)
     figure.suptitle(
         f"Node extraction by {track_label} context: {graph}\n"
-        f"Settings averaged within seed, then across {seed_count} {seed_label}",
+        f"gfaidx/ODGI shown at {threads_text} query threads (filled = "
+        f"{SCALING_THREADS[0]}, hollow = {SCALING_THREADS[-1]}); settings "
+        f"averaged within seed, then across {seed_count} {seed_label}",
         fontsize=14,
     )
     save_figure(
@@ -1321,6 +1614,9 @@ def main() -> int:
             query_rows, graph, output_dir, formats, args.dpi, generated
         )
         plot_interval_relative(
+            query_rows, graph, output_dir, formats, args.dpi, generated
+        )
+        plot_gap_tradeoff(
             query_rows, graph, output_dir, formats, args.dpi, generated
         )
 
