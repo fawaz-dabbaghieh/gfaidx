@@ -6,6 +6,18 @@ on:
   push:
     tags:
       - "v*"
+  # A manual run can retry an existing tag after repairing release automation.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing v-prefixed tag to build and publish
+        required: true
+        type: string
+
+# Tag pushes use their own ref name. Manual retries use the explicitly selected
+# release tag while running the corrected workflow from the default branch.
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
 # The final job needs write access to create the release or attach its assets.
 permissions:
@@ -13,7 +25,7 @@ permissions:
 
 # Do not cancel an in-progress release build if the workflow is restarted.
 concurrency:
-  group: release-binaries-${{ github.ref }}
+  group: release-binaries-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -34,10 +46,12 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Build and test a static musl executable
         env:
-          PACKAGE_NAME: gfaidx-${{ github.ref_name }}-linux-${{ matrix.arch }}
+          PACKAGE_NAME: gfaidx-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}
           EXPECTED_FILE_ARCH: ${{ matrix.file_arch }}
         run: |
           # The native runner selects the matching Alpine architecture. Alpine's
@@ -46,7 +60,7 @@ jobs:
           docker run --rm \
             -e PACKAGE_NAME \
             -e EXPECTED_FILE_ARCH \
-            -e RELEASE_TAG="${GITHUB_REF_NAME}" \
+            -e RELEASE_TAG \
             -v "${GITHUB_WORKSPACE}:/src" \
             -w /src \
             alpine:3.22 sh -euxc '
@@ -54,10 +68,15 @@ jobs:
                 bash \
                 build-base \
                 cmake \
+                coreutils \
                 file \
                 python3 \
                 zlib-dev \
                 zlib-static
+
+              # gfaidx uses GNU sort's resource controls while indexing. Alpine
+              # otherwise resolves sort to the incompatible BusyBox applet.
+              sort --version | grep -F "GNU coreutils"
 
               cmake -S . -B release-build \
                 -DCMAKE_BUILD_TYPE=Release \
@@ -92,7 +111,7 @@ jobs:
       - name: Save Linux release package
         uses: actions/upload-artifact@v4
         with:
-          name: gfaidx-${{ github.ref_name }}-linux-${{ matrix.arch }}
+          name: gfaidx-${{ env.RELEASE_TAG }}-linux-${{ matrix.arch }}
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -111,6 +130,8 @@ jobs:
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Configure native macOS build
         run: |
@@ -129,7 +150,7 @@ jobs:
 
           # Reject a tag that does not match the version compiled into the CLI.
           binary_version="$(release-build/gfaidx --version 2>/dev/null)"
-          test "${binary_version}" = "${GITHUB_REF_NAME#v}"
+          test "${binary_version}" = "${RELEASE_TAG#v}"
 
           # A package built for the wrong matrix architecture would download but
           # fail immediately on the user's machine.
@@ -149,7 +170,7 @@ jobs:
 
       - name: Package macOS executable
         env:
-          PACKAGE_NAME: gfaidx-${{ github.ref_name }}-macos-${{ matrix.arch }}
+          PACKAGE_NAME: gfaidx-${{ env.RELEASE_TAG }}-macos-${{ matrix.arch }}
         run: |
           # Keep each archive self-describing after it has been downloaded.
           mkdir -p "dist/${PACKAGE_NAME}"
@@ -163,7 +184,7 @@ jobs:
       - name: Save macOS release package
         uses: actions/upload-artifact@v4
         with:
-          name: gfaidx-${{ github.ref_name }}-macos-${{ matrix.arch }}
+          name: gfaidx-${{ env.RELEASE_TAG }}-macos-${{ matrix.arch }}
           path: dist/*.tar.gz
           if-no-files-found: error
 
@@ -178,7 +199,7 @@ jobs:
       - name: Download tested packages
         uses: actions/download-artifact@v4
         with:
-          pattern: gfaidx-${{ github.ref_name }}-*
+          pattern: gfaidx-${{ env.RELEASE_TAG }}-*
           path: release-assets
           merge-multiple: true
 
@@ -197,14 +218,14 @@ jobs:
         run: |
           # Updating supports tags created through the GitHub release page;
           # otherwise this workflow creates a release only after all tests pass.
-          if gh release view "${GITHUB_REF_NAME}" \
+          if gh release view "${RELEASE_TAG}" \
               --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" release-assets/* \
+            gh release upload "${RELEASE_TAG}" release-assets/* \
               --repo "${GITHUB_REPOSITORY}" --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" release-assets/* \
+            gh release create "${RELEASE_TAG}" release-assets/* \
               --repo "${GITHUB_REPOSITORY}" \
               --verify-tag \
               --generate-notes \
-              --title "gfaidx ${GITHUB_REF_NAME#v}"
+              --title "gfaidx ${RELEASE_TAG#v}"
           fi

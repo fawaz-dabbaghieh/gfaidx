@@ -116,6 +116,11 @@ the corresponding [GitHub release](https://github.com/fawaz-dabbaghieh/gfaidx/re
 - Linux x86-64 and ARM64 binaries are statically linked against musl.
 - macOS Intel and ARM64 binaries link only to libraries supplied by macOS.
 
+Static linking removes shared-library requirements. The `index_gfa` command
+still launches the system `sort`; Linux installations therefore need GNU
+coreutils, which is normally installed by default. On Alpine Linux, install it
+with `apk add coreutils`. Graph query commands do not invoke this external sort.
+
 Download the archive matching the operating system and CPU architecture,
 extract it, and place `gfaidx` in a directory on `PATH`, for example
 `$HOME/.local/bin`.
@@ -131,6 +136,9 @@ git push origin v1.9.8
 The release workflow builds and tests all four packages, writes a
 `SHA256SUMS` file, and then creates or updates the release for that tag. A tag
 whose version does not match the executable version fails before publication.
+If release automation is corrected after a tag has already been pushed, run
+the `Release binaries` workflow manually from GitHub Actions and supply that
+existing tag as `release_tag`.
 
 ### C++ CLI
 
