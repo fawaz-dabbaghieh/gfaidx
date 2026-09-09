@@ -57,56 +57,59 @@ jobs:
           # The native runner selects the matching Alpine architecture. Alpine's
           # musl toolchain and static zlib produce a binary without glibc or
           # distribution-specific shared-library dependencies.
-          docker run --rm \
+          # Stream a literal script over stdin instead of nesting it inside a
+          # shell-quoted argument. This keeps comments and path names containing
+          # apostrophes from changing how the runner parses the Docker command.
+          docker run --rm -i \
             -e PACKAGE_NAME \
             -e EXPECTED_FILE_ARCH \
             -e RELEASE_TAG \
             -v "${GITHUB_WORKSPACE}:/src" \
             -w /src \
-            alpine:3.22 sh -euxc '
-              apk add --no-cache \
-                bash \
-                build-base \
-                cmake \
-                coreutils \
-                file \
-                python3 \
-                zlib-dev \
-                zlib-static
+            alpine:3.22 sh -euxs <<'ALPINE_SCRIPT'
+          apk add --no-cache \
+            bash \
+            build-base \
+            cmake \
+            coreutils \
+            file \
+            python3 \
+            zlib-dev \
+            zlib-static
 
-              # gfaidx uses GNU sort's resource controls while indexing. Alpine
-              # otherwise resolves sort to the incompatible BusyBox applet.
-              sort --version | grep -F "GNU coreutils"
+          # gfaidx uses GNU sort's resource controls while indexing. Alpine
+          # otherwise resolves sort to the incompatible BusyBox applet.
+          sort --version | grep -F "GNU coreutils"
 
-              cmake -S . -B release-build \
-                -DCMAKE_BUILD_TYPE=Release \
-                -DBUILD_TESTING=ON \
-                -DZLIB_USE_STATIC_LIBS=ON \
-                -DCMAKE_EXE_LINKER_FLAGS=-static
-              cmake --build release-build --parallel 2
-              ctest --test-dir release-build --output-on-failure
+          cmake -S . -B release-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DZLIB_USE_STATIC_LIBS=ON \
+            -DCMAKE_EXE_LINKER_FLAGS=-static
+          cmake --build release-build --parallel 2
+          ctest --test-dir release-build --output-on-failure
 
-              # Reject a mistagged release before publishing any binaries.
-              binary_version="$(release-build/gfaidx --version 2>/dev/null)"
-              test "${binary_version}" = "${RELEASE_TAG#v}"
+          # Reject a mistagged release before publishing any binaries.
+          binary_version="$(release-build/gfaidx --version 2>/dev/null)"
+          test "${binary_version}" = "${RELEASE_TAG#v}"
 
-              # Both checks protect against accidentally shipping a dynamically
-              # linked Linux executable after a toolchain or CMake change.
-              file release-build/gfaidx | grep -F "${EXPECTED_FILE_ARCH}"
-              file release-build/gfaidx | grep -F "statically linked"
-              if readelf -d release-build/gfaidx 2>/dev/null | grep -q NEEDED; then
-                echo "The Linux release executable has shared-library dependencies" >&2
-                exit 1
-              fi
+          # Both checks protect against accidentally shipping a dynamically
+          # linked Linux executable after a toolchain or CMake change.
+          file release-build/gfaidx | grep -F "${EXPECTED_FILE_ARCH}"
+          file release-build/gfaidx | grep -F "statically linked"
+          if readelf -d release-build/gfaidx 2>/dev/null | grep -q NEEDED; then
+            echo "The Linux release executable has shared-library dependencies" >&2
+            exit 1
+          fi
 
-              mkdir -p "dist/${PACKAGE_NAME}"
-              install -m 0755 release-build/gfaidx "dist/${PACKAGE_NAME}/gfaidx"
-              install -m 0644 LICENSE "dist/${PACKAGE_NAME}/LICENSE"
-              # Preserve the notice required by the bundled MIT argparse header.
-              install -m 0644 external/argparse/LICENSE \
-                "dist/${PACKAGE_NAME}/LICENSE.argparse"
-              tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
-            '
+          mkdir -p "dist/${PACKAGE_NAME}"
+          install -m 0755 release-build/gfaidx "dist/${PACKAGE_NAME}/gfaidx"
+          install -m 0644 LICENSE "dist/${PACKAGE_NAME}/LICENSE"
+          # Preserve the notice required by the bundled MIT argparse header.
+          install -m 0644 external/argparse/LICENSE \
+            "dist/${PACKAGE_NAME}/LICENSE.argparse"
+          tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+          ALPINE_SCRIPT
 
       - name: Save Linux release package
         uses: actions/upload-artifact@v4
