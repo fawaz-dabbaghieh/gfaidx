@@ -1,0 +1,210 @@
+name: Release binaries
+
+# A version tag is the release boundary. Building from the tag ensures every
+# uploaded executable corresponds exactly to the source archive in the release.
+on:
+  push:
+    tags:
+      - "v*"
+
+# The final job needs write access to create the release or attach its assets.
+permissions:
+  contents: write
+
+# Do not cancel an in-progress release build if the workflow is restarted.
+concurrency:
+  group: release-binaries-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+            file_arch: x86-64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+            file_arch: ARM aarch64
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Build and test a static musl executable
+        env:
+          PACKAGE_NAME: gfaidx-${{ github.ref_name }}-linux-${{ matrix.arch }}
+          EXPECTED_FILE_ARCH: ${{ matrix.file_arch }}
+        run: |
+          # The native runner selects the matching Alpine architecture. Alpine's
+          # musl toolchain and static zlib produce a binary without glibc or
+          # distribution-specific shared-library dependencies.
+          docker run --rm \
+            -e PACKAGE_NAME \
+            -e EXPECTED_FILE_ARCH \
+            -e RELEASE_TAG="${GITHUB_REF_NAME}" \
+            -v "${GITHUB_WORKSPACE}:/src" \
+            -w /src \
+            alpine:3.22 sh -euxc '
+              apk add --no-cache \
+                bash \
+                build-base \
+                cmake \
+                file \
+                python3 \
+                zlib-dev \
+                zlib-static
+
+              cmake -S . -B release-build \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_TESTING=ON \
+                -DZLIB_USE_STATIC_LIBS=ON \
+                -DCMAKE_EXE_LINKER_FLAGS=-static
+              cmake --build release-build --parallel 2
+              ctest --test-dir release-build --output-on-failure
+
+              # Reject a mistagged release before publishing any binaries.
+              binary_version="$(release-build/gfaidx --version 2>/dev/null)"
+              test "${binary_version}" = "${RELEASE_TAG#v}"
+
+              # Both checks protect against accidentally shipping a dynamically
+              # linked Linux executable after a toolchain or CMake change.
+              file release-build/gfaidx | grep -F "${EXPECTED_FILE_ARCH}"
+              file release-build/gfaidx | grep -F "statically linked"
+              if readelf -d release-build/gfaidx 2>/dev/null | grep -q NEEDED; then
+                echo "The Linux release executable has shared-library dependencies" >&2
+                exit 1
+              fi
+
+              mkdir -p "dist/${PACKAGE_NAME}"
+              install -m 0755 release-build/gfaidx "dist/${PACKAGE_NAME}/gfaidx"
+              install -m 0644 LICENSE "dist/${PACKAGE_NAME}/LICENSE"
+              # Preserve the notice required by the bundled MIT argparse header.
+              install -m 0644 external/argparse/LICENSE \
+                "dist/${PACKAGE_NAME}/LICENSE.argparse"
+              tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+            '
+
+      - name: Save Linux release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gfaidx-${{ github.ref_name }}-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Configure native macOS build
+        run: |
+          # macOS does not support fully static system executables. The release
+          # instead targets macOS 11 and may link only libraries supplied by macOS.
+          cmake -S . -B release-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build and test macOS executable
+        run: |
+          cmake --build release-build --parallel 2
+          ctest --test-dir release-build --output-on-failure
+
+          # Reject a tag that does not match the version compiled into the CLI.
+          binary_version="$(release-build/gfaidx --version 2>/dev/null)"
+          test "${binary_version}" = "${GITHUB_REF_NAME#v}"
+
+          # A package built for the wrong matrix architecture would download but
+          # fail immediately on the user's machine.
+          file release-build/gfaidx | grep -F "${{ matrix.arch }}"
+
+          # Homebrew paths or @rpath entries would turn this into a machine-local
+          # build. Apple-provided /usr/lib and /System/Library dependencies are OK.
+          unexpected_dependencies="$({
+            otool -L release-build/gfaidx | tail -n +2 | awk '{print $1}' |
+              grep -Ev '^(/usr/lib/|/System/Library/)' || true
+          })"
+          if [[ -n "${unexpected_dependencies}" ]]; then
+            echo "Unexpected macOS runtime dependencies:" >&2
+            echo "${unexpected_dependencies}" >&2
+            exit 1
+          fi
+
+      - name: Package macOS executable
+        env:
+          PACKAGE_NAME: gfaidx-${{ github.ref_name }}-macos-${{ matrix.arch }}
+        run: |
+          # Keep each archive self-describing after it has been downloaded.
+          mkdir -p "dist/${PACKAGE_NAME}"
+          install -m 0755 release-build/gfaidx "dist/${PACKAGE_NAME}/gfaidx"
+          install -m 0644 LICENSE "dist/${PACKAGE_NAME}/LICENSE"
+          # Preserve the notice required by the bundled MIT argparse header.
+          install -m 0644 external/argparse/LICENSE \
+            "dist/${PACKAGE_NAME}/LICENSE.argparse"
+          tar -C dist -czf "dist/${PACKAGE_NAME}.tar.gz" "${PACKAGE_NAME}"
+
+      - name: Save macOS release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: gfaidx-${{ github.ref_name }}-macos-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - linux
+      - macos
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download tested packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gfaidx-${{ github.ref_name }}-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate release checksums
+        working-directory: release-assets
+        run: |
+          # The release is incomplete if any matrix package is absent.
+          package_count="$(find . -maxdepth 1 -name 'gfaidx-*.tar.gz' | wc -l)"
+          test "${package_count}" -eq 4
+          sha256sum gfaidx-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update the matching GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Updating supports tags created through the GitHub release page;
+          # otherwise this workflow creates a release only after all tests pass.
+          if gh release view "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --generate-notes \
+              --title "gfaidx ${GITHUB_REF_NAME#v}"
+          fi

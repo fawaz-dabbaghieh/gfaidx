@@ -21,6 +21,7 @@ Main tasks:
   - [Path index](#path-index)
 - [Build and install](#build-and-install)
   - [Supported platforms](#supported-platforms)
+  - [Prebuilt binaries](#prebuilt-binaries)
   - [C++ CLI](#c-cli)
   - [Bioconda](#bioconda)
   - [Python helper install](#python-helper-install)
@@ -106,6 +107,30 @@ Important: `.pdx` node IDs are aligned to the sorted entry rank in the `.ndx` fi
 
 It is not supported on Windows. Parts of the index I/O layer use Unix system
 calls such as `open`, `fstat`, `mmap`, and `close`.
+
+### Prebuilt binaries
+
+Each version tag publishes tested command-line packages for Linux and macOS on
+the corresponding [GitHub release](https://github.com/fawaz-dabbaghieh/gfaidx/releases):
+
+- Linux x86-64 and ARM64 binaries are statically linked against musl.
+- macOS Intel and ARM64 binaries link only to libraries supplied by macOS.
+
+Download the archive matching the operating system and CPU architecture,
+extract it, and place `gfaidx` in a directory on `PATH`, for example
+`$HOME/.local/bin`.
+
+To create a release, first update the version compiled into `src/gfaidx.cpp`,
+commit the change, and push a matching `v` tag:
+
+```bash
+git tag v1.9.8
+git push origin v1.9.8
+```
+
+The release workflow builds and tests all four packages, writes a
+`SHA256SUMS` file, and then creates or updates the release for that tag. A tag
+whose version does not match the executable version fails before publication.
 
 ### C++ CLI
 
