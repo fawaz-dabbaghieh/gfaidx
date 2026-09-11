@@ -933,6 +933,15 @@ Current query-time memory behavior:
 
 ## Utility scripts
 
+### Repeated gfaidx thread-scaling and gbz-base interval benchmark
+
+`scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
+multiple genomic locations for configurable gfaidx thread counts and gbz-base,
+records GNU `time -v` measurements, and generates first-execution, warm-cache,
+thread-scaling, and regional-variation summaries and plots. See
+[the repeated interval benchmark guide](docs/gfaidx_gbz_interval_benchmark.md)
+for the TSV schema and server command.
+
 ### `scripts/pdx_size_breakdown.py`
 
 Print a size breakdown for a `.pdx` file.
