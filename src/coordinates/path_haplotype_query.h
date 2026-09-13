@@ -50,6 +50,16 @@ struct PathHaplotypeQueryResult {
     const std::vector<paths::SubpathRun>& exact_reference_path_runs = {},
     const PathHaplotypeQueryOptions& options = {});
 
+// --reference_only support: resolve the node set touched by already-known
+// reference path run(s) only, without scanning any other path's postings.
+// This is the cheap counterpart to query_path_haplotype_nodes above - it
+// skips the postings and selected-steps phases entirely, at the cost of
+// dropping pangenome context nodes that are only reachable through
+// non-reference haplotypes.
+[[nodiscard]] std::vector<std::uint32_t> select_reference_only_nodes(
+    const paths::PathIndexReader& path_index,
+    const std::vector<paths::SubpathRun>& reference_path_runs);
+
 }  // namespace gfaidx::coordinates
 
 #endif  // GFAIDX_PATH_HAPLOTYPE_QUERY_H

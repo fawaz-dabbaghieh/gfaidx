@@ -350,4 +350,60 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
     return result;
 }
 
+// --reference_only fast path. query_path_haplotype_nodes above earns its cost
+// by discovering every OTHER haplotype that touches the reference interval,
+// via a full scan of postings for every reference-covered node. When the
+// caller only wants the reference path itself (already resolved cheaply
+// through the coordinate index before this function is ever called), that
+// whole postings/selected-steps scan is unnecessary: the node set can be
+// built directly from the already-known reference run(s) in one pass.
+std::vector<std::uint32_t> select_reference_only_nodes(
+    const paths::PathIndexReader& path_index,
+    const std::vector<paths::SubpathRun>& reference_path_runs) {
+    // Same dense-bitset dedup strategy as the all-haplotype path above, sized
+    // to the whole node table so a node revisited by a repeat (or touched by
+    // more than one reference run fragment) is only emitted once.
+    std::vector<std::uint64_t> selected_node_bits(
+        (static_cast<std::size_t>(path_index.node_count()) + 63) / 64,
+        0);
+    std::uint64_t selected_node_count = 0;
+    const auto select_node_rank = [&](const std::uint32_t node_rank) {
+        if (node_rank >= path_index.node_count()) {
+            throw std::runtime_error(
+                "Reference-only path step has a node rank outside the "
+                ".pdx node table");
+        }
+        auto& word = selected_node_bits[node_rank / 64];
+        const std::uint64_t mask = 1ULL << (node_rank % 64);
+        if ((word & mask) == 0) {
+            word |= mask;
+            ++selected_node_count;
+        }
+    };
+
+    // Only the reference run(s) are scanned here - no postings lookup, and no
+    // other path in the graph is touched at all.
+    for (const auto& run : reference_path_runs) {
+        path_index.for_each_step(
+            run.path_id,
+            run.start_step,
+            run.step_count,
+            [&](const paths::StepRecord& step, std::uint64_t) {
+                select_node_rank(step.node_id);
+            });
+    }
+
+    std::vector<std::uint32_t> node_ranks;
+    node_ranks.reserve(static_cast<std::size_t>(selected_node_count));
+    for (std::uint32_t node_rank = 0;
+         node_rank < path_index.node_count();
+         ++node_rank) {
+        if ((selected_node_bits[node_rank / 64] &
+             (1ULL << (node_rank % 64))) != 0) {
+            node_ranks.push_back(node_rank);
+        }
+    }
+    return node_ranks;
+}
+
 }  // namespace gfaidx::coordinates
