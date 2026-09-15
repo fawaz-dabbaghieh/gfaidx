@@ -828,6 +828,10 @@ int run_get_region(const argparse::ArgumentParser& program) {
             // Omitted gap limits preserve the original min/max implementation
             // without constructing a length reader or local-anchor bitset.
             PathHaplotypeQueryOptions query_options;
+            // Reuses the same --threads value as P/W formatting for the
+            // postings-reduction phase (query_path_haplotype_nodes); see
+            // PathHaplotypeQueryOptions::threads for the gap-mode caveat.
+            query_options.threads = options.threads;
             std::unique_ptr<indexer::NodeLengthIndexReader> gap_node_lengths;
             if (haplotype_gap_bases.has_value()) {
                 gap_node_lengths =
