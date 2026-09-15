@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -66,6 +68,112 @@ std::vector<std::vector<paths::SubpathRun>> group_exact_reference_runs(
         path_runs = std::move(merged);
     }
     return grouped;
+}
+
+// Result of reducing postings for one set of reference nodes, whether that
+// happened on one thread or was merged from several. Mirrors the subset of
+// PathHaplotypeQueryResult that the postings phase itself produces.
+struct PostingsReduction {
+    std::vector<PathStepBounds> bounds;
+    std::uint64_t posting_count{};
+    std::uint64_t matched_path_count{};
+};
+
+// Partition unique_reference_nodes into `requested_threads` contiguous
+// slices (posting-list length per reference node is fairly uniform in
+// practice, so this needs no finer-grained load balancing) and reduce each
+// slice's postings into a private, thread-local PathStepBounds table using
+// its own PostingCursor - no shared file cursor, no shared node-metadata
+// cache, no locking during the parallel section at all. Merging the private
+// tables afterward is a simple per-path min/max/seen combine,
+// O(path_count * worker_count), which is negligible next to the postings
+// volume being reduced.
+//
+// Not used in local gap mode: gap clustering marks an absolute anchor-step
+// bitset while reading postings (see mark_anchor_step below), and splitting
+// that bitset per thread is not implemented, so callers keep using the
+// serial loop whenever max_gap_bases is set.
+PostingsReduction reduce_postings_in_parallel(
+    const paths::PathIndexReader& path_index,
+    const std::vector<std::uint32_t>& unique_reference_nodes,
+    std::uint32_t requested_threads) {
+    const std::size_t worker_count = std::min<std::size_t>(
+        requested_threads, unique_reference_nodes.size());
+
+    std::vector<std::vector<PathStepBounds>> partial_bounds(
+        worker_count, std::vector<PathStepBounds>(path_index.path_count()));
+    std::vector<std::uint64_t> partial_postings(worker_count, 0);
+    std::vector<std::exception_ptr> worker_errors(worker_count);
+
+    const std::size_t total = unique_reference_nodes.size();
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    for (std::size_t w = 0; w < worker_count; ++w) {
+        const std::size_t begin = total * w / worker_count;
+        const std::size_t end = total * (w + 1) / worker_count;
+        workers.emplace_back([&, w, begin, end]() {
+            try {
+                auto cursor = path_index.open_posting_cursor();
+                auto& bounds = partial_bounds[w];
+                std::uint64_t local_postings = 0;
+                for (std::size_t i = begin; i < end; ++i) {
+                    const auto node_rank = unique_reference_nodes[i];
+                    if (node_rank >= path_index.node_count()) {
+                        throw std::runtime_error(
+                            "Reference node rank is outside the .pdx node table");
+                    }
+                    cursor.for_each_node_posting(
+                        node_rank,
+                        [&](const std::uint32_t path_id, const std::uint32_t step_rank) {
+                            if (path_id >= bounds.size()) {
+                                throw std::runtime_error(
+                                    "Path posting refers to a path outside the .pdx path table");
+                            }
+                            auto& b = bounds[path_id];
+                            if (!b.seen) {
+                                b.min_step = step_rank;
+                                b.max_step = step_rank;
+                                b.seen = true;
+                            } else {
+                                b.min_step = std::min(b.min_step, step_rank);
+                                b.max_step = std::max(b.max_step, step_rank);
+                            }
+                            ++local_postings;
+                        });
+                }
+                partial_postings[w] = local_postings;
+            } catch (...) {
+                worker_errors[w] = std::current_exception();
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    for (const auto& error : worker_errors) {
+        if (error) std::rethrow_exception(error);
+    }
+
+    // A path seen by more than one worker - the common case, since most
+    // haplotypes touch reference nodes spread across the whole partition -
+    // must only be counted once in matched_path_count. That "first seen"
+    // check happens here, once per path, never inside the parallel loop.
+    PostingsReduction reduction;
+    reduction.bounds.resize(path_index.path_count());
+    for (std::uint32_t path_id = 0; path_id < reduction.bounds.size(); ++path_id) {
+        auto& merged = reduction.bounds[path_id];
+        for (std::size_t w = 0; w < worker_count; ++w) {
+            const auto& b = partial_bounds[w][path_id];
+            if (!b.seen) continue;
+            if (!merged.seen) {
+                merged = b;
+                ++reduction.matched_path_count;
+            } else {
+                merged.min_step = std::min(merged.min_step, b.min_step);
+                merged.max_step = std::max(merged.max_step, b.max_step);
+            }
+        }
+    }
+    for (const auto count : partial_postings) reduction.posting_count += count;
+    return reduction;
 }
 
 }  // namespace
@@ -179,35 +287,44 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
     };
 
     // The default path still aggregates only min/max bounds. Local mode adds
-    // the absolute anchor marker used later to split distant repeat hits.
+    // the absolute anchor marker used later to split distant repeat hits, so
+    // it always uses the serial loop below (see reduce_postings_in_parallel).
     Timer phase_timer;
-    for (const auto node_rank : unique_reference_nodes) {
-        if (node_rank >= path_index.node_count()) {
-            throw std::runtime_error(
-                "Reference node rank is outside the .pdx node table");
+    if (!local_gap_mode && options.threads > 1 && unique_reference_nodes.size() > 1) {
+        auto reduction = reduce_postings_in_parallel(
+            path_index, unique_reference_nodes, options.threads);
+        path_bounds = std::move(reduction.bounds);
+        result.posting_count = reduction.posting_count;
+        result.matched_path_count = reduction.matched_path_count;
+    } else {
+        for (const auto node_rank : unique_reference_nodes) {
+            if (node_rank >= path_index.node_count()) {
+                throw std::runtime_error(
+                    "Reference node rank is outside the .pdx node table");
+            }
+
+            path_index.for_each_node_posting(
+                node_rank,
+                [&](const std::uint32_t path_id, const std::uint32_t step_rank) {
+                    if (path_id >= path_bounds.size()) {
+                        throw std::runtime_error(
+                            "Path posting refers to a path outside the .pdx path table");
+                    }
+
+                    auto& bounds = path_bounds[path_id];
+                    if (!bounds.seen) {
+                        bounds.min_step = step_rank;
+                        bounds.max_step = step_rank;
+                        bounds.seen = true;
+                        ++result.matched_path_count;
+                    } else {
+                        bounds.min_step = std::min(bounds.min_step, step_rank);
+                        bounds.max_step = std::max(bounds.max_step, step_rank);
+                    }
+                    mark_anchor_step(path_id, step_rank);
+                    ++result.posting_count;
+                });
         }
-
-        path_index.for_each_node_posting(
-            node_rank,
-            [&](const std::uint32_t path_id, const std::uint32_t step_rank) {
-                if (path_id >= path_bounds.size()) {
-                    throw std::runtime_error(
-                        "Path posting refers to a path outside the .pdx path table");
-                }
-
-                auto& bounds = path_bounds[path_id];
-                if (!bounds.seen) {
-                    bounds.min_step = step_rank;
-                    bounds.max_step = step_rank;
-                    bounds.seen = true;
-                    ++result.matched_path_count;
-                } else {
-                    bounds.min_step = std::min(bounds.min_step, step_rank);
-                    bounds.max_step = std::max(bounds.max_step, step_rank);
-                }
-                mark_anchor_step(path_id, step_rank);
-                ++result.posting_count;
-            });
     }
     result.posting_seconds = phase_timer.elapsed();
 

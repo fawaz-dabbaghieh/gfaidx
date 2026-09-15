@@ -15,6 +15,11 @@ namespace gfaidx::coordinates {
 struct PathHaplotypeQueryOptions {
     std::optional<std::uint64_t> max_gap_bases;
     const indexer::NodeLengthIndexReader* node_lengths{nullptr};
+    // Threads for the postings-reduction phase only (see query_path_haplotype_nodes).
+    // Ignored whenever max_gap_bases is set: local gap clustering marks an
+    // anchor-step bitset while reading postings, and that bitset is not yet
+    // split into thread-local pieces, so gap mode always runs the serial path.
+    std::uint32_t threads{1};
 };
 
 // Summary of one posting-driven all-haplotype selection. The returned node

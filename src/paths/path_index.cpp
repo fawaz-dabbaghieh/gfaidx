@@ -1410,6 +1410,130 @@ void PathIndexReader::for_each_node_posting(
     }
 }
 
+// PostingCursor duplicates PathIndexReader's node-metadata and posting-block
+// decoding (same NodeRecordDisk layout, same read_varint format) rather than
+// sharing it, because PathIndexReader's cache and file stream are private,
+// non-thread-safe state. Keeping this logic in the same translation unit as
+// PathIndexReader, right next to it, is intentional: any future change to the
+// on-disk node/posting layout must update both.
+PostingCursor::PostingCursor(std::string index_path,
+                             std::uint64_t node_table_offset,
+                             std::uint64_t posting_table_offset,
+                             std::uint64_t posting_table_bytes,
+                             std::uint32_t node_count)
+    : index_path_(std::move(index_path)),
+      in_(index_path_, std::ios::binary),
+      node_table_offset_(node_table_offset),
+      posting_table_offset_(posting_table_offset),
+      posting_table_bytes_(posting_table_bytes),
+      node_count_(node_count) {
+    if (!in_) {
+        throw std::runtime_error(
+            "Failed to open path index for posting reads: " + index_path_);
+    }
+}
+
+PostingCursor::NodeMeta PostingCursor::read_node_meta(std::uint32_t node_id) {
+    if (node_id >= node_count_) {
+        throw std::runtime_error("Node id out of range");
+    }
+
+    const auto it = node_meta_cache_.find(node_id);
+    if (it != node_meta_cache_.end()) {
+        return it->second;
+    }
+
+    NodeRecordDisk rec{};
+    const auto offset = node_table_offset_ +
+        static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
+    read_exact(offset, &rec, sizeof(rec));
+
+    NodeMeta meta{rec.posting_begin, rec.posting_count};
+    node_meta_cache_.emplace(node_id, meta);
+    return meta;
+}
+
+void PostingCursor::read_exact(std::uint64_t offset, void* dst, std::size_t bytes) {
+    if (bytes == 0) return;
+    in_.clear();
+    in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!in_) {
+        throw std::runtime_error(
+            "seekg failed while reading path index posting table");
+    }
+    in_.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
+    if (!in_) {
+        throw std::runtime_error(
+            "Failed to read bytes from path index posting table");
+    }
+}
+
+void PostingCursor::for_each_node_posting(
+    std::uint32_t node_id,
+    const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) {
+    if (node_id >= node_count_) {
+        throw std::runtime_error("Node id out of range");
+    }
+
+    const auto node = read_node_meta(node_id);
+    if (node.posting_count == 0) return;
+
+    const std::uint64_t block_begin = node.posting_begin;
+    const std::uint64_t block_end = (node_id + 1 < node_count_)
+        ? read_node_meta(node_id + 1).posting_begin
+        : posting_table_bytes_;
+    if (block_end < block_begin) {
+        throw std::runtime_error("Compressed posting block offsets are out of order");
+    }
+
+    std::vector<unsigned char> block(static_cast<std::size_t>(block_end - block_begin));
+    read_exact(posting_table_offset_ + block_begin, block.data(), block.size());
+
+    std::size_t cursor = 0;
+    std::uint32_t current_path_id = 0;
+    std::uint64_t emitted = 0;
+
+    while (emitted < node.posting_count) {
+        const auto path_delta = read_varint(block, cursor);
+        if (path_delta > std::numeric_limits<std::uint32_t>::max() - current_path_id) {
+            throw std::runtime_error("Compressed posting block path id overflow");
+        }
+        current_path_id = static_cast<std::uint32_t>(current_path_id + path_delta);
+
+        const auto group_count = read_varint(block, cursor);
+        if (group_count == 0) {
+            throw std::runtime_error("Compressed posting block has an empty path group");
+        }
+        if (group_count > node.posting_count - emitted) {
+            throw std::runtime_error("Compressed posting block overruns node posting count");
+        }
+
+        std::uint64_t current_step_rank = read_varint(block, cursor);
+        if (current_step_rank > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("Compressed posting block step rank overflow");
+        }
+        callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
+        ++emitted;
+
+        for (std::uint64_t i = 1; i < group_count; ++i) {
+            const auto step_delta = read_varint(block, cursor);
+            if (step_delta == 0) {
+                throw std::runtime_error("Compressed posting block step delta must be positive");
+            }
+            if (step_delta > std::numeric_limits<std::uint32_t>::max() - current_step_rank) {
+                throw std::runtime_error("Compressed posting block step rank overflow");
+            }
+            current_step_rank += step_delta;
+            callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
+            ++emitted;
+        }
+    }
+
+    if (cursor != block.size()) {
+        throw std::runtime_error("Compressed posting block has trailing bytes");
+    }
+}
+
 PathIndexReader::NodeMeta PathIndexReader::read_node_meta(std::uint32_t node_id) const {
     if (node_id >= node_count_) {
         throw std::runtime_error("Node id out of range");
