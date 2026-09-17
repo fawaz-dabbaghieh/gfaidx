@@ -52,10 +52,10 @@ target_compile_options(gfaidx_library PRIVATE -Wall)
 target_compile_definitions(gfaidx_library PUBLIC GFAIDX_VERSION="${PROJECT_VERSION}")
 target_include_directories(gfaidx_library
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/src)
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(gfaidx_library PUBLIC ZLIB::ZLIB Threads::Threads m)
 
 add_executable(gfaidx_cli
@@ -77,9 +77,9 @@ set_target_properties(gfaidx_cli PROPERTIES OUTPUT_NAME gfaidx)
 target_compile_options(gfaidx_cli PRIVATE -Wall)
 target_compile_definitions(gfaidx_cli PRIVATE GFAIDX_VERSION="${PROJECT_VERSION}")
 target_include_directories(gfaidx_cli PRIVATE
-    ${CMAKE_SOURCE_DIR}/external/argparse/include
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/include)
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/argparse/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(gfaidx_cli PRIVATE gfaidx_library louvain_method)
 
 # Python builds are opt-in for ordinary CMake consumers.  The pyproject build
@@ -90,7 +90,7 @@ if(GFAIDX_BUILD_PYTHON)
     find_package(pybind11 CONFIG REQUIRED)
     pybind11_add_module(_pygfaidx MODULE python/bindings.cpp)
     target_link_libraries(_pygfaidx PRIVATE gfaidx_library)
-    target_include_directories(_pygfaidx PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    target_include_directories(_pygfaidx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     install(TARGETS _pygfaidx
         LIBRARY DESTINATION pygfaidx
         RUNTIME DESTINATION pygfaidx)
@@ -98,6 +98,13 @@ endif()
 
 # Install the CLI into the standard binary directory so package managers can use
 # `cmake --install` with their own CMAKE_INSTALL_PREFIX.
+#
+# Skipped when gfaidx is consumed via add_subdirectory() by another project:
+# CMAKE_SOURCE_DIR would then point at the *outer* project's root (not
+# gfaidx's own, breaking the gfaidxConfig.cmake.in path below), and a
+# consumer embedding gfaidx as a subdirectory has no use for installing or
+# exporting it as a separate package anyway.
+if (CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 install(TARGETS gfaidx_library gfaidx_cli
     EXPORT gfaidxTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -121,9 +128,14 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/gfaidxConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/gfaidxConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gfaidx)
+endif()
 
 include(CTest)
-if(BUILD_TESTING)
+# Same as the install() guard above: gfaidx's own test suite references paths
+# under CMAKE_SOURCE_DIR/tests, which only resolve correctly when gfaidx is
+# the top-level project. A consumer embedding gfaidx via add_subdirectory()
+# should run its own test suite, not gfaidx's.
+if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     add_executable(gfaidx_graph_api_test tests/test_graph_api.cpp)
     target_link_libraries(gfaidx_graph_api_test PRIVATE gfaidx_library)
     add_test(NAME graph_api COMMAND gfaidx_graph_api_test)
