@@ -1,5 +1,4 @@
-# Keep the original benchmark entry point compatible with existing commands.
-# New analyses may use Snakefile.w explicitly to make the input path type clear.
+# Benchmark a GFA 1.1 graph whose haplotypes are represented by W records.
 configfile: "config.yaml"
 
 PATH_FORMAT = "W"

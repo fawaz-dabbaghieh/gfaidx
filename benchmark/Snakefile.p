@@ -1,8 +1,7 @@
-# Keep the original benchmark entry point compatible with existing commands.
-# New analyses may use Snakefile.w explicitly to make the input path type clear.
-configfile: "config.yaml"
+# Benchmark a GFA 1.0 graph with unsuffixed PanSN P path names.
+configfile: "config.p.yaml"
 
-PATH_FORMAT = "W"
+PATH_FORMAT = "P"
 
 include: "rules/common.smk"
 

@@ -1,0 +1,4 @@
+# Coordinates are zero-based on one unsuffixed PanSN P path. node_position is
+# optional; region_start/region_end are an optional half-open pair.
+graph	query_id	sample	haplotype	seq_id	node_position	region_start	region_end	notes
+pggb_chr1	chr1_1m_100kb	CHM13	0	chr1	1000000	1000000	1100000	P-line node and interval example

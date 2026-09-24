@@ -21,6 +21,7 @@ Main tasks:
   - [Path index](#path-index)
 - [Build and install](#build-and-install)
   - [Supported platforms](#supported-platforms)
+  - [Prebuilt binaries](#prebuilt-binaries)
   - [C++ CLI](#c-cli)
   - [Bioconda](#bioconda)
   - [Python library install](#python-library-install)
@@ -106,6 +107,38 @@ Important: `.pdx` node IDs are aligned to the sorted entry rank in the `.ndx` fi
 
 It is not supported on Windows. Parts of the index I/O layer use Unix system
 calls such as `open`, `fstat`, `mmap`, and `close`.
+
+### Prebuilt binaries
+
+Each version tag publishes tested command-line packages for Linux and macOS on
+the corresponding [GitHub release](https://github.com/fawaz-dabbaghieh/gfaidx/releases):
+
+- Linux x86-64 and ARM64 binaries are statically linked against musl.
+- macOS Intel and ARM64 binaries link only to libraries supplied by macOS.
+
+Static linking removes shared-library requirements. The `index_gfa` command
+still launches the system `sort`; Linux installations therefore need GNU
+coreutils, which is normally installed by default. On Alpine Linux, install it
+with `apk add coreutils`. Graph query commands do not invoke this external sort.
+
+Download the archive matching the operating system and CPU architecture,
+extract it, and place `gfaidx` in a directory on `PATH`, for example
+`$HOME/.local/bin`.
+
+To create a release, first update the version compiled into `src/gfaidx.cpp`,
+commit the change, and push a matching `v` tag:
+
+```bash
+git tag v1.9.8
+git push origin v1.9.8
+```
+
+The release workflow builds and tests all four packages, writes a
+`SHA256SUMS` file, and then creates or updates the release for that tag. A tag
+whose version does not match the executable version fails before publication.
+If release automation is corrected after a tag has already been pushed, run
+the `Release binaries` workflow manually from GitHub Actions and supply that
+existing tag as `release_tag`.
 
 ### C++ CLI
 
@@ -333,33 +366,50 @@ Important options:
   override companion indexes; each defaults to `<in_gz>.<suffix>`
 - `--max_nodes <N>`
   cap the total seed plus BFS node count; it must be at least the seed count.
-  This limit is not used with `--all_haplotypes`
+  Only used with `--mode bfs`
+- `--mode {bfs,all,reference}`
+  select the extraction strategy. Default is `all`
+  - `bfs`: explore a graph neighborhood by BFS up to `--max_nodes`. Whatever
+    indexed P/W records happen to touch the resulting node set are emitted;
+    haplotype spans are not resolved exactly
+  - `all`: avoid BFS and use the `.pdx` posting table to find every indexed
+    P/W record containing a reference interval node. For a coordinate-indexed
+    P/W source, the exact path-step range returned by the coordinate binary
+    search is kept; repeated occurrences of one of its node ids elsewhere on
+    that same path do not widen the reference interval. Every other path uses
+    the minimum and maximum step containing any reference anchor. All steps
+    between those endpoints are retained, including insertions, duplications,
+    and inverted sequence. The exact node union and edges whose endpoints are
+    both in the union are then materialized. This conservative behavior can
+    produce a broad interval when one anchor occurs at distant positions on
+    the same haplotype; use `--mode bfs` when path support is ambiguous. This
+    mode assumes the graph nodes of interest are covered by indexed P/W
+    records; graph-only nodes are not discovered
+  - `reference`: resolve and emit only the queried reference path, using the
+    exact path-step range already found by the coordinate lookup. This skips
+    the posting-table scan that finds every other haplotype touching the
+    reference interval, which is the dominant cost of `--mode all` on graphs
+    with many haplotypes. The returned node set is a subset of what `--mode
+    all` would return: nodes that exist only because of a non-reference
+    haplotype's insertion or other private sequence are not discovered. Not
+    compatible with `--haplotype_gap`, which only affects non-reference paths
 - `--all_haplotypes`
-  avoid BFS and use the `.pdx` posting table to find every indexed P/W record
-  containing a reference interval node. For a coordinate-indexed P/W source,
-  the exact path-step range returned by the coordinate binary search is kept;
-  repeated occurrences of one of its node ids elsewhere on that same path do
-  not widen the reference interval. Every other path uses the minimum and
-  maximum step containing any reference anchor. All steps between those
-  endpoints are retained, including insertions, duplications, and inverted
-  sequence. The exact node union and edges whose endpoints are both in the
-  union are then materialized. This conservative behavior can produce a broad
-  interval when one anchor occurs at distant positions on the same haplotype;
-  use the default BFS mode when path support is ambiguous. This mode assumes
-  the graph nodes of interest are covered by indexed P/W records; graph-only
-  nodes are not discovered
+  deprecated alias for `--mode all`, kept for compatibility with existing
+  scripts. Prints a deprecation warning to stderr; rejected if combined with
+  an explicit `--mode` that names a different mode
 - `--haplotype_gap <LIMIT>`
-  optionally replace the non-reference minimum/maximum span with ODGI-style
-  local anchor clustering. Consecutive anchor occurrences stay in one path run
-  while the intervening non-anchor sequence is at most `LIMIT` bases; the next
-  anchor starts a new run after the limit is exceeded. This can prevent distant
-  repeat hits from pulling most of a PGGB haplotype into a small query. The
-  coordinate-selected reference run always remains exact. Omitting the option
-  preserves the established conservative behavior and its lower overhead.
-  `LIMIT` accepts a bare base count or a case-insensitive `bp`, `kb`, `mb`, or
-  `gb` suffix using decimal units; for example, `10kb` is 10,000 bases and `0`
+  requires `--mode all`. Optionally replace the non-reference minimum/maximum
+  span with ODGI-style local anchor clustering. Consecutive anchor occurrences
+  stay in one path run while the intervening non-anchor sequence is at most
+  `LIMIT` bases; the next anchor starts a new run after the limit is exceeded.
+  This can prevent distant repeat hits from pulling most of a PGGB haplotype
+  into a small query. The coordinate-selected reference run always remains
+  exact. Omitting the option preserves the established conservative behavior
+  and its lower overhead. `LIMIT` accepts a bare base count or a
+  case-insensitive `bp`, `kb`, `mb`, or `gb` suffix using decimal units; for
+  example, `10kb` is 10,000 bases and `0`
   joins only directly adjacent anchors. The option requires
-  `--all_haplotypes` and a matching `.lnx` node-length index
+  `--mode all` and a matching `.lnx` node-length index
 - `--no_paths`
   omit P/W output; `.pdx` remains required for rank-to-node-name conversion
 - `--with_coords`
@@ -394,18 +444,24 @@ Example:
 
 ```bash
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
-  --reference CHM13 --max_nodes 100000
+  --reference CHM13 --mode bfs --max_nodes 100000
 
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
-  --reference CHM13 --all_haplotypes
+  --reference CHM13 --mode all
 
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 local_haplotypes.gfa \
-  --reference CHM13 --all_haplotypes --haplotype_gap 10kb
+  --reference CHM13 --mode all --haplotype_gap 10kb
+
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 reference_only.gfa \
+  --reference CHM13 --mode reference
 
 gfaidx get_region chr22.gfa.gz --list_coordinates
 ```
 
-#### How `--all_haplotypes` preserves paths
+Note that `--mode all` is the default, so the second example above also works
+with just `--reference CHM13` and no `--mode` at all.
+
+#### How `--mode all` preserves paths
 
 Node ids alone do not identify where a node occurs on a path. The coordinate
 query therefore keeps the exact source-path steps in addition to the node ids.
@@ -423,7 +479,7 @@ the node union `B,C,G,H`.
 
 Searching that union against the complete reference again would incorrectly
 find two reference runs, `B,C` and `G,H`. The second run is only present because
-`G,H` were selected through the haplotype. `--all_haplotypes` therefore keeps
+`G,H` were selected through the haplotype. `--mode all` therefore keeps
 the path-specific intervals found during anchor matching and emits:
 
 ```text
@@ -777,11 +833,12 @@ gfaidx get_region \
   graph.indexed.gfa.gz \
   chr1:1000000-1100000 \
   chr1.region.gfa \
+  --mode bfs \
   --max_nodes 100000
 ```
 
 A pure rGFA does not record complete sample paths. Its reference nodes can seed
-the default BFS extraction, but `--all_haplotypes` cannot reconstruct
+a `--mode bfs` extraction, but `--mode all` cannot reconstruct
 haplotypes that are not represented by `P` or `W` records. Do not use
 `index_gfa --no_paths` for this workflow: `get_region` currently uses the
 otherwise empty `.pdx` node table to convert coordinate ranks back to node
@@ -908,6 +965,15 @@ Current query-time memory behavior:
 - node-name resolution for node-set queries goes through `.ndx`, not a giant in-memory node-name hash map
 
 ## Utility scripts
+
+### Repeated gfaidx thread-scaling and gbz-base interval benchmark
+
+`scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
+multiple genomic locations for configurable gfaidx thread counts and gbz-base,
+records GNU `time -v` measurements, and generates first-execution, warm-cache,
+thread-scaling, and regional-variation summaries and plots. See
+[the repeated interval benchmark guide](docs/gfaidx_gbz_interval_benchmark.md)
+for the TSV schema and server command.
 
 ### `scripts/pdx_size_breakdown.py`
 

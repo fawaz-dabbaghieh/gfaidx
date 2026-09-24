@@ -1,0 +1,12 @@
+# Illustrative zero-based, half-open intervals. Replace these coordinates with
+# locations covered by the reference in both benchmark indexes.
+query_id	locus_id	reference	contig	start	end
+anchor01_1kb	anchor01	CHM13	chr1	9999500	10000500
+anchor01_10kb	anchor01	CHM13	chr1	9995000	10005000
+anchor01_100kb	anchor01	CHM13	chr1	9950000	10050000
+anchor02_1kb	anchor02	CHM13	chr1	49999500	50000500
+anchor02_10kb	anchor02	CHM13	chr1	49995000	50005000
+anchor02_100kb	anchor02	CHM13	chr1	49950000	50050000
+anchor03_1kb	anchor03	CHM13	chr1	99999500	100000500
+anchor03_10kb	anchor03	CHM13	chr1	99995000	100005000
+anchor03_100kb	anchor03	CHM13	chr1	99950000	100050000

@@ -1107,3 +1107,115 @@ This is a moderate refactor, not a new graph algorithm. The existing on-disk
 indexes and extraction logic can be reused. The important work is defining
 ownership, output streaming, errors, thread safety, installation, and API
 compatibility clearly before publishing the library.
+
+
+## Multithreading: Parallelize Posting Reads, Not Just P/W Formatting
+
+> **Status: investigated, not implemented (September 2026).** Found while
+> benchmarking `gfaidx` against `gbz-base` on the HPRC MC whole-genome graph
+> (`hprc-v2.0-mc-chm13`, 94,554 total paths). No code was changed; this is a
+> design note for a future session, based on measurements on a 50mb `chr1`
+> `--all_haplotypes --with_coords` extraction.
+
+### Where `--threads` is used today, and its limits
+
+`--threads` is consumed in exactly one place: `emit_subpaths_in_parallel` in
+`src/chunk/get_subgraph_command.cpp` (~line 616), which only parallelizes the
+final **P/W coordinate formatting/output** stage. Everything upstream of it
+(seed selection, all-haplotype path-bounds resolution, subgraph
+materialization) runs single-threaded regardless of `--threads`.
+
+Measured phase breakdown on a 50mb region (mc graph, warm cache, 1 thread):
+
+| phase | time | threaded? |
+|---|---|---|
+| `postings` (`query_path_haplotype_nodes`, `src/coordinates/path_haplotype_query.cpp` ~line 184-212) | up to ~60s cold, ~8s once fully warm (this graph's `.pdx` is 360GB, bigger than RAM, so "warm" can take more than one touch) | **No** |
+| `selected_steps` (same file, ~line 232+) | ~1-5s | **No** |
+| subgraph materialization | ~1.3s | No |
+| P/W coordinate formatting/output | ~5s (8 threads) to ~31s (1 thread) | **Yes** |
+
+On a semi-cold run, `postings` alone (~60s) was *larger* than the entire
+threaded formatting phase (~32s). Threading only the phase that's sometimes
+the smaller of the two leaves real time on the table for large regions.
+
+Re-measured with `/usr/bin/time -v` in the foreground (not backgrounded,
+which produced spurious "low memory" kills in the harness used for this
+session unrelated to `gfaidx` itself): 1 thread = 45.95s / 3.32GB peak RSS;
+8 threads = 18.90s / 3.92GB peak RSS (+18%, not a blowup). So the *existing*
+formatting-phase parallelism is a solid, safe win at this scale once the
+region is large enough to amortize its fixed per-worker cost (see the
+"small, separate bug" below) — the opportunity here is additive, not a
+replacement.
+
+### What the `postings` step computes
+
+`.pdx`'s node-first view is an inverted index: for every node, the list of
+`(path_id, step_rank)` occurrences across all paths/haplotypes. Given the
+reference nodes covered by the requested interval, `query_path_haplotype_nodes`
+loops over each one, reads its posting list via
+`path_index.for_each_node_posting(...)`, and folds every `(path_id,
+step_rank)` into a per-path `{min_step, max_step}` bound
+(`PathStepBounds`, `path_haplotype_query.cpp:19-23`) — i.e. it finds, per
+haplotype, the contiguous span that overlaps the query. On the 50mb test this
+was 1.27M reference nodes × ~444 postings each ≈ 563M updates on one core.
+
+### Why it parallelizes cleanly
+
+- The outer loop is over an already-sorted, independent list of node ranks —
+  no ordering dependency.
+- The only shared state is `path_bounds[path_id]`, updated via `min`/`max` —
+  a textbook associative/commutative reduction. `PathStepBounds` is tiny
+  (`u32`, `u32`, `bool`), so per-thread private copies cost only a few
+  hundred KB total, nothing like the metadata-duplication cost below.
+- Proposed shape: partition `unique_reference_nodes` into N contiguous
+  chunks, one thread per chunk with its own private `path_bounds` array (no
+  locking during the parallel part), then a cheap merge step at the end
+  (`O(path_count × N)`, negligible next to the 563M postings being reduced):
+  for each `path_id`, combine every thread's `seen`/`min`/`max` into the
+  final bounds.
+- The one real wrinkle: `for_each_node_posting` does a `seekg`+`read` on the
+  reader's internal file stream, so concurrent threads can't safely share
+  one `PathIndexReader`'s cursor — each thread needs its own read cursor.
+  This should reuse the fix below rather than duplicate it a second way.
+
+### A small, separate bug worth fixing at the same time
+
+Every worker thread in `emit_subpaths_in_parallel` currently constructs its
+own full `paths::PathIndexReader` (`path_index.cpp:1094`), whose constructor
+*eagerly loads the entire path-metadata table for the whole graph* (a
+`std::vector<PathMeta>` plus a `path_name_to_id_` hash map over every path in
+the graph) — duplicated per worker, even when only one worker actually runs.
+Confirmed to scale with total path count in the graph: ~+50MB/+0.22s per
+worker on the mc graph (94,554 paths) vs only ~+4.6MB on the pggb chr1 graph
+(2,915 paths). Also, the gate deciding serial-vs-parallel
+(`threads > 1 && runs->size() > 1`, `get_subgraph_command.cpp:856`) checks
+matched-record count, not actual job count, so it commits to this cost even
+when the job-sizing logic (`build_subpath_formatting_jobs`) will collapse to
+a single job/worker anyway — the common case for small-to-medium queries on
+this graph.
+
+The clean fix for both this bug and the `postings` parallelization: split
+`PathIndexReader` into (a) the read-only metadata table + name index, built
+once and shared (by reference or `shared_ptr`) across all worker threads,
+and (b) a lightweight per-thread `ifstream`/seek cursor that references the
+shared metadata for lookups. Implementing this once would fix the formatting
+phase's per-worker memory tax *and* provide the per-thread I/O primitive
+`postings` parallelization needs.
+
+### Suggested order of work
+
+1. Split `PathIndexReader`'s shared read-only metadata from its per-thread
+   seek cursor (benefits both the existing formatting parallelism and the
+   new `postings` parallelism).
+2. Fix the serial/parallel gate in `get_subgraph_command.cpp:856` to check
+   actual job count, not matched-record count, so small queries stop paying
+   for parallel setup they never use.
+3. Parallelize `postings` (partition reference nodes, thread-local
+   `path_bounds`, merge) using the shared per-thread I/O cursor from step 1.
+4. Consider `selected_steps` next if it still shows up as significant after
+   (3) — same reduction-shaped pattern, lower priority since it was smaller
+   in every measurement so far.
+5. Re-run the gfaidx-vs-gbz-base interval benchmark
+   (`scripts/benchmark_gfaidx_gbz_intervals.sh`, results captured under
+   `~/gfaidx_benchmark/run/` on the benchmarking machine) after each step to
+   quantify the improvement on both the pggb chr1 and mc graphs.

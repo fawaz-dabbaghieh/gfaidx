@@ -37,6 +37,37 @@ TRACK_TITLES = {
     "region": "Coordinate-interval queries",
 }
 
+# Only these construction steps are needed to produce the files consumed by
+# timed queries. Other recorded builds remain visible as supplementary rows.
+QUERY_READY_INDEX_STEPS = {
+    "gfaidx": {"index_gfa", "index_coordinates"},
+    "vg": {"convert_xg"},
+    "odgi": {"w_to_p", "build_optimized"},
+    "gbz": {"vg_gbwt_gbz", "construct_db"},
+}
+
+
+def query_ready_index_step(row: dict) -> bool:
+    """Return whether an indexing row contributes to the query-ready total."""
+    return row.get("step") in QUERY_READY_INDEX_STEPS.get(row.get("tool"), set())
+
+
+def query_ready_index_file(row: dict) -> bool:
+    """Return whether a size row names a file read by a timed query."""
+    filename = row.get("file", "")
+    tool = row.get("tool", "")
+    if filename == "TOTAL":
+        return False
+    if tool == "gfaidx":
+        return filename.endswith(".gfa.gz") or ".gfa.gz." in filename
+    if tool == "vg":
+        return filename.endswith(".xg")
+    if tool == "odgi":
+        return filename.endswith(".opt.og")
+    if tool == "gbz":
+        return filename.endswith(".gbz.db")
+    return False
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
@@ -245,67 +276,77 @@ footer{margin-top:64px; padding-top:20px; border-top:1px solid var(--line);
 
 
 def dataset_section(facts: dict, gfa_bytes: int) -> str:
-    """Render the input-graph description."""
+    """Render available input-graph facts without assuming a dataset name."""
     if not facts:
-        return ""
-    rows = [
-        ["Input GFA", "chr22.gfa", fmt_bytes(gfa_bytes) if gfa_bytes else "—"],
-        ["Segments (S)", f"{int(facts['nodes']):,}", "—"],
-        ["Links (L)", f"{int(facts['edges']):,}", "—"],
-        ["Walks (W)", f"{int(facts['walks']):,}", "—"],
-        ["Total sequence", f"{int(facts['bp']):,} bp", "—"],
-        ["Node ID range", f"{int(facts['min_node']):,} – {int(facts['max_node']):,}",
-         f"span {int(facts['max_node']) - int(facts['min_node']) + 1:,}"],
-    ]
+        return '<p class="empty">Dataset facts were not collected for this run.</p>'
+
+    configured_name = facts.get("gfa_name") or facts.get("input_gfa") or facts.get("gfa")
+    input_name = Path(str(configured_name)).name if configured_name else "configured input graph"
+    rows = [["Input GFA", input_name, fmt_bytes(gfa_bytes) if gfa_bytes else "—"]]
+    for label, key in (
+        ("Segments (S)", "nodes"),
+        ("Links (L)", "edges"),
+        ("Paths (P)", "paths"),
+        ("Walks (W)", "walks"),
+    ):
+        if facts.get(key) is not None:
+            rows.append([label, f"{int(facts[key]):,}", "—"])
+    if facts.get("bp") is not None:
+        rows.append(["Total sequence", f"{int(facts['bp']):,} bp", "—"])
+    if facts.get("min_node") is not None and facts.get("max_node") is not None:
+        minimum = int(facts["min_node"])
+        maximum = int(facts["max_node"])
+        rows.append([
+            "Node ID range",
+            f"{minimum:,} – {maximum:,}",
+            f"span {maximum - minimum + 1:,}",
+        ])
     return table(["property", "value", "note"], rows, numeric_from=3)
 
 
 def findings_section() -> str:
-    """Render the narrative findings, which shaped the workflow design."""
+    """Render the general tool behaviours that shaped the workflow design."""
     return """
 <div class="find">
-<h3>1. odgi requires <code>-O</code>, so odgi needs a node-ID mapping</h3>
-<p><code>odgi extract</code> (both <code>-n</code> and <code>-r</code>) and
-<code>odgi pathindex</code> all refuse a graph whose node IDs are not compacted:</p>
-<pre><code>[odgi::extract] error: the node IDs are not compacted.
-    Please run 'odgi sort' using -O, --optimize to optimize the graph.
-error [xp]: Graph to index is not optimized. Please run 'odgi sort' using -O.</code></pre>
-<p>chr22 has 2,782,249 nodes with IDs spanning 53,303,057–56,138,482 — a span of
-2,835,426, so the ID space has gaps and fails the check. <code>-O</code> renumbers to
-<code>1..N</code>. The check is about <em>compactness</em>, not about starting at 1: a toy
-graph whose IDs formed a contiguous block passed <code>extract -n</code> without
-<code>-O</code>, which is why this had to be confirmed on the real graph.</p>
-<p>The workflow therefore builds an optimized graph for odgi and translates each query
-node into odgi's ID space through a reference-path position shared by both ID spaces:</p>
-<pre><code>odgi position -i graph.opt.og -p 'CHM13#0#chr22:0-51324926,20000007' -v</code></pre>
-<p>Verified by round-trip: odgi node <code>2721237</code> maps back to CHM13 chr22 offset
-<code>20000007</code> with <code>dist.to.ref=0</code>. The mapping is setup and is excluded
-from all query timings.</p>
+<h3>1. ODGI optimization requires a node-ID mapping</h3>
+<p><code>odgi extract</code> and ODGI's path indexes require compacted node IDs.
+The optimized <code>.opt.og</code> used for queries may therefore renumber a source
+GFA whose IDs contain gaps. The workflow resolves the original node through VG and
+uses the same reference-path position with <code>odgi position</code> to obtain the
+corresponding optimized ODGI node. This mapping is setup work and is excluded from
+query timings.</p>
 </div>
 
 <div class="find">
-<h3>2. GBZ renumbers nodes by default, because it chops long segments</h3>
-<p><code>vg gbwt</code> splits segments longer than <code>--max-node</code> (default 1024 bp).
-That changes the node set and renumbers the whole ID space, so
-<code>gbz-base query --node &lt;original id&gt;</code> fails outright:</p>
-<pre><code>Error: not found: The graph does not contain handle 106809716</code></pre>
-<p>Passing <code>--max-node 0</code> disables chopping and preserves the input IDs, letting
-gbz-base be queried with the same node IDs as vg and gfaidx. This workflow does that.
-The alternative, for a stock GBZ, is <code>vg gbwt --translation FILE</code> and translating
-query nodes through that table.</p>
-<p><strong>This is a deliberate deviation from default GBZ construction</strong>, made so the
-node-seeded comparison is possible at all. It should be stated in the paper's methods.</p>
+<h3>2. GBZ segment chopping would change node identity</h3>
+<p><code>vg gbwt</code> normally splits segments longer than its
+<code>--max-node</code> threshold. That changes the node set and can make an original
+GFA node ID unusable in <code>gbz-base query --node</code>. The benchmark passes
+<code>--max-node 0</code> so VG preserves input nodes for this cross-tool comparison.
+A workflow that keeps default chopping must instead request VG's translation table
+and translate each seed node.</p>
 </div>
 
 <div class="find">
-<h3>3. odgi silently drops W-line paths</h3>
-<p><code>odgi build</code> on a W-line GFA exits 0 and produces a graph with
-<strong>zero paths</strong> rather than reporting an error. The W&nbsp;→&nbsp;P conversion is a
-correctness requirement, not a convenience, so it is a measured pipeline step attributed
-to odgi.</p>
+<h3>3. W and P records need different path setup</h3>
+<p>ODGI does not expose source W records as the paths needed by these coordinate
+queries, so the W workflow measures W&nbsp;→&nbsp;P conversion before its optimized build.
+The P workflow uses source paths directly. It also parses PanSN path names and
+promotes the configured reference sample while constructing the GBZ used by
+gbz-base.</p>
+</div>
+
+<div class="find">
+<h3>4. VG node ranges and path regions use different commands</h3>
+<p>Node-seeded extraction uses <code>vg find</code>. In affected VG releases,
+<code>vg chunk -r NODE:NODE -l BP</code> can pass the step-context sentinel
+<code>-1</code> to unsigned expansion code and return the full connected component
+instead of a base-pair neighborhood. Region queries remain on
+<code>vg chunk -p PATH:START-END -c 0</code>, which selects a path interval and does
+not exercise that node-range context path. VG protobuf-to-GFA conversion is included
+inside every measured <code>vg find</code> query.</p>
 </div>
 """
-
 
 def methods_section() -> str:
     """Render how the tools were made comparable, and the caveats."""
@@ -319,8 +360,8 @@ records what each tool natively supports:</p>
 <code>vg find -n N -c BP -L</code>, <code>odgi extract -n N -L BP</code>,
 <code>gbz-base query --node N --context BP</code>. This is the only track where all four
 tools appear, and it exists because gbz-base expresses context solely in bp.</li>
-<li><strong>region</strong> — coordinate intervals: <code>vg find -p</code>,
-<code>odgi extract -r</code>, <code>gbz-base query --interval</code>,
+<li><strong>region</strong> — coordinate intervals: <code>vg chunk -p -c 0</code>,
+<code>odgi extract -r</code>, <code>gbz-base query --interval --context 0</code>,
 <code>gfaidx get_region --all_haplotypes --with_coords</code>.</li>
 </ul>
 <p>For the two node-context tracks, <code>gfaidx get_subgraph</code> bounds a BFS by node
@@ -338,12 +379,23 @@ matched node counts apply only to the node-context tracks, not the region track.
 compacted node IDs, so node <em>counts</em> are comparable across tools while node
 <em>identity</em> is not, without inverting the odgi map.</p>
 </div>
+<p>ODGI node queries and all threaded region tools are repeated for every configured
+thread count. <code>vg find</code> and gbz-base expose no node-query thread option, so
+each source node extraction is measured once while its matched gfaidx query retains the
+full thread sweep. Region queries additionally retain separate gfaidx no-gap results, explicit
+gfaidx and ODGI gap values, and ODGI merge-iteration counts. gbz-base has no
+query-thread or haplotype-gap option and is measured once; its interval context
+is explicitly zero to avoid adding graph-neighborhood nodes outside the requested
+path interval.</p>
 <p>Each command is wrapped by <code>scripts/measure.py</code>, which records wall time and
 peak RSS sampled across the whole process tree (so helper processes are counted) and
 combined with <code>wait4</code> accounting so very short commands still report memory.
-Format conversions needed only for counting output records run <em>outside</em> the timed
-command. All jobs run with <code>--cores 1</code>: concurrent jobs would make the timing and
-memory numbers meaningless.</p>
+Every timed query produces GFA text. VG node extraction and
+<code>vg convert -f</code> run as one measured pipeline; VG region extraction writes GFA
+directly. ODGI extraction and <code>odgi view -g</code> likewise run inside one measured
+process tree. Snakemake is given enough
+cores for the largest thread setting, while the custom <code>benchmark_job=1</code>
+resource serializes measured jobs so they do not compete with one another.</p>
 """
 
 
@@ -359,12 +411,23 @@ def build_report(results: Path, title: str, partial: bool = False) -> str:
     facts_path = results / "dataset_facts.json"
     if facts_path.exists():
         facts = json.loads(facts_path.read_text())
-    gfa = Path("/home/user2/fawaz/chr22.gfa")
-    gfa_bytes = gfa.stat().st_size if gfa.exists() else 0
+    # Dataset facts are optional; avoid embedding a machine-specific source
+    # path in reports produced for other W- or P-line graphs.
+    gfa_bytes = int(facts.get("gfa_bytes", facts.get("bytes", 0))) if facts else 0
 
     failures = sum(1 for r in index_rows + query_rows if r.get("exit_code") not in ("0", "", None))
     have_data = bool(index_rows) and bool(query_rows)
     complete = have_data and not partial
+
+    # The long-form query table can contain both numeric thread sweeps and
+    # threadless gbz-base rows. Report the actual numeric values rather than a
+    # fixed core count that becomes incorrect as soon as the config changes.
+    query_threads = sorted({
+        int(num(r.get("threads")))
+        for r in query_rows
+        if str(r.get("threads", "")).isdigit()
+    })
+    thread_summary = ", ".join(str(value) for value in query_threads) or "not recorded"
 
     out: list[str] = []
     out.append(f"<title>{esc(title)}</title>")
@@ -381,13 +444,13 @@ def build_report(results: Path, title: str, partial: bool = False) -> str:
         status = '<span class="pill">partial run</span>'
     out.append(f"""<header class="top">
 <h1>{esc(title)}</h1>
-<p class="sub">Indexing and subgraph-extraction cost for four genome-graph tools on an
-HPRC chr22 pangenome graph, measured with a Snakemake workflow.</p>
+<p class="sub">Indexing and subgraph-extraction cost for four genome-graph tools,
+measured with a Snakemake workflow.</p>
 <div class="meta">
 <span><b>Generated</b> {esc(stamp)}</span>
 <span><b>Host</b> {esc(socket.gethostname())}</span>
 <span><b>Platform</b> {esc(platform.machine())} / {esc(platform.system())}</span>
-<span><b>Cores used</b> 1</span>
+<span><b>Query threads</b> {esc(thread_summary)}</span>
 <span>{status}</span>
 </div></header>""")
 
@@ -418,38 +481,70 @@ to refresh every table.</p></div>""")
         per_tool_rss = defaultdict(float)
         for r in sorted(index_rows, key=lambda r: (r["tool"], r["step"])):
             dot = f'<span class="dot" style="background:{tool_color(r["tool"])}"></span>'
-            rows.append([dot + esc(r["tool"]), r["step"], fmt_secs(r["wall_seconds"]),
-                         fmt_gib(r["peak_rss_kb"]), r["exit_code"]])
-            per_tool_time[r["tool"]] += num(r["wall_seconds"])
-            per_tool_rss[r["tool"]] = max(per_tool_rss[r["tool"]], num(r["peak_rss_kb"]))
-        out.append(table(["tool", "step", "seconds", "peak RSS (GiB)", "exit"], rows, 2))
-
+            included = query_ready_index_step(r)
+            rows.append([
+                dot + esc(r["tool"]),
+                r["step"],
+                "yes" if included else "supplementary",
+                fmt_secs(r["wall_seconds"]),
+                fmt_gib(r["peak_rss_kb"]),
+                r["exit_code"],
+            ])
+            # A failed construction step did not produce a usable index and
+            # must not make a misleading query-ready total.
+            if included and r.get("exit_code") == "0":
+                per_tool_time[r["tool"]] += num(r["wall_seconds"])
+                per_tool_rss[r["tool"]] = max(
+                    per_tool_rss[r["tool"]], num(r["peak_rss_kb"])
+                )
+        out.append(table(
+            ["tool", "step", "query-ready total", "seconds", "peak RSS (GiB)", "exit"],
+            rows,
+            3,
+        ))
         out.append(bar_chart(
-            [(t, per_tool_time[t], tool_color(t)) for t in sorted(per_tool_time)],
-            "s", "Total index build time per tool (sum of that tool's steps)."))
+            [(tool, per_tool_time[tool], tool_color(tool)) for tool in sorted(per_tool_time)],
+            "s",
+            "Query-ready index construction time per tool.",
+        ))
         out.append(bar_chart(
-            [(t, per_tool_rss[t] / 1048576, tool_color(t)) for t in sorted(per_tool_rss)],
-            "GiB", "Peak RSS of the heaviest indexing step per tool."))
+            [(tool, per_tool_rss[tool] / 1048576, tool_color(tool))
+             for tool in sorted(per_tool_rss)],
+            "GiB",
+            "Peak RSS among the steps included in each query-ready index.",
+        ))
+        out.append("""<div class="note"><p>ODGI's W-line total includes the measured
+W&nbsp;→&nbsp;P conversion plus <code>odgi build -O</code>; its P-line total includes the
+optimized build directly. The unoptimized build and optional <code>.xp</code> and
+<code>.stpidx</code> construction remain in the detailed table as supplementary
+measurements but are not used by the timed queries.</p></div>""")
     else:
         out.append('<p class="empty">Not yet collected.</p>')
 
     # ---- index footprint --------------------------------------------------
     out.append("<h2>Index footprint on disk</h2>")
-    if size_rows:
-        totals = [(r["tool"], num(r["bytes"])) for r in size_rows if r["file"] == "TOTAL"]
-        out.append(bar_chart([(t, v / 1e6, tool_color(t)) for t, v in sorted(totals)],
-                             "MB", "Total index size per tool."))
-        out.append("""<div class="note"><p>odgi's total covers both <code>.og</code> and
-<code>.opt.og</code>. Only the optimized graph serves queries, so odgi's
-<em>query-ready</em> footprint is <code>.opt.og + .xp + .stpidx</code>; the plain
-<code>.og</code> is kept for the build-cost comparison. GBZ construction is attributed to
-gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p></div>""")
+    query_size_rows = [r for r in size_rows if query_ready_index_file(r)]
+    if query_size_rows:
+        totals = defaultdict(float)
+        for r in query_size_rows:
+            totals[r["tool"]] += num(r["bytes"])
+        out.append(bar_chart(
+            [(tool, total / 1e6, tool_color(tool)) for tool, total in sorted(totals.items())],
+            "MB",
+            "Files read by timed queries; construction intermediates are excluded.",
+        ))
+        out.append("""<div class="note"><p>The footprint reports the actual query-ready
+files: gfaidx's indexed GFA and sidecars, VG's <code>.xg</code>, ODGI's
+<code>.opt.og</code>, and gbz-base's <code>.gbz.db</code>. Raw or unoptimized graphs,
+ODGI's unused optional path/step indexes, and the intermediate GBZ are excluded.</p></div>""")
         rows = []
-        for r in size_rows:
+        for r in sorted(query_size_rows, key=lambda r: (r["tool"], r["file"])):
             dot = f'<span class="dot" style="background:{tool_color(r["tool"])}"></span>'
-            label = "TOTAL" if r["file"] == "TOTAL" else r["file"]
-            rows.append([dot + esc(r["tool"]), label, fmt_bytes(r["bytes"])])
-        out.append(table(["tool", "file", "size"], rows, 2))
+            rows.append([dot + esc(r["tool"]), r["file"], fmt_bytes(r["bytes"])])
+        for tool, total in sorted(totals.items()):
+            dot = f'<span class="dot" style="background:{tool_color(tool)}"></span>'
+            rows.append([dot + esc(tool), "TOTAL", fmt_bytes(total)])
+        out.append(table(["tool", "query-ready file", "size"], rows, 2))
     else:
         out.append('<p class="empty">Not yet collected.</p>')
 
@@ -462,28 +557,29 @@ gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p
     if query_rows:
         agg = defaultdict(lambda: [0.0, 0.0, 0, 0.0])
         for r in query_rows:
-            key = (r["track"], r["tool"])
+            # Never mix thread counts or region semantics in a mean. Every
+            # configuration remains an independently readable report row.
+            key = (
+                r["track"], r["tool"], r.get("threads", "NA"),
+                r.get("haplotype_gap_bp", "NA"),
+                r.get("merging_iterations", "NA"),
+                r.get("query_variant", "legacy"),
+            )
             agg[key][0] += num(r["wall_seconds"])
             agg[key][1] = max(agg[key][1], num(r["peak_rss_kb"]))
             agg[key][2] += 1
             agg[key][3] += num(r["out_nodes"])
 
-        out.append("<h3>Mean cost per tool and track</h3>")
+        out.append("<h3>Mean cost per tool and query setting</h3>")
         rows = []
-        for (track, tool), (secs, rss, n, nodes) in sorted(agg.items()):
+        for (track, tool, threads, gap, iterations, variant), (secs, rss, n, nodes) in sorted(agg.items()):
             dot = f'<span class="dot" style="background:{tool_color(tool)}"></span>'
-            rows.append([track, dot + esc(tool), n, fmt_secs(secs / n),
+            rows.append([track, dot + esc(tool), threads, gap, iterations, variant,
+                         n, fmt_secs(secs / n),
                          fmt_gib(rss), f"{nodes / n:,.0f}"])
-        out.append(table(["track", "tool", "queries", "mean seconds",
+        out.append(table(["track", "tool", "threads", "gap (bp)",
+                          "ODGI iterations", "variant", "queries", "mean seconds",
                           "max peak RSS (GiB)", "mean out nodes"], rows, 2))
-
-        for track in ("node_steps", "node_bases", "region"):
-            keys = [(t, tl) for (t, tl) in agg if t == track]
-            if not keys:
-                continue
-            items = [(tl, agg[(track, tl)][0] / agg[(track, tl)][2], tool_color(tl))
-                     for (_, tl) in sorted(keys, key=lambda k: k[1])]
-            out.append(bar_chart(items, "s", f"Mean query wall time — {track}."))
 
         for track, heading in TRACK_TITLES.items():
             subset = [r for r in query_rows if r["track"] == track]
@@ -491,33 +587,42 @@ gbz-base, since gbz-base consumes a GBZ and vg is only the available builder.</p
                 continue
             out.append(f"<h3>{esc(heading)}</h3>")
             rows = []
-            for r in sorted(subset, key=lambda r: (r["query_id"], num(r["context"]), r["tool"])):
+            for r in sorted(subset, key=lambda r: (
+                r["query_id"], num(r["context"]), r["tool"],
+                num(r.get("threads")), num(r.get("haplotype_gap_bp")),
+                num(r.get("merging_iterations")), r.get("query_variant", ""),
+            )):
                 dot = f'<span class="dot" style="background:{tool_color(r["tool"])}"></span>'
                 rows.append([r["query_id"], r["context"] or "—", dot + esc(r["tool"]),
+                             r.get("threads", "NA"),
+                             r.get("haplotype_gap_bp", "NA"),
+                             r.get("merging_iterations", "NA"),
+                             r.get("query_variant", "legacy"),
                              fmt_secs(r["wall_seconds"]), fmt_gib(r["peak_rss_kb"]),
                              f"{int(num(r['out_nodes'])):,}" if r["out_nodes"] else "—",
                              f"{int(num(r['out_paths'])):,}" if r["out_paths"] else "—",
                              r["exit_code"]])
-            out.append(table(["query", "context", "tool", "seconds", "peak RSS (GiB)",
-                              "out nodes", "out paths", "exit"], rows, 3))
+            out.append(table(["query", "context", "tool", "threads", "gap (bp)",
+                              "ODGI iterations", "variant", "seconds",
+                              "peak RSS (GiB)", "out nodes", "out paths", "exit"], rows, 3))
     else:
         out.append('<p class="empty">Not yet collected.</p>')
 
     # ---- findings ---------------------------------------------------------
     out.append("<h2>Findings that shaped the workflow</h2>")
-    out.append("<p>Three tool behaviours had to be resolved before any comparison was "
-               "meaningful. Two of them concern node-ID remapping, which the project "
-               "notes flagged as an open question.</p>")
+    out.append("<p>Four tool behaviours had to be resolved before the measurements "
+               "could be interpreted consistently.</p>")
     out.append(findings_section())
 
     # ---- reproducing ------------------------------------------------------
     out.append("<h2>Reproducing this</h2>")
     out.append("""<pre><code>conda activate gfaidx_bench
-cd /home/user2/fawaz/benchmark
-snakemake -s Snakefile --cores 1
-python3 scripts/make_report.py --results results --out report.html</code></pre>
-<p>Context sweeps live in <code>config.yaml</code>; queries live in
-<code>loci.tsv</code>, while resolved tool coordinates and node IDs are recorded in
+# Choose Snakefile.w/config.yaml or Snakefile.p/config.p.yaml.
+snakemake -s benchmark/Snakefile.w --configfile benchmark/config.yaml \
+  --cores 8 --resources benchmark_job=1
+python3 benchmark/scripts/make_report.py --results benchmark/results --out benchmark/results/report.html</code></pre>
+<p>Context sweeps live in the selected config file; queries live in its locus
+manifest, while resolved tool coordinates and node IDs are recorded in
 <code>results/maps/resolved_loci.tsv</code>. Every command is stored
 verbatim in <code>results/metrics/**.json</code> and copied into
 <code>results/tables/*.tsv</code>, which are the machine-readable source for this page.</p>""")

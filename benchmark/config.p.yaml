@@ -1,0 +1,65 @@
+# Configuration for benchmarking native, unsuffixed PanSN P-line graphs.
+# Relative graph paths are resolved against data_root. Relative manifest paths
+# and results_dir are resolved under benchmark/.
+
+data_root: /path/to/genome_graphs
+results_dir: results_p
+
+graphs_tsv: graphs.p.tsv
+loci_tsv: loci.p.tsv
+
+# Fixed thread count for indexing and untimed setup operations.
+threads: 1
+
+# Query-level thread sweep. gfaidx and ODGI node queries, plus threaded region
+# queries, use every value. VG find and gbz-base node queries are measured once
+# because those commands expose no query-thread option.
+query_threads: [1, 2, 4, 8]
+
+# Region-only local haplotype sweep, expressed in bases for both tools.
+haplotype_gaps_bp: [50000, 100000, 200000, 500000]
+
+# Keep a single pass, the currently documented default of three iterations,
+# and a larger six-iteration setting.
+odgi_merging_iterations: [1, 3, 6]
+
+# Preserve named baselines that are not equivalent to a numeric gap.
+include_gfaidx_no_gap: true
+include_odgi_default: true
+
+node_contexts_steps: [1, 10, 100, 1000, 5000, 10000]
+node_contexts_bases: [1000, 10000, 100000, 1000000, 5000000, 10000000]
+sample_interval_seconds: 0.05
+
+tools:
+  gfaidx: gfaidx
+  vg: vg
+  odgi: odgi
+  gbz_base: gbz-base
+  python: python3
+
+gfaidx:
+  index_extra: "--progress_every 0 --checkpoint_steps 1024 --max_chunk_nodes 10000 --min_chunk_nodes 1000"
+  coordinate_extra: "--progress_every 0"
+  get_subgraph_extra: ""
+  get_region_extra: ""
+
+vg:
+  convert_extra: ""
+  # Applied only to node-seeded extraction with vg find.
+  find_extra: ""
+  # Applied only to path-coordinate extraction with vg chunk.
+  chunk_extra: ""
+
+odgi:
+  build_extra: ""
+  pathindex_extra: ""
+  stepindex_extra: ""
+  extract_extra: ""
+
+gbz:
+  # Keep numeric GFA IDs stable for node-based cross-tool queries. The P
+  # workflow adds PanSN metadata parsing and --set-reference automatically.
+  gbwt_extra: "--max-node 0"
+  construct_extra: ""
+  query_extra: ""
