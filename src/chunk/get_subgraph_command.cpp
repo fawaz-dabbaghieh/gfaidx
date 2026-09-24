@@ -29,6 +29,7 @@
 #include "utils/debug_trace.h"
 #include "utils/Timer.h"
 #include "utils/cli_helpers.h"
+#include "gfaidx/indexed_graph.hpp"
 
 namespace gfaidx::chunk {
 namespace {
@@ -1353,15 +1354,56 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
             std::numeric_limits<std::uint32_t>::max());
         options.include_paths = !no_paths;
         options.with_walk_coordinates = with_coords;
+        if (options.with_walk_coordinates && !options.include_paths) {
+            throw std::runtime_error(
+                "--with_coords requires path output; remove --no_paths");
+        }
         options.threads = utils::parse_u32_strict(
             program.get<std::string>("threads"),
             "--threads",
             1,
             kMaxExtractionThreads);
         options.debug_trace = program.get<bool>("debug_trace");
-        return extract_subgraph_from_seeds(
-            options,
-            std::vector<std::string>{program.get<std::string>("start_node")});
+        // The CLI is intentionally a thin adapter over the installed library
+        // API. This keeps command output and downstream-library behavior on the
+        // same selection and formatting implementation.
+        gfaidx::IndexPaths overrides;
+        overrides.idx = options.idx_path;
+        overrides.ndx = options.ndx_path;
+        overrides.pdx = options.pdx_path;
+        overrides.lnx = options.lnx_path;
+        overrides.pcx = options.pcx_path;
+        gfaidx::IndexedGraph graph(options.input_gz, std::move(overrides));
+
+        gfaidx::ExtractionOptions extraction;
+        extraction.max_nodes = options.max_nodes;
+        extraction.include_paths = options.include_paths;
+        extraction.include_coordinates = options.with_walk_coordinates;
+        extraction.threads = options.threads;
+
+        std::ofstream out(options.output_gfa);
+        if (!out) {
+            throw std::runtime_error(
+                "Failed to open output GFA file for writing: " +
+                options.output_gfa);
+        }
+        gfaidx::QueryCallbacks callbacks;
+        callbacks.warning = [](std::string_view message) {
+            warn_get_subgraph(message);
+        };
+        graph.stream_subgraph(
+            {program.get<std::string>("start_node")},
+            [&](std::string_view line) {
+                out << line << '\n';
+                return static_cast<bool>(out);
+            },
+            extraction,
+            callbacks);
+        if (!out) {
+            throw std::runtime_error(
+                "Failed while writing output GFA: " + options.output_gfa);
+        }
+        return 0;
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         return 1;

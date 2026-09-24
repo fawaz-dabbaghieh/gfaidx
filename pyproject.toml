@@ -1,0 +1,29 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.10",
+  "pybind11>=2.13",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pygfaidx"
+version = "2.0.0"
+description = "Python API for disk-backed gfaidx genome graph indexes"
+readme = "README_pygfaidx.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Fawaz Dabbaghie" }]
+classifiers = [
+  "Programming Language :: C++",
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+]
+
+[tool.scikit-build]
+cmake.args = ["-DGFAIDX_BUILD_PYTHON=ON", "-DBUILD_TESTING=OFF"]
+wheel.packages = ["python/pygfaidx"]
+build-dir = "build/{wheel_tag}"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
