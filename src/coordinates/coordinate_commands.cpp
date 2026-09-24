@@ -465,21 +465,40 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--max_nodes")
       .default_value(std::string("10000"))
       .nargs(1)
-      .help("maximum total seeds plus BFS nodes; not used with --all_haplotypes");
+      .help("maximum total seeds plus BFS nodes; only used with --mode bfs");
 
     parser.add_argument("--threads")
       .default_value(std::string("1"))
       .nargs(1)
       .help("number of ordered P/W formatting workers (default: 1)");
 
+    // --mode is the primary selection switch. It replaces the older
+    // --all_haplotypes boolean (kept below as a deprecated alias for
+    // "--mode all") with an explicit, mutually exclusive three-way choice:
+    //   bfs       - explore a neighborhood up to --max_nodes (old default)
+    //   all       - exact reference span + anchor-bounded spans for every
+    //               other haplotype, via the .pdx posting table (new default)
+    //   reference - the same exact reference span, but skip the posting
+    //               scan entirely and never resolve any other haplotype
+    parser.add_argument("--mode")
+      .default_value(std::string("all"))
+      .nargs(1)
+      .help("selection mode: 'bfs' (graph neighborhood via --max_nodes), "
+            "'all' (exact reference span plus anchor-bounded spans for every "
+            "other haplotype; default), or 'reference' (exact reference span "
+            "only, skipping every other haplotype for speed)");
+
+    // --all_haplotypes is kept as a deprecated alias for "--mode all" so
+    // existing scripts keep working. It is rejected if it disagrees with an
+    // explicitly passed --mode.
     parser.add_argument("--all_haplotypes").default_value(false)
       .implicit_value(true)
-      .help("select the exact reference interval and anchor-supported P/W spans instead of BFS");
+      .help("deprecated; equivalent to --mode all");
 
     parser.add_argument("--haplotype_gap")
       .default_value(std::string(""))
       .nargs(1)
-      .help("optional maximum unanchored gap for local --all_haplotypes runs; accepts bases or bp/kb/mb/gb suffixes");
+      .help("optional maximum unanchored gap for local runs under --mode all; accepts bases or bp/kb/mb/gb suffixes");
 
     parser.add_argument("--no_paths").default_value(false)
       .implicit_value(true)
@@ -515,7 +534,30 @@ int run_get_region(const argparse::ArgumentParser& program) {
             program.get<bool>("list_coordinates");
         const bool no_paths = program.get<bool>("no_paths");
         const bool with_coords = program.get<bool>("with_coords");
-        const bool all_haplotypes = program.get<bool>("all_haplotypes");
+
+        // Resolve --mode, honoring the deprecated --all_haplotypes alias.
+        // --all_haplotypes is only ever a stand-in for "--mode all": if the
+        // caller also passed an explicit --mode that disagrees, that is a
+        // contradiction we reject rather than silently picking one.
+        auto mode = program.get<std::string>("mode");
+        if (mode != "bfs" && mode != "all" && mode != "reference") {
+            throw std::runtime_error(
+                "--mode must be 'bfs', 'all', or 'reference': " + mode);
+        }
+        if (program.is_used("all_haplotypes")) {
+            std::cerr << "warning: --all_haplotypes is deprecated; use "
+                         "--mode all instead"
+                      << std::endl;
+            if (program.is_used("mode") && mode != "all") {
+                throw std::runtime_error(
+                    "--all_haplotypes (equivalent to --mode all) conflicts "
+                    "with --mode " + mode);
+            }
+            mode = "all";
+        }
+        const auto region_mode = mode == "all" ? gfaidx::RegionMode::all_haplotypes
+            : mode == "reference" ? gfaidx::RegionMode::reference
+                                  : gfaidx::RegionMode::bfs;
         const auto haplotype_gap_bases = parse_haplotype_gap_bases(
             program.get<std::string>("haplotype_gap"));
 
@@ -572,9 +614,12 @@ int run_get_region(const argparse::ArgumentParser& program) {
             throw std::runtime_error("--with_coords requires path output; remove --no_paths");
         }
 
-        if (haplotype_gap_bases.has_value() && !all_haplotypes) {
-            throw std::runtime_error(
-                "--haplotype_gap requires --all_haplotypes");
+        if (haplotype_gap_bases.has_value() && mode != "all") {
+            // Gap-based local clustering only ever changes how NON-reference
+            // haplotypes are split. Under --mode reference no other haplotype
+            // is resolved at all, and --mode bfs does not use this pipeline,
+            // so in both cases the option would silently do nothing.
+            throw std::runtime_error("--haplotype_gap requires --mode all");
         }
         if (haplotype_gap_bases.has_value() &&
             !file_exists(lnx_path.c_str())) {
@@ -634,9 +679,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
             chunk::kMaxExtractionThreads);
         options.include_paths = !no_paths;
         options.include_coordinates = with_coords;
-        options.mode = all_haplotypes
-            ? gfaidx::RegionMode::all_haplotypes
-            : gfaidx::RegionMode::bfs;
+        options.mode = region_mode;
         options.haplotype_gap = haplotype_gap_bases;
 
         std::ofstream out(output_gfa);

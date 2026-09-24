@@ -114,6 +114,50 @@ struct PostingHeapGreater {
 
 }  // namespace detail
 
+// Independently-seekable view over one .pdx file's node-first posting table
+// only. Unlike PathIndexReader, its constructor does not read or parse the
+// path metadata table (path names, samples, tags, ...), so many instances -
+// one per worker thread - can be created cheaply to read postings
+// concurrently from the same index file. Each instance owns its own file
+// handle and node-metadata cache, so it is safe to use from exactly one
+// thread at a time but must not be shared between threads.
+//
+// Construct one via PathIndexReader::open_posting_cursor() rather than
+// directly: the offsets below come from that reader's already-parsed header
+// and are not meant to be recomputed by callers.
+class PostingCursor {
+public:
+    PostingCursor(std::string index_path,
+                 std::uint64_t node_table_offset,
+                 std::uint64_t posting_table_offset,
+                 std::uint64_t posting_table_bytes,
+                 std::uint32_t node_count);
+
+    void for_each_node_posting(
+        std::uint32_t node_id,
+        const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback);
+
+private:
+    struct NodeMeta {
+        std::uint64_t posting_begin{};
+        std::uint64_t posting_count{};
+    };
+
+    NodeMeta read_node_meta(std::uint32_t node_id);
+    void read_exact(std::uint64_t offset, void* dst, std::size_t bytes);
+
+    std::string index_path_;
+    std::ifstream in_;
+    std::uint64_t node_table_offset_{};
+    std::uint64_t posting_table_offset_{};
+    std::uint64_t posting_table_bytes_{};
+    std::uint32_t node_count_{};
+    // Not `mutable`/const-qualified like PathIndexReader's cache: a
+    // PostingCursor is only ever touched by the one thread that owns it, so
+    // there is no need to support calls through a const reference here.
+    std::unordered_map<std::uint32_t, NodeMeta> node_meta_cache_;
+};
+
 class PathIndexReader {
 public:
     explicit PathIndexReader(const std::string& index_path);
@@ -155,6 +199,16 @@ public:
     void for_each_node_posting(
         std::uint32_t node_id,
         const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const;
+
+    // Open an independent, posting-only view of the same .pdx file. See
+    // PostingCursor: this is the cheap alternative to constructing another
+    // full PathIndexReader when concurrent posting reads are needed (e.g. one
+    // per worker thread), since it skips the eager path-metadata load.
+    [[nodiscard]] PostingCursor open_posting_cursor() const {
+        return PostingCursor(
+            index_path_, node_table_offset_, posting_table_offset_,
+            posting_table_bytes_, node_count_);
+    }
 
 private:
     // Path metadata is loaded eagerly because the number of paths is small

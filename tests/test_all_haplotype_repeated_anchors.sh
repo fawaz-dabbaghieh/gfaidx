@@ -202,16 +202,18 @@ check_gap_one_output "$work_dir/gap_one.gfa"
     --with_coords >/dev/null
 cmp "$work_dir/from_cdx.gfa" "$work_dir/gap_one_kb.gfa"
 
-# Reject gap clustering outside all-haplotype extraction and reject malformed
-# units before opening the graph or creating an output file.
+# Reject gap clustering outside --mode all extraction and reject malformed
+# units before opening the graph or creating an output file. --mode defaults
+# to "all", so bfs must be requested explicitly to exercise this rejection.
 if "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
     "$work_dir/gap_without_haplotypes.gfa" \
+    --mode bfs \
     --haplotype_gap 1kb >"$work_dir/gap_without_haplotypes.stdout" \
     2>"$work_dir/gap_without_haplotypes.stderr"; then
-    echo "get_region unexpectedly accepted --haplotype_gap without --all_haplotypes" >&2
+    echo "get_region unexpectedly accepted --haplotype_gap under --mode bfs" >&2
     exit 1
 fi
-grep -F -- "--haplotype_gap requires --all_haplotypes" \
+grep -F -- "--haplotype_gap requires --mode all" \
     "$work_dir/gap_without_haplotypes.stderr" >/dev/null
 
 if "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
@@ -222,6 +224,85 @@ if "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
     exit 1
 fi
 grep -F -- "Invalid --haplotype_gap" "$work_dir/invalid_gap.stderr" >/dev/null
+
+# --mode is the primary selection switch (default: all). The bare default and
+# an explicit --mode all must be byte-identical to the --all_haplotypes output
+# already checked above.
+"$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_default.gfa" \
+    --with_coords >/dev/null
+"$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_all.gfa" \
+    --mode all \
+    --with_coords >/dev/null
+cmp "$work_dir/from_cdx.gfa" "$work_dir/mode_default.gfa"
+cmp "$work_dir/from_cdx.gfa" "$work_dir/mode_all.gfa"
+
+# --all_haplotypes is a deprecated alias for --mode all: same output, but it
+# must warn on stderr.
+"$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_legacy.gfa" \
+    --all_haplotypes \
+    --with_coords >"$work_dir/mode_legacy.stdout" \
+    2>"$work_dir/mode_legacy.stderr"
+cmp "$work_dir/from_cdx.gfa" "$work_dir/mode_legacy.gfa"
+grep -F -- "--all_haplotypes is deprecated" "$work_dir/mode_legacy.stderr" >/dev/null
+
+# An explicit --mode that disagrees with the deprecated --all_haplotypes is a
+# contradiction and must be rejected rather than silently resolved.
+if "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_conflict.gfa" \
+    --all_haplotypes --mode bfs \
+    >"$work_dir/mode_conflict.stdout" \
+    2>"$work_dir/mode_conflict.stderr"; then
+    echo "get_region unexpectedly accepted conflicting --all_haplotypes and --mode bfs" >&2
+    exit 1
+fi
+grep -F -- "conflicts with --mode bfs" "$work_dir/mode_conflict.stderr" >/dev/null
+
+# An unrecognized --mode value is rejected up front.
+if "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_invalid.gfa" \
+    --mode nonsense \
+    >"$work_dir/mode_invalid.stdout" \
+    2>"$work_dir/mode_invalid.stderr"; then
+    echo "get_region unexpectedly accepted --mode nonsense" >&2
+    exit 1
+fi
+grep -F -- "--mode must be 'bfs', 'all', or 'reference'" \
+    "$work_dir/mode_invalid.stderr" >/dev/null
+
+# --mode reference resolves only the exact reference run and none of the
+# other three haplotypes. Q, R, X, and Y only exist in this fixture because of
+# insertion/reverse/repeatnoise, so they must be absent from the node set.
+"$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_reference.gfa" \
+    --mode reference \
+    --with_coords >/dev/null
+awk -F '\t' '$1 == "P" {print $2 "\t" $3}' "$work_dir/mode_reference.gfa" \
+    >"$work_dir/actual_reference_only_paths.tsv"
+printf 'ref:1-4\tB+,C+,D+\n' >"$work_dir/expected_reference_only_paths.tsv"
+diff -u "$work_dir/expected_reference_only_paths.tsv" \
+    "$work_dir/actual_reference_only_paths.tsv"
+awk -F '\t' '$1 == "S" {print $2}' "$work_dir/mode_reference.gfa" | sort \
+    >"$work_dir/actual_reference_only_nodes.txt"
+printf 'B\nC\nD\n' >"$work_dir/expected_reference_only_nodes.txt"
+diff -u "$work_dir/expected_reference_only_nodes.txt" \
+    "$work_dir/actual_reference_only_nodes.txt"
+
+# --mode reference rejects --haplotype_gap for the same reason --mode bfs
+# does above: gap clustering only ever changes non-reference haplotypes, and
+# --mode reference never resolves any of those.
+if "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
+    "$work_dir/mode_reference_gap.gfa" \
+    --mode reference --haplotype_gap 1kb \
+    >"$work_dir/mode_reference_gap.stdout" \
+    2>"$work_dir/mode_reference_gap.stderr"; then
+    echo "get_region unexpectedly accepted --haplotype_gap under --mode reference" >&2
+    exit 1
+fi
+grep -F -- "--haplotype_gap requires --mode all" \
+    "$work_dir/mode_reference_gap.stderr" >/dev/null
 
 # The slower PDX/LNX fallback computes the same exact source run and must have
 # identical min/max haplotype behavior when no coordinate sidecar is available.

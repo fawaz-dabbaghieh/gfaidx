@@ -211,7 +211,8 @@ PYBIND11_MODULE(_pygfaidx, module) {
 
     py::enum_<gfaidx::RegionMode>(module, "RegionMode")
         .value("BFS", gfaidx::RegionMode::bfs)
-        .value("ALL_HAPLOTYPES", gfaidx::RegionMode::all_haplotypes);
+        .value("ALL_HAPLOTYPES", gfaidx::RegionMode::all_haplotypes)
+        .value("REFERENCE", gfaidx::RegionMode::reference);
 
     py::class_<gfaidx::IndexedGraph>(module, "IndexedGraph")
         .def(py::init<std::string, gfaidx::IndexPaths>(), py::arg("graph_path"),

@@ -689,13 +689,20 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
     const std::lock_guard<std::recursive_mutex> lock(impl_->reader_mutex);
     if (end <= begin) throw std::invalid_argument("Region end must be greater than begin");
     if (!impl_->path_index) throw std::runtime_error("Region queries require a .pdx path index");
+    if (options.haplotype_gap && options.mode != RegionMode::all_haplotypes) {
+        // Gap-based local clustering only ever changes how non-reference
+        // haplotypes are split; RegionMode::reference never resolves any
+        // other haplotype, and RegionMode::bfs does not use this pipeline at
+        // all, so in both cases the option would silently do nothing.
+        throw std::invalid_argument("haplotype_gap requires RegionMode::all_haplotypes");
+    }
     std::vector<std::uint32_t> ranks;
     std::vector<paths::SubpathRun> exact_runs;
     if (impl_->coordinate_index) {
         try {
             auto query = impl_->coordinate_index->query_region(reference, sequence, begin, end);
             ranks = std::move(query.node_ranks);
-            if (options.mode == RegionMode::all_haplotypes) {
+            if (options.mode == RegionMode::all_haplotypes || options.mode == RegionMode::reference) {
                 for (const auto& slice : query.slices) {
                     if (slice.track.source_type == 'S') continue;
                     const auto key = slice.track.source_type == 'P'
@@ -726,8 +733,34 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
     if (ranks.empty()) throw std::out_of_range("No nodes overlap the requested region");
     if (ranks.size() > options.max_nodes) throw std::runtime_error("Region seed count exceeds max_nodes");
 
+    if (options.mode == RegionMode::reference) {
+        // exact_runs was already resolved above from the coordinate index (or
+        // the on-the-fly fallback), independently of any other haplotype.
+        // Building the node set from just those runs skips the postings scan
+        // over every reference-covered node, which is what makes
+        // all_haplotypes expensive on graphs with many haplotypes.
+        if (exact_runs.empty()) {
+            throw std::runtime_error(
+                "RegionMode::reference found no exact reference path run for "
+                "this interval; the queried reference/sequence may not have "
+                "an indexed P/W record covering it");
+        }
+        const auto selected_ranks =
+            coordinates::select_reference_only_nodes(*impl_->path_index, exact_runs);
+        if (selected_ranks.size() > options.max_nodes) {
+            throw std::runtime_error("Reference-only result exceeds max_nodes");
+        }
+        impl_->stream_selection(impl_->selection_from_ranks(selected_ranks, exact_runs),
+                                visitor, options, callbacks);
+        return;
+    }
+
     if (options.mode == RegionMode::all_haplotypes) {
         coordinates::PathHaplotypeQueryOptions query_options;
+        // Reuses the same threads value as P/W formatting for the
+        // postings-reduction phase; see PathHaplotypeQueryOptions::threads
+        // for the gap-mode caveat (local gap clustering always runs serially).
+        query_options.threads = options.threads;
         std::unique_ptr<indexer::NodeLengthIndexReader> lengths;
         if (options.haplotype_gap) {
             if (!impl_->capabilities.node_lengths) {

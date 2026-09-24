@@ -60,6 +60,12 @@ struct CoordinateTrack {
 enum class RegionMode {
     bfs,
     all_haplotypes,
+    // Resolve only the node set touched by the exact reference path run(s)
+    // for the requested interval, skipping the postings scan that
+    // all_haplotypes performs over every other haplotype. Cheaper than
+    // all_haplotypes, at the cost of dropping pangenome context nodes only
+    // reachable through non-reference haplotypes.
+    reference,
 };
 
 struct ExtractionOptions {

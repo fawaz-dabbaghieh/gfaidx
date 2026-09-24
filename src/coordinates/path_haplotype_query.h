@@ -15,6 +15,11 @@ namespace gfaidx::coordinates {
 struct PathHaplotypeQueryOptions {
     std::optional<std::uint64_t> max_gap_bases;
     const indexer::NodeLengthIndexReader* node_lengths{nullptr};
+    // Threads for the postings-reduction phase only (see query_path_haplotype_nodes).
+    // Ignored whenever max_gap_bases is set: local gap clustering marks an
+    // anchor-step bitset while reading postings, and that bitset is not yet
+    // split into thread-local pieces, so gap mode always runs the serial path.
+    std::uint32_t threads{1};
 };
 
 // Summary of one posting-driven all-haplotype selection. The returned node
@@ -49,6 +54,16 @@ struct PathHaplotypeQueryResult {
     const std::vector<std::uint32_t>& reference_node_ranks,
     const std::vector<paths::SubpathRun>& exact_reference_path_runs = {},
     const PathHaplotypeQueryOptions& options = {});
+
+// --reference_only support: resolve the node set touched by already-known
+// reference path run(s) only, without scanning any other path's postings.
+// This is the cheap counterpart to query_path_haplotype_nodes above - it
+// skips the postings and selected-steps phases entirely, at the cost of
+// dropping pangenome context nodes that are only reachable through
+// non-reference haplotypes.
+[[nodiscard]] std::vector<std::uint32_t> select_reference_only_nodes(
+    const paths::PathIndexReader& path_index,
+    const std::vector<paths::SubpathRun>& reference_path_runs);
 
 }  // namespace gfaidx::coordinates
 
