@@ -296,6 +296,10 @@ std::uint64_t Graph::add_path(Path path) {
     if (key.empty()) throw std::invalid_argument("Path key cannot be empty");
     if (path_index_.count(key) != 0) throw std::invalid_argument("Duplicate path: " + key);
     if (path.id == 0) path.id = next_path_id_++;
+    if (std::any_of(paths_.begin(), paths_.end(),
+                     [&](const Path& candidate) { return candidate.id == path.id; })) {
+        throw std::invalid_argument("Duplicate path id");
+    }
     next_path_id_ = std::max(next_path_id_, path.id + 1);
     const auto id = path.id;
     path_index_.emplace(key, paths_.size());

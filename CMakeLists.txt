@@ -50,6 +50,13 @@ set_target_properties(gfaidx_library PROPERTIES
     EXPORT_NAME gfaidx)
 target_compile_options(gfaidx_library PRIVATE -Wall)
 target_compile_definitions(gfaidx_library PUBLIC GFAIDX_VERSION="${PROJECT_VERSION}")
+# CMAKE_CXX_STANDARD above only affects how this build compiles gfaidx_library
+# itself; it is a directory-scope variable, not a target property, so it is
+# never recorded in the exported gfaidxTargets.cmake. Without this, a
+# find_package(gfaidx) consumer gets no C++17 requirement at all and silently
+# falls back to its own compiler default, which is where <optional> (used by
+# public headers such as indexed_graph.hpp) stops resolving.
+target_compile_features(gfaidx_library PUBLIC cxx_std_17)
 target_include_directories(gfaidx_library
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

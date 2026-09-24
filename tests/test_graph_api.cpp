@@ -32,6 +32,24 @@ int main() {
     const auto path_id = graph.add_path(path);
     assert(path_id != 0);
 
+    // A caller-supplied id colliding with an existing path (even under a
+    // different key) must be rejected up front. Otherwise update_path()'s
+    // find-by-id lookup would silently resolve to whichever path was
+    // inserted first, leaving the second path permanently unaddressable by
+    // the update API despite the "stable id" contract Path::id advertises.
+    gfaidx::Path colliding_id_path;
+    colliding_id_path.name = "collision";
+    colliding_id_path.id = path_id;
+    colliding_id_path.steps = {{"a", false}};
+    bool duplicate_id_rejected = false;
+    try {
+        (void)graph.add_path(colliding_id_path);
+    } catch (const std::invalid_argument&) {
+        duplicate_id_rejected = true;
+    }
+    assert(duplicate_id_rejected);
+    assert(graph.path_count() == 1);
+
     bool rejected = false;
     try {
         graph.remove_node("b");
