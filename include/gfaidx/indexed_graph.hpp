@@ -85,10 +85,16 @@ struct RegionOptions : ExtractionOptions {
     std::optional<std::uint64_t> haplotype_gap;
 };
 
-// A false return requests cooperative cancellation.  Warning callbacks let a
-// CLI or GUI surface optional-sidecar fallbacks without library-side printing.
+// A false return requests cooperative cancellation.  Warning and progress
+// callbacks let a CLI or GUI surface fallback notices and phase-by-phase
+// status without library-side printing.  progress reports normal operation
+// (phase timings, resolved/selected counts); warning reports an anomaly
+// (such as falling back from an optional sidecar).  Messages carry no
+// timestamp or other formatting of their own; callers render them however
+// fits their output (the CLI prefixes a timestamp, for example).
 struct QueryCallbacks {
     std::function<void(std::string_view)> warning;
+    std::function<void(std::string_view)> progress;
     std::function<bool()> keep_going;
 };
 

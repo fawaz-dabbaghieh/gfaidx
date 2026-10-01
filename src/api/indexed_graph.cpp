@@ -5,6 +5,7 @@
 #include <deque>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -23,6 +24,7 @@
 #include "indexer/node_length_index.h"
 #include "paths/path_index.h"
 #include "paths/walk_coords.h"
+#include "utils/Timer.h"
 
 namespace gfaidx {
 namespace {
@@ -45,6 +47,10 @@ void require_continue(const QueryCallbacks& callbacks) {
 
 void warn(const QueryCallbacks& callbacks, const std::string& message) {
     if (callbacks.warning) callbacks.warning(message);
+}
+
+void report_progress(const QueryCallbacks& callbacks, const std::string& message) {
+    if (callbacks.progress) callbacks.progress(message);
 }
 
 std::vector<std::string_view> fields(std::string_view line) {
@@ -188,6 +194,9 @@ public:
         std::sort(unique.begin(), unique.end());
         unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
         if (unique.size() > max_nodes) throw std::runtime_error("Seed count exceeds max_nodes");
+        report_progress(callbacks, "Starting BFS from " + std::to_string(unique.size()) +
+            " seed node(s), max_nodes=" + std::to_string(max_nodes));
+        Timer bfs_timer;
 
         // Query-local caches make const IndexedGraph queries safe to run in
         // parallel without sharing mutable stream or adjacency state.
@@ -247,6 +256,12 @@ public:
                 }
             }
         }
+        {
+            std::ostringstream done;
+            done << "BFS finished with " << ordered.size() << " node(s) in "
+                 << std::fixed << std::setprecision(3) << bfs_timer.elapsed() << "s";
+            report_progress(callbacks, done.str());
+        }
         return selection_from_names(std::move(ordered));
     }
 
@@ -301,6 +316,9 @@ public:
                 "Coordinate-bearing output requires path output");
         }
         std::unordered_set<std::string> selected(selection.names.begin(), selection.names.end());
+        report_progress(callbacks, "Materializing " + std::to_string(selection.ranks.size()) +
+            " node(s) across " + std::to_string(selection.communities.size()) + " communities");
+        Timer materialize_timer;
         bool continue_output = true;
         if (!spans.empty()) {
             stream_member(0, [&](const std::string& line) {
@@ -331,7 +349,14 @@ public:
         }
         const auto shared = shared_community();
         if (continue_output && shared < spans.size()) emit_member(shared);
-        if (!continue_output || !options.include_paths) return;
+        if (!continue_output) return;
+        {
+            std::ostringstream done;
+            done << "Finished materializing nodes and links in " << std::fixed
+                 << std::setprecision(3) << materialize_timer.elapsed() << "s";
+            report_progress(callbacks, done.str());
+        }
+        if (!options.include_paths) return;
         if (!path_index) {
             warn(callbacks, "No .pdx path index is available; returning S/L records only");
             return;
@@ -378,6 +403,19 @@ public:
             return line;
         };
 
+        if (!runs->empty()) {
+            report_progress(callbacks, "Formatting " + std::to_string(runs->size()) +
+                " path/walk record(s)");
+        }
+        Timer format_timer;
+        const auto report_formatting_done = [&]() {
+            if (runs->empty()) return;
+            std::ostringstream done;
+            done << "Finished formatting paths in " << std::fixed << std::setprecision(3)
+                 << format_timer.elapsed() << "s";
+            report_progress(callbacks, done.str());
+        };
+
         if (options.threads == 1 || runs->size() < 2) {
             for (const auto& run : *runs) {
                 require_continue(callbacks);
@@ -385,6 +423,7 @@ public:
                     [&](const std::string& message) { warn(callbacks, message); });
                 if (!visitor(line)) return;
             }
+            report_formatting_done();
             return;
         }
 
@@ -502,6 +541,7 @@ public:
             throw;
         }
         stop_and_join();
+        report_formatting_done();
     }
 
     Graph materialize(const SelectionData& selection,
@@ -702,6 +742,10 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         try {
             auto query = impl_->coordinate_index->query_region(reference, sequence, begin, end);
             ranks = std::move(query.node_ranks);
+            if (!ranks.empty()) {
+                report_progress(callbacks, "Coordinate query selected " +
+                    std::to_string(ranks.size()) + " reference seed nodes");
+            }
             if (options.mode == RegionMode::all_haplotypes || options.mode == RegionMode::reference) {
                 for (const auto& slice : query.slices) {
                     if (slice.track.source_type == 'S') continue;
@@ -729,6 +773,9 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
             reference, sequence, begin, end);
         ranks = fallback.node_ranks;
         exact_runs = fallback.reference_path_runs;
+        report_progress(callbacks, "On-the-fly path coordinate query selected " +
+            std::to_string(ranks.size()) + " seed nodes from " +
+            std::to_string(fallback.matched_path_count) + " indexed P/W records");
     }
     if (ranks.empty()) throw std::out_of_range("No nodes overlap the requested region");
     // max_nodes bounds BFS mode's seed-plus-expansion budget (enforced below,
@@ -754,6 +801,10 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         }
         const auto selected_ranks =
             coordinates::select_reference_only_nodes(*impl_->path_index, exact_runs);
+        report_progress(callbacks, "Reference-only selection resolved " +
+            std::to_string(selected_ranks.size()) + " nodes from " +
+            std::to_string(exact_runs.size()) +
+            " reference path run(s); no other haplotypes were scanned");
         impl_->stream_selection(impl_->selection_from_ranks(selected_ranks, exact_runs),
                                 visitor, options, callbacks);
         return;
@@ -776,6 +827,34 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         }
         const auto selected = coordinates::query_path_haplotype_nodes(
             *impl_->path_index, ranks, exact_runs, query_options);
+        {
+            std::ostringstream phases;
+            phases << "All-haplotype phases: postings=" << std::fixed << std::setprecision(3)
+                   << selected.posting_seconds << "s, selected_steps="
+                   << selected.selected_step_seconds << "s, rank_materialization="
+                   << selected.node_rank_materialization_seconds << "s";
+            report_progress(callbacks, phases.str());
+        }
+        report_progress(callbacks, "All-haplotype path selection read " +
+            std::to_string(selected.posting_count) + " postings across " +
+            std::to_string(selected.matched_path_count) + " P/W records and selected " +
+            std::to_string(selected.node_ranks.size()) + " unique nodes from " +
+            std::to_string(selected.selected_path_step_count) + " path steps");
+        if (options.haplotype_gap) {
+            report_progress(callbacks, "Local all-haplotype interval resolution used a " +
+                std::to_string(*options.haplotype_gap) + " bp maximum gap and emitted " +
+                std::to_string(selected.local_non_reference_run_count) +
+                " non-reference interval(s); " +
+                std::to_string(selected.local_split_path_count) +
+                " path(s) were split, while " +
+                std::to_string(selected.exact_reference_path_count) +
+                " coordinate path(s) remained exact");
+        } else if (selected.exact_reference_path_count > 0) {
+            report_progress(callbacks, "All-haplotype interval resolution preserved " +
+                std::to_string(selected.exact_reference_path_count) +
+                " exact coordinate path(s); other paths retained their "
+                "minimum/maximum anchor bounds");
+        }
         impl_->stream_selection(impl_->selection_from_ranks(selected.node_ranks,
             selected.path_runs), visitor, options, callbacks);
         return;

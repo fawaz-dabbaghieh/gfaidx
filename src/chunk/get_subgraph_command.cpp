@@ -1391,6 +1391,13 @@ int run_get_subgraph(const argparse::ArgumentParser& program) {
         callbacks.warning = [](std::string_view message) {
             warn_get_subgraph(message);
         };
+        // Progress goes to stdout, matching get_region's convention, rather
+        // than info_get_subgraph's stderr (used only by this file's now-dead
+        // pre-library extraction path below, kept for reference pending
+        // removal).
+        callbacks.progress = [](std::string_view message) {
+            std::cout << get_time() << ": " << message << std::endl;
+        };
         graph.stream_subgraph(
             {program.get<std::string>("start_node")},
             [&](std::string_view line) {

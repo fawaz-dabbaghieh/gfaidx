@@ -691,6 +691,9 @@ int run_get_region(const argparse::ArgumentParser& program) {
         callbacks.warning = [](std::string_view message) {
             std::cerr << get_time() << ": Warning: " << message << std::endl;
         };
+        callbacks.progress = [](std::string_view message) {
+            std::cout << get_time() << ": " << message << std::endl;
+        };
         graph.stream_region(
             reference,
             region.sequence,
