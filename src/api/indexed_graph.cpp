@@ -731,7 +731,14 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         exact_runs = fallback.reference_path_runs;
     }
     if (ranks.empty()) throw std::out_of_range("No nodes overlap the requested region");
-    if (ranks.size() > options.max_nodes) throw std::runtime_error("Region seed count exceeds max_nodes");
+    // max_nodes bounds BFS mode's seed-plus-expansion budget (enforced below,
+    // and again inside Impl::bfs itself). It never applied to all_haplotypes
+    // or reference mode: their result size is determined by how many nodes
+    // the exact haplotype-bounded span(s) actually contain, which is a
+    // property of the data, not a neighborhood radius the caller is tuning.
+    if (options.mode == RegionMode::bfs && ranks.size() > options.max_nodes) {
+        throw std::runtime_error("Region seed count exceeds max_nodes");
+    }
 
     if (options.mode == RegionMode::reference) {
         // exact_runs was already resolved above from the coordinate index (or
@@ -747,9 +754,6 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         }
         const auto selected_ranks =
             coordinates::select_reference_only_nodes(*impl_->path_index, exact_runs);
-        if (selected_ranks.size() > options.max_nodes) {
-            throw std::runtime_error("Reference-only result exceeds max_nodes");
-        }
         impl_->stream_selection(impl_->selection_from_ranks(selected_ranks, exact_runs),
                                 visitor, options, callbacks);
         return;
@@ -772,9 +776,6 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         }
         const auto selected = coordinates::query_path_haplotype_nodes(
             *impl_->path_index, ranks, exact_runs, query_options);
-        if (selected.node_ranks.size() > options.max_nodes) {
-            throw std::runtime_error("All-haplotype result exceeds max_nodes");
-        }
         impl_->stream_selection(impl_->selection_from_ranks(selected.node_ranks,
             selected.path_runs), visitor, options, callbacks);
         return;

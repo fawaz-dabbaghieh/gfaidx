@@ -69,6 +69,11 @@ enum class RegionMode {
 };
 
 struct ExtractionOptions {
+    // Bounds get_subgraph()'s BFS neighborhood (seeds plus expanded nodes).
+    // For get_region(), it only applies under RegionMode::bfs; it is ignored
+    // by RegionMode::all_haplotypes and RegionMode::reference, whose result
+    // size is determined by the exact haplotype-bounded span(s) rather than a
+    // neighborhood radius.
     std::uint32_t max_nodes{100};
     bool include_paths{true};
     bool include_coordinates{false};
