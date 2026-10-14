@@ -58,22 +58,26 @@ struct CoordinateTrack {
 };
 
 enum class RegionMode {
+    // Graph neighborhood around the reference interval: a hop-count BFS
+    // bounded by max_nodes, or a base-pair context search when
+    // RegionOptions::context is set. Emits every P/W run inside the result.
     bfs,
     all_haplotypes,
-    // Resolve only the node set touched by the exact reference path run(s)
-    // for the requested interval, skipping the postings scan that
-    // all_haplotypes performs over every other haplotype. Cheaper than
-    // all_haplotypes, at the cost of dropping pangenome context nodes only
-    // reachable through non-reference haplotypes.
+    // The same base-pair context subgraph as bfs with a context, but only the
+    // queried reference path is emitted; no other haplotype is formatted.
+    // This matches gbz-base's --reference-only subgraph query.
     reference,
 };
 
+// Context length used by RegionMode::reference when RegionOptions::context is
+// not set. Matches gbz-base's default query context.
+inline constexpr std::uint64_t kDefaultRegionContext = 100;
+
 struct ExtractionOptions {
     // Bounds get_subgraph()'s BFS neighborhood (seeds plus expanded nodes).
-    // For get_region(), it only applies under RegionMode::bfs; it is ignored
-    // by RegionMode::all_haplotypes and RegionMode::reference, whose result
-    // size is determined by the exact haplotype-bounded span(s) rather than a
-    // neighborhood radius.
+    // For get_region(), it only applies under RegionMode::bfs without a
+    // context; context searches and RegionMode::all_haplotypes are sized by
+    // base-pair distance or haplotype spans instead of a node budget.
     std::uint32_t max_nodes{100};
     bool include_paths{true};
     bool include_coordinates{false};
@@ -83,6 +87,12 @@ struct ExtractionOptions {
 struct RegionOptions : ExtractionOptions {
     RegionMode mode{RegionMode::bfs};
     std::optional<std::uint64_t> haplotype_gap;
+    // Base-pair context around the reference interval, using gbz-base's
+    // distance rules: every node with a side reachable within this many bases
+    // of the interval is included. Optional for bfs (replaces max_nodes),
+    // defaults to kDefaultRegionContext for reference, and is rejected for
+    // all_haplotypes.
+    std::optional<std::uint64_t> context;
 };
 
 // A false return requests cooperative cancellation.  Warning and progress

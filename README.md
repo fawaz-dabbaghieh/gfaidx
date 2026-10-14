@@ -347,8 +347,9 @@ gfaidx index_coordinates graph.indexed.gfa.gz graph.gfa.gz.cdx --path_names_file
 ### `gfaidx get_region`
 
 Resolve a 0-based, half-open reference interval through `.cdx`, translate its
-node ranks through `.pdx`, and either use all overlapping reference nodes as BFS
-seeds or select the P/W path spans supported by those nodes. If `.cdx` is absent
+node ranks through `.pdx`, and either expand a graph neighborhood around the
+interval (`--mode bfs` or `--mode reference`) or select the P/W path spans
+supported by its nodes (`--mode all`). If `.cdx` is absent
 or does not contain the requested coordinate track, `get_region` can fall back
 to the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any
 indexed `P` path or concrete-coordinate `W` walk.
@@ -366,12 +367,27 @@ Important options:
   override companion indexes; each defaults to `<in_gz>.<suffix>`
 - `--max_nodes <N>`
   cap the total seed plus BFS node count; it must be at least the seed count.
-  Only used with `--mode bfs`
+  Only used with `--mode bfs` without `--context`
+- `--context <LIMIT>`
+  base-pair context around the interval, with the same rules as gbz-base's
+  `query --context`: starting from both sides of every node on the reference
+  interval, crossing a node costs its length minus one and following a link
+  costs one, and every node with a side reached within `LIMIT` bases joins the
+  subgraph. A partially covered first or last node starts its outer side at
+  the bases outside the interval. The node set depends only on graph topology,
+  so a long variant split across many nodes keeps only the nodes within
+  `LIMIT` of either end; its haplotypes are then emitted as separate
+  fragments. Used by `--mode reference` (default `100`, gbz-base's default)
+  and optionally by `--mode bfs`, where it replaces `--max_nodes`; rejected by
+  `--mode all`. `LIMIT` accepts the same suffixes as `--haplotype_gap`.
+  `--context 0` keeps only the interval's own nodes
 - `--mode {bfs,all,reference}`
   select the extraction strategy. Default is `all`
-  - `bfs`: explore a graph neighborhood by BFS up to `--max_nodes`. Whatever
-    indexed P/W records happen to touch the resulting node set are emitted;
-    haplotype spans are not resolved exactly
+  - `bfs`: explore a graph neighborhood around the interval, either by BFS up
+    to `--max_nodes` or, with `--context`, by base-pair distance. Every
+    indexed P/W run inside the resulting node set is emitted; haplotype spans
+    are not resolved exactly. With `--context`, single-step runs are kept so
+    the walks match gbz-base's subgraph output one for one
   - `all`: avoid BFS and use the `.pdx` posting table to find every indexed
     P/W record containing a reference interval node. For a coordinate-indexed
     P/W source, the exact path-step range returned by the coordinate binary
@@ -385,14 +401,14 @@ Important options:
     the same haplotype; use `--mode bfs` when path support is ambiguous. This
     mode assumes the graph nodes of interest are covered by indexed P/W
     records; graph-only nodes are not discovered
-  - `reference`: resolve and emit only the queried reference path, using the
-    exact path-step range already found by the coordinate lookup. This skips
-    the posting-table scan that finds every other haplotype touching the
-    reference interval, which is the dominant cost of `--mode all` on graphs
-    with many haplotypes. The returned node set is a subset of what `--mode
-    all` would return: nodes that exist only because of a non-reference
-    haplotype's insertion or other private sequence are not discovered. Not
-    compatible with `--haplotype_gap`, which only affects non-reference paths
+  - `reference`: extract the `--context` subgraph and emit only the queried
+    reference path, matching gbz-base's `query --reference-only`. The node and
+    link set is the same one `--mode bfs --context` returns; only the other
+    haplotypes' P/W records are skipped, along with their formatting and
+    coordinate work. The reference record covers the exact interval extended
+    through every adjacent reference step that stays inside the subgraph, as
+    gbz-base reports it. Not compatible with `--haplotype_gap`, which only
+    affects non-reference paths
 - `--all_haplotypes`
   deprecated alias for `--mode all`, kept for compatibility with existing
   scripts. Prints a deprecation warning to stderr; rejected if combined with
@@ -453,7 +469,10 @@ gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 local_haplotypes.gfa \
   --reference CHM13 --mode all --haplotype_gap 10kb
 
 gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 reference_only.gfa \
-  --reference CHM13 --mode reference
+  --reference CHM13 --mode reference --context 100 --with_coords
+
+gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 context.gfa \
+  --reference CHM13 --mode bfs --context 1kb
 
 gfaidx get_region chr22.gfa.gz --list_coordinates
 ```

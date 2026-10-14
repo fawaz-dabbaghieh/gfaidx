@@ -1111,6 +1111,10 @@ CoordinateQueryResult CoordinateIndexReader::query_region(
         slice.track = track;
         slice.start_step = low;
         slice.step_count = matching.size();
+        slice.first_step_start = matching.front().start;
+        slice.last_step_end = range_high < track.entry_count
+            ? read_entry(track.entry_begin + range_high).start
+            : track.sequence_end;
         for (const auto& entry : matching) {
             result.node_ranks.push_back(entry.node_rank);
         }

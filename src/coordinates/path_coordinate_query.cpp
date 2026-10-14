@@ -139,6 +139,10 @@ CandidateSpan append_overlapping_nodes(
         static_cast<std::uint64_t>(low),
         static_cast<std::uint64_t>(high - low),
     });
+    result.reference_run_bounds.push_back(ReferenceRunBounds{
+        table.starts[low],
+        high < table.starts.size() ? table.starts[high] : table.path_end,
+    });
     for (std::size_t i = low; i < high; ++i) {
         result.node_ranks.push_back(table.node_ranks[i]);
     }

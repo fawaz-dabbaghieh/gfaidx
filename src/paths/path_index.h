@@ -298,10 +298,13 @@ private:
 };
 
 // Resolve a node set into all path runs that remain contiguous inside that set.
-// Runs shorter than two consecutive steps are suppressed to avoid emitting
-// single-node path fragments that tend to confuse downstream users and tools.
+// By default, runs shorter than two consecutive steps are suppressed to avoid
+// emitting single-node path fragments that tend to confuse downstream users
+// and tools. keep_single_steps retains them, which matches gbz-base's subgraph
+// output where every haplotype visit inside the subgraph becomes a walk.
 std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
-                                                   const std::vector<std::uint32_t>& node_ids);
+                                                   const std::vector<std::uint32_t>& node_ids,
+                                                   bool keep_single_steps = false);
 
 void write_path_as_gfa_line(std::ostream& out,
                             const PathIndexReader& index,

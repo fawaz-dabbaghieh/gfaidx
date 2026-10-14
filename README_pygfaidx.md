@@ -459,9 +459,14 @@ Coordinates are 0-based and half-open: `[begin, end)`. Region queries require
 a `.pdx` to translate selected node ranks back to node names.
 
 - `RegionMode.BFS` uses reference-overlapping nodes as traversal seeds and
-  expands until `max_nodes`.
+  expands until `max_nodes`. Passing `context=<bases>` instead keeps every
+  node within that many bases of the interval (gbz-base's `--context` rules)
+  and returns every P/W run inside the subgraph, including single-step runs.
 - `RegionMode.ALL_HAPLOTYPES` selects matching P/W runs containing the
   reference interval nodes instead of expanding by BFS.
+- `RegionMode.REFERENCE` extracts the same `context` subgraph (100 bases when
+  `context` is omitted) but returns only the queried reference path, like
+  gbz-base's `--reference-only`.
 - `haplotype_gap` limits how many unshared bases may bridge matches in
   all-haplotype mode and requires a `.lnx`.
 

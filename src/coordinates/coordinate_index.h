@@ -30,6 +30,11 @@ struct CoordinateTrackSlice {
     CoordinateTrackInfo track;
     std::uint64_t start_step{};
     std::uint64_t step_count{};
+    // Sequence coordinates covered by the first and last selected steps. A
+    // query interval can start or end inside a node; context expansion needs
+    // those partial overhangs to seed its distances the way gbz-base does.
+    std::uint64_t first_step_start{};
+    std::uint64_t last_step_end{};
 };
 
 struct CoordinateQueryResult {

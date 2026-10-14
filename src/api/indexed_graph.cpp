@@ -9,9 +9,11 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -129,12 +131,79 @@ std::string subpath_name(const paths::PathInfo& info,
            "_" + std::to_string(run.start_step + run.step_count - 1);
 }
 
+// Query-local decompressed gzip members. Searches that discover their node set
+// incrementally need a member's links before materialization; keeping the text
+// lets materialization reuse it instead of decompressing the member again.
+struct MemberCache {
+    std::unordered_map<std::uint32_t, std::string> text;
+};
+
+bool for_each_text_line(std::string_view text,
+                        const std::function<bool(std::string_view)>& visitor) {
+    for (std::size_t begin = 0; begin < text.size();) {
+        auto end = text.find('\n', begin);
+        if (end == std::string_view::npos) end = text.size();
+        if (!visitor(text.substr(begin, end - begin))) return false;
+        begin = end + 1;
+    }
+    return true;
+}
+
+// One end of an L record as seen from a node. A node side is named by the end
+// of the forward sequence it sits on: right == false is the start.
+struct LinkEnd {
+    std::string_view neighbor;
+    bool right{};
+    bool neighbor_right{};
+};
+
+// Links (and, for context searches, segment lengths) of the members a search
+// has loaded. Every view points into MemberCache text that outlives the search.
+struct LinkGraph {
+    std::unordered_set<std::uint32_t> loaded;
+    std::unordered_map<std::string_view, std::vector<LinkEnd>> adjacency;
+    std::unordered_map<std::string_view, std::uint64_t> lengths;
+};
+
+// "L a + b +" leaves a through its right side and enters b through its left
+// side; a reverse orientation flips the side on that end.
+void add_link(LinkGraph& graph, std::string_view line) {
+    const auto f = fields(line);
+    if (f.size() < 5 || f[0] != "L") throw std::runtime_error("Malformed L record");
+    const bool from_right = f[2] != "-";
+    const bool to_right = f[4] == "-";
+    graph.adjacency[f[1]].push_back(LinkEnd{f[3], from_right, to_right});
+    graph.adjacency[f[3]].push_back(LinkEnd{f[1], to_right, from_right});
+}
+
+// S records carry either the sequence or '*' with an LN:i tag.
+std::uint64_t segment_length(const std::vector<std::string_view>& f) {
+    if (f[2] != "*") return f[2].size();
+    for (std::size_t i = 3; i < f.size(); ++i) {
+        if (f[i].substr(0, 5) == "LN:i:") return std::stoull(std::string(f[i].substr(5)));
+    }
+    throw std::runtime_error("S record has neither a sequence nor an LN:i tag: " +
+                             std::string(f[1]));
+}
+
+// One starting node side for a base-pair context search.
+struct ContextSeed {
+    std::string node;
+    bool right{};
+    std::uint64_t distance{};
+};
+
 struct SelectionData {
     std::vector<std::string> names;
     std::vector<std::uint32_t> ranks;
     std::vector<std::uint32_t> communities;
     std::vector<paths::SubpathRun> exact_runs;
     bool preserve_exact_runs{false};
+    // Context subgraphs report every haplotype visit, including single-step
+    // runs, so their walks line up with gbz-base's subgraph output.
+    bool keep_single_step_runs{false};
+    // Members already decompressed while selecting nodes.
+    MemberCache members;
 };
 
 }  // namespace
@@ -185,6 +254,48 @@ public:
                                              spans[id].gz_size, visitor);
     }
 
+    const std::string& cached_member(std::uint32_t id, MemberCache& cache) const {
+        const auto found = cache.text.find(id);
+        if (found != cache.text.end()) return found->second;
+        std::string text;
+        stream_member(id, [&](const std::string& line) {
+            text.append(line);
+            text.push_back('\n');
+            return true;
+        });
+        return cache.text.emplace(id, std::move(text)).first->second;
+    }
+
+    void for_each_member_line(std::uint32_t id, const MemberCache& cache,
+                              const std::function<bool(std::string_view)>& visitor) const {
+        const auto found = cache.text.find(id);
+        if (found != cache.text.end()) {
+            for_each_text_line(found->second, visitor);
+            return;
+        }
+        stream_member(id, [&](const std::string& line) { return visitor(line); });
+    }
+
+    // Index one member's L records, plus S lengths for context searches. The
+    // text goes through the query cache, so each member is decompressed at
+    // most once per query even though materialization needs it again.
+    void load_links(std::uint32_t id, MemberCache& cache, LinkGraph& graph,
+                    bool with_lengths, const QueryCallbacks& callbacks) const {
+        if (!graph.loaded.insert(id).second) return;
+        require_continue(callbacks);
+        for_each_text_line(cached_member(id, cache), [&](std::string_view line) {
+            if (line.empty()) return true;
+            if (line[0] == 'L') {
+                add_link(graph, line);
+            } else if (with_lengths && line[0] == 'S') {
+                const auto f = fields(line);
+                if (f.size() < 3) throw std::runtime_error("Malformed S record");
+                graph.lengths[f[1]] = segment_length(f);
+            }
+            return true;
+        });
+    }
+
     SelectionData bfs(const std::vector<std::string>& seeds,
                       std::uint32_t max_nodes,
                       const QueryCallbacks& callbacks) const {
@@ -199,60 +310,37 @@ public:
         Timer bfs_timer;
 
         // Query-local caches make const IndexedGraph queries safe to run in
-        // parallel without sharing mutable stream or adjacency state.
-        std::unordered_map<std::uint32_t, std::vector<std::pair<std::string, std::string>>> community_edges;
-        std::unordered_set<std::uint32_t> loaded;
-        std::unordered_map<std::string, std::vector<std::string>> adjacency;
+        // parallel without sharing mutable stream or adjacency state. The
+        // members read here are handed on to materialization.
+        MemberCache members;
+        LinkGraph graph;
 
-        auto load_community = [&](std::uint32_t community_id) {
-            if (!loaded.insert(community_id).second) return;
-            require_continue(callbacks);
-            stream_member(community_id, [&](const std::string& line) {
-                if (!line.empty() && line[0] == 'L') {
-                    auto endpoints = link_nodes(line);
-                    adjacency[endpoints.first].push_back(endpoints.second);
-                    if (endpoints.first != endpoints.second) {
-                        adjacency[endpoints.second].push_back(endpoints.first);
-                    }
-                }
-                return true;
-            });
-        };
-
-        // Cross-community links live in the final member.  They are indexed by
-        // endpoint for this query, mirroring the current optimized CLI logic.
+        // Cross-community links live in the final member.
         const auto shared = shared_community();
-        if (shared < spans.size()) {
-            stream_member(shared, [&](const std::string& line) {
-                if (!line.empty() && line[0] == 'L') {
-                    auto endpoints = link_nodes(line);
-                    adjacency[endpoints.first].push_back(endpoints.second);
-                    if (endpoints.first != endpoints.second) adjacency[endpoints.second].push_back(endpoints.first);
-                }
-                return true;
-            });
-        }
+        if (shared < spans.size()) load_links(shared, members, graph, false, callbacks);
 
-        std::deque<std::string> queue(unique.begin(), unique.end());
-        std::unordered_set<std::string> queued(unique.begin(), unique.end());
-        std::unordered_set<std::string> selected;
-        std::vector<std::string> ordered;
+        std::deque<std::string_view> queue(unique.begin(), unique.end());
+        std::unordered_set<std::string_view> queued(unique.begin(), unique.end());
+        std::unordered_set<std::string_view> selected;
+        std::vector<std::string_view> ordered;
         ordered.reserve(max_nodes);
         while (!queue.empty() && ordered.size() < max_nodes) {
             require_continue(callbacks);
-            auto current = std::move(queue.front());
+            const auto current = queue.front();
             queue.pop_front();
             queued.erase(current);
             if (!selected.insert(current).second) continue;
             ordered.push_back(current);
             std::uint32_t community = 0;
             if (!node_index->lookup(current, community)) {
-                throw std::out_of_range("Node does not exist: " + current);
+                throw std::out_of_range("Node does not exist: " + std::string(current));
             }
-            load_community(community);
-            for (const auto& neighbor : adjacency[current]) {
-                if (selected.count(neighbor) == 0 && queued.insert(neighbor).second) {
-                    queue.push_back(neighbor);
+            load_links(community, members, graph, false, callbacks);
+            const auto links = graph.adjacency.find(current);
+            if (links == graph.adjacency.end()) continue;
+            for (const auto& link : links->second) {
+                if (selected.count(link.neighbor) == 0 && queued.insert(link.neighbor).second) {
+                    queue.push_back(link.neighbor);
                 }
             }
         }
@@ -262,7 +350,203 @@ public:
                  << std::fixed << std::setprecision(3) << bfs_timer.elapsed() << "s";
             report_progress(callbacks, done.str());
         }
-        return selection_from_names(std::move(ordered));
+        auto selection = selection_from_names(
+            std::vector<std::string>(ordered.begin(), ordered.end()));
+        selection.members = std::move(members);
+        return selection;
+    }
+
+    // Base-pair context expansion with gbz-base's distance rules (insert_context
+    // in gbz-base's subgraph.rs): a Dijkstra search over node sides in which
+    // crossing a node costs its length minus one and following a link costs
+    // one. A node joins the subgraph as soon as either side is reached within
+    // the context, and seed nodes always join. The node set depends only on
+    // graph topology, never on which haplotypes visit it.
+    SelectionData context_search(const std::vector<ContextSeed>& seeds,
+                                 std::uint64_t context,
+                                 const QueryCallbacks& callbacks) const {
+        if (seeds.empty()) throw std::invalid_argument("At least one seed node is required");
+        report_progress(callbacks, "Starting context search from " +
+            std::to_string(seeds.size()) + " seed node side(s), context=" +
+            std::to_string(context) + " bp");
+        Timer search_timer;
+
+        MemberCache members;
+        LinkGraph graph;
+        const auto shared = shared_community();
+        if (shared < spans.size()) load_links(shared, members, graph, true, callbacks);
+
+        using Entry = std::tuple<std::uint64_t, std::string_view, bool>;
+        std::priority_queue<Entry, std::vector<Entry>, std::greater<>> active;
+        for (const auto& seed : seeds) active.emplace(seed.distance, seed.node, seed.right);
+
+        // Bit 0 marks a visited left side and bit 1 a visited right side.
+        std::unordered_map<std::string_view, std::uint8_t> visited;
+        std::vector<std::string_view> ordered;
+        const auto side_bit = [](bool right) -> std::uint8_t { return right ? 2 : 1; };
+        const auto is_visited = [&](std::string_view node, bool right) {
+            const auto found = visited.find(node);
+            return found != visited.end() && (found->second & side_bit(right)) != 0;
+        };
+        // Seeds can start beyond the context (a long partially covered end
+        // node), so compare without overflowing distance + step.
+        const auto within = [&](std::uint64_t distance, std::uint64_t step) {
+            return distance <= context && step <= context - distance;
+        };
+
+        while (!active.empty()) {
+            require_continue(callbacks);
+            const auto [distance, node, right] = active.top();
+            active.pop();
+            auto& sides = visited[node];
+            if ((sides & side_bit(right)) != 0) continue;
+            if (sides == 0) {
+                ordered.push_back(node);
+                std::uint32_t community = 0;
+                if (!node_index->lookup(node, community)) {
+                    throw std::out_of_range("Node does not exist: " + std::string(node));
+                }
+                load_links(community, members, graph, true, callbacks);
+            }
+            sides |= side_bit(right);
+
+            const auto length = graph.lengths.find(node);
+            if (length == graph.lengths.end()) {
+                throw std::runtime_error("Context search found no S record for node " +
+                                         std::string(node));
+            }
+            const auto crossing = length->second > 0 ? length->second - 1 : 0;
+            if (!is_visited(node, !right) && within(distance, crossing)) {
+                active.emplace(distance + crossing, node, !right);
+            }
+            if (!within(distance, 1)) continue;
+            const auto links = graph.adjacency.find(node);
+            if (links == graph.adjacency.end()) continue;
+            for (const auto& link : links->second) {
+                if (link.right != right || is_visited(link.neighbor, link.neighbor_right)) continue;
+                active.emplace(distance + 1, link.neighbor, link.neighbor_right);
+            }
+        }
+        {
+            std::ostringstream done;
+            done << "Context search selected " << ordered.size() << " node(s) from "
+                 << graph.loaded.size() << " member(s) in " << std::fixed
+                 << std::setprecision(3) << search_timer.elapsed() << "s";
+            report_progress(callbacks, done.str());
+        }
+        auto selection = selection_from_names(
+            std::vector<std::string>(ordered.begin(), ordered.end()));
+        selection.members = std::move(members);
+        return selection;
+    }
+
+    // Seeds follow gbz-base's around_interval(): both sides of every node on
+    // an exact reference run start at distance zero, except the entry side of
+    // a partially covered first node (the bases before the interval) and the
+    // exit side of a partially covered last node (the bases after the interval
+    // minus one, as gbz-base computes it, so both tools select the same
+    // nodes). Without P/W runs (rGFA coordinates) every overlapping node is
+    // seeded on both sides at zero, like a gbz-base node query.
+    std::vector<ContextSeed> context_seeds(
+        const std::vector<paths::SubpathRun>& runs,
+        const std::vector<coordinates::ReferenceRunBounds>& bounds,
+        const std::vector<std::uint32_t>& ranks,
+        std::uint64_t begin,
+        std::uint64_t end) const {
+        std::vector<ContextSeed> seeds;
+        if (runs.empty()) {
+            for (const auto rank : ranks) {
+                auto name = path_index->copy_node_name(rank);
+                seeds.push_back(ContextSeed{name, false, 0});
+                seeds.push_back(ContextSeed{std::move(name), true, 0});
+            }
+            return seeds;
+        }
+        for (std::size_t i = 0; i < runs.size(); ++i) {
+            const auto& run = runs[i];
+            std::uint64_t lead = 0;
+            std::uint64_t trail = 0;
+            if (i < bounds.size()) {
+                if (begin > bounds[i].first_step_start) lead = begin - bounds[i].first_step_start;
+                if (bounds[i].last_step_end > end) trail = bounds[i].last_step_end - end;
+            }
+            const auto last_step = run.start_step + run.step_count - 1;
+            path_index->for_each_step(run.path_id, run.start_step, run.step_count,
+                [&](const paths::StepRecord& step, std::uint64_t step_rank) {
+                    auto name = path_index->copy_node_name(step.node_id);
+                    // A forward visit enters through the left side.
+                    const bool entry_right = step.is_reverse;
+                    seeds.push_back(ContextSeed{
+                        name, entry_right, step_rank == run.start_step ? lead : 0});
+                    seeds.push_back(ContextSeed{
+                        std::move(name), !entry_right,
+                        step_rank == last_step && trail > 0 ? trail - 1 : 0});
+                });
+        }
+        return seeds;
+    }
+
+    // gbz-base reports the reference as its maximal walk through the extracted
+    // subgraph around the query position, so grow each exact run outward
+    // while the neighbouring path steps stay inside the selected node set.
+    std::vector<paths::SubpathRun> extend_runs_within(
+        std::vector<paths::SubpathRun> runs,
+        std::vector<std::uint32_t> ranks) const {
+        std::sort(ranks.begin(), ranks.end());
+        const auto inside = [&](std::uint32_t rank) {
+            return std::binary_search(ranks.begin(), ranks.end(), rank);
+        };
+        constexpr std::uint64_t kBlock = 1024;
+        for (auto& run : runs) {
+            const auto info = path_index->get_path_info(run.path_id);
+            bool open = true;
+            while (open && run.start_step > 0) {
+                const auto count = std::min(kBlock, run.start_step);
+                const auto steps = path_index->read_steps(run.path_id, run.start_step - count, count);
+                if (steps.empty()) break;
+                for (auto step = steps.rbegin(); step != steps.rend(); ++step) {
+                    if (!inside(step->node_id)) {
+                        open = false;
+                        break;
+                    }
+                    --run.start_step;
+                    ++run.step_count;
+                }
+            }
+            open = true;
+            while (open && run.start_step + run.step_count < info.step_count) {
+                const auto next = run.start_step + run.step_count;
+                const auto steps = path_index->read_steps(
+                    run.path_id, next, std::min(kBlock, info.step_count - next));
+                if (steps.empty()) break;
+                for (const auto& step : steps) {
+                    if (!inside(step.node_id)) {
+                        open = false;
+                        break;
+                    }
+                    ++run.step_count;
+                }
+            }
+        }
+
+        // Runs that grew into each other on one path become one walk.
+        std::sort(runs.begin(), runs.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.path_id != rhs.path_id ? lhs.path_id < rhs.path_id
+                                              : lhs.start_step < rhs.start_step;
+        });
+        std::vector<paths::SubpathRun> merged;
+        for (const auto& run : runs) {
+            if (!merged.empty() && merged.back().path_id == run.path_id &&
+                run.start_step <= merged.back().start_step + merged.back().step_count) {
+                auto& back = merged.back();
+                const auto run_end = run.start_step + run.step_count;
+                back.step_count = std::max(back.start_step + back.step_count, run_end) -
+                                  back.start_step;
+            } else {
+                merged.push_back(run);
+            }
+        }
+        return merged;
     }
 
     SelectionData selection_from_names(std::vector<std::string> names) const {
@@ -321,7 +605,7 @@ public:
         Timer materialize_timer;
         bool continue_output = true;
         if (!spans.empty()) {
-            stream_member(0, [&](const std::string& line) {
+            for_each_member_line(0, selection.members, [&](std::string_view line) {
                 if (!line.empty() && line[0] == 'H') continue_output = visitor(line);
                 return continue_output && (line.empty() || line[0] == 'H');
             });
@@ -329,7 +613,7 @@ public:
         if (!continue_output) return;
 
         auto emit_member = [&](std::uint32_t community) {
-            stream_member(community, [&](const std::string& line) {
+            for_each_member_line(community, selection.members, [&](std::string_view line) {
                 require_continue(callbacks);
                 if (line.empty() || line[0] == 'H') return true;
                 if (line[0] == 'S') {
@@ -365,7 +649,8 @@ public:
         std::vector<paths::SubpathRun> discovered;
         const std::vector<paths::SubpathRun>* runs = &selection.exact_runs;
         if (!selection.preserve_exact_runs) {
-            discovered = paths::find_subpaths_for_node_ids(*path_index, selection.ranks);
+            discovered = paths::find_subpaths_for_node_ids(*path_index, selection.ranks,
+                                                           selection.keep_single_step_runs);
             runs = &discovered;
         }
         paths::SelectedNodeNameLookup names(path_index->node_count(), selection.ranks,
@@ -736,8 +1021,17 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
         // all, so in both cases the option would silently do nothing.
         throw std::invalid_argument("haplotype_gap requires RegionMode::all_haplotypes");
     }
+    if (options.context && options.mode == RegionMode::all_haplotypes) {
+        // all_haplotypes sizes its result by haplotype spans, not by distance.
+        throw std::invalid_argument("context requires RegionMode::reference or RegionMode::bfs");
+    }
+    // Reference mode always runs the context search; bfs runs it instead of
+    // the max_nodes BFS when a context is given.
+    const bool use_context = options.mode == RegionMode::reference ||
+                             (options.mode == RegionMode::bfs && options.context);
     std::vector<std::uint32_t> ranks;
     std::vector<paths::SubpathRun> exact_runs;
+    std::vector<coordinates::ReferenceRunBounds> exact_bounds;
     if (impl_->coordinate_index) {
         try {
             auto query = impl_->coordinate_index->query_region(reference, sequence, begin, end);
@@ -746,7 +1040,7 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
                 report_progress(callbacks, "Coordinate query selected " +
                     std::to_string(ranks.size()) + " reference seed nodes");
             }
-            if (options.mode == RegionMode::all_haplotypes || options.mode == RegionMode::reference) {
+            if (options.mode == RegionMode::all_haplotypes || use_context) {
                 for (const auto& slice : query.slices) {
                     if (slice.track.source_type == 'S') continue;
                     const auto key = slice.track.source_type == 'P'
@@ -760,6 +1054,7 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
                         throw std::runtime_error("Coordinate track is not aligned with .pdx: " + key);
                     }
                     exact_runs.push_back({id, slice.start_step, slice.step_count});
+                    exact_bounds.push_back({slice.first_step_start, slice.last_step_end});
                 }
             }
         } catch (const std::exception& error) {
@@ -773,40 +1068,45 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
             reference, sequence, begin, end);
         ranks = fallback.node_ranks;
         exact_runs = fallback.reference_path_runs;
+        exact_bounds = fallback.reference_run_bounds;
         report_progress(callbacks, "On-the-fly path coordinate query selected " +
             std::to_string(ranks.size()) + " seed nodes from " +
             std::to_string(fallback.matched_path_count) + " indexed P/W records");
     }
     if (ranks.empty()) throw std::out_of_range("No nodes overlap the requested region");
-    // max_nodes bounds BFS mode's seed-plus-expansion budget (enforced below,
-    // and again inside Impl::bfs itself). It never applied to all_haplotypes
-    // or reference mode: their result size is determined by how many nodes
-    // the exact haplotype-bounded span(s) actually contain, which is a
-    // property of the data, not a neighborhood radius the caller is tuning.
-    if (options.mode == RegionMode::bfs && ranks.size() > options.max_nodes) {
+    // max_nodes bounds the hop-count BFS's seed-plus-expansion budget
+    // (enforced below, and again inside Impl::bfs itself). Context searches
+    // and all_haplotypes are sized by base-pair distance or haplotype spans,
+    // which are properties of the data rather than a node budget.
+    if (options.mode == RegionMode::bfs && !options.context &&
+        ranks.size() > options.max_nodes) {
         throw std::runtime_error("Region seed count exceeds max_nodes");
     }
 
-    if (options.mode == RegionMode::reference) {
-        // exact_runs was already resolved above from the coordinate index (or
-        // the on-the-fly fallback), independently of any other haplotype.
-        // Building the node set from just those runs skips the postings scan
-        // over every reference-covered node, which is what makes
-        // all_haplotypes expensive on graphs with many haplotypes.
-        if (exact_runs.empty()) {
+    if (use_context) {
+        if (options.mode == RegionMode::reference && exact_runs.empty()) {
             throw std::runtime_error(
                 "RegionMode::reference found no exact reference path run for "
                 "this interval; the queried reference/sequence may not have "
                 "an indexed P/W record covering it");
         }
-        const auto selected_ranks =
-            coordinates::select_reference_only_nodes(*impl_->path_index, exact_runs);
-        report_progress(callbacks, "Reference-only selection resolved " +
-            std::to_string(selected_ranks.size()) + " nodes from " +
-            std::to_string(exact_runs.size()) +
-            " reference path run(s); no other haplotypes were scanned");
-        impl_->stream_selection(impl_->selection_from_ranks(selected_ranks, exact_runs),
-                                visitor, options, callbacks);
+        const auto context = options.context.value_or(kDefaultRegionContext);
+        auto selection = impl_->context_search(
+            impl_->context_seeds(exact_runs, exact_bounds, ranks, begin, end),
+            context, callbacks);
+        if (options.mode == RegionMode::reference) {
+            // Only the queried reference is formatted; the subgraph itself is
+            // the same one bfs would return for this context.
+            selection.exact_runs = impl_->extend_runs_within(exact_runs, selection.ranks);
+            selection.preserve_exact_runs = true;
+            report_progress(callbacks, "Reference-only output keeps " +
+                std::to_string(selection.exact_runs.size()) +
+                " reference walk(s) through the context subgraph; no other "
+                "haplotypes are formatted");
+        } else {
+            selection.keep_single_step_runs = true;
+        }
+        impl_->stream_selection(selection, visitor, options, callbacks);
         return;
     }
 
