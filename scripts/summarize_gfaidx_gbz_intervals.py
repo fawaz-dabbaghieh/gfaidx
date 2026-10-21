@@ -1011,6 +1011,107 @@ def plot_scaling(
     plt.close(figure)
 
 
+# The overview draws every variant on one axis, so each one gets its own
+# color: warm colors for gbz-base and cool colors for gfaidx. The gfaidx thread
+# count is shown by the marker, and output without coordinates is dashed.
+OVERVIEW_COLORS = {
+    "gbz-base-ref": "#CC79A7",
+    "gbz-base-all": "#D55E00",
+    "ref-coords": "#009E73",
+    "bfs": "#56B4E9",
+    "bfs-coords": "#0072B2",
+    "span-coords": "#000000",
+}
+OVERVIEW_GBZ_BASE_LABELS = {
+    "gbz-base-ref": "gbz-base --reference-only",
+    "gbz-base-all": "gbz-base, all haplotypes (unnamed, no coords)",
+}
+
+
+def overview_style(variant: str, thread_counts: list[int]) -> tuple[str, str, str, bool]:
+    """Return color, marker, line style, and marker fill for the overview."""
+    if variant.startswith("gbz-base"):
+        return OVERVIEW_COLORS.get(variant, GBZ_BASE_STYLE[0]), "s", "-", True
+    parsed = parse_gfaidx_variant(variant)
+    if parsed is None:
+        return "#666666", "x", "-", True
+    kind, threads = parsed
+    without_coords = kind in GFAIDX_KINDS_WITHOUT_COORDS
+    return (
+        OVERVIEW_COLORS.get(kind, "#666666"),
+        GFAIDX_MARKERS[thread_counts.index(threads) % len(GFAIDX_MARKERS)],
+        "--" if without_coords else "-",
+        not without_coords,
+    )
+
+
+def plot_overview(
+    size_rows: list[dict[str, object]],
+    output: Path,
+    title: str,
+    formats: list[str],
+) -> None:
+    """Plot every variant at one context on shared time and memory axes.
+
+    Warm values are used when the run has repetitions, otherwise the first
+    execution.
+    """
+    from matplotlib import pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+
+    comparison_of = {str(row["variant"]): str(row["comparison"]) for row in size_rows}
+    variants = sorted(
+        comparison_of,
+        key=lambda variant: (comparison_sort_key(comparison_of[variant]), variant_sort_key(variant)),
+    )
+    thread_counts = sorted(
+        {parsed[1] for parsed in map(parse_gfaidx_variant, variants) if parsed is not None}
+    )
+    has_warm = any(row.get("warm_elapsed_mean") is not None for row in size_rows)
+    timing = "warm" if has_warm else "first"
+    figure, axes = plt.subplots(1, 2, figsize=(12.5, 5.2))
+    for axis, metric in zip(axes, ("elapsed", "rss")):
+        _, ylabel, scale = metric_settings(metric, warm_only=True)
+        prefix = f"{timing}_elapsed" if metric == "elapsed" else f"{timing}_rss_kb"
+        plotted_y: list[float] = []
+        for variant in variants:
+            selected = sorted(
+                (row for row in size_rows
+                 if row["variant"] == variant and row.get(f"{prefix}_mean") is not None),
+                key=lambda row: int(row["interval_bp"]),
+            )
+            if not selected:
+                continue
+            centers_and_errors = [error_values(row, prefix, scale) for row in selected]
+            plotted_y.extend(item[0] for item in centers_and_errors)
+            axis.errorbar(
+                [int(row["interval_bp"]) for row in selected],
+                [item[0] for item in centers_and_errors],
+                yerr=[
+                    [item[1][0] for item in centers_and_errors],
+                    [item[1][1] for item in centers_and_errors],
+                ],
+                linewidth=1.8,
+                capsize=3,
+                label=OVERVIEW_GBZ_BASE_LABELS.get(variant, variant_label(variant)),
+                **style_kwargs(overview_style(variant, thread_counts)),
+            )
+        axis.set_xscale("log")
+        if plotted_y and min(plotted_y) > 0:
+            axis.set_yscale("log")
+        axis.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: format_bp(value)))
+        axis.set_xlabel("Requested interval length")
+        axis.set_ylabel(ylabel)
+        axis.grid(alpha=0.25)
+    handles, labels = axes[0].get_legend_handles_labels()
+    figure.legend(handles, labels, loc="lower center", ncol=min(3, len(labels)),
+                  frameon=False, bbox_to_anchor=(0.5, -0.02 - 0.045 * ((len(labels) - 1) // 3)))
+    figure.suptitle(f"{title} ({'warm repetitions' if has_warm else 'first execution'})")
+    figure.tight_layout(rect=(0, 0.06, 1, 1))
+    save_figure(figure, output, formats)
+    plt.close(figure)
+
+
 def plot_by_context(
     size_rows: list[dict[str, object]],
     output: Path,
@@ -1370,7 +1471,8 @@ def plot_comparison(
             subset(cache_rows), plot_dir / f"{comparison}_cache_effect_normalized",
             f"{heading}: repeated-query page-cache effect", formats, variants, styles,
         )
-    if contexts != ["NA"]:
+    # Context is the x axis here, so the plots need at least two contexts.
+    if len([context for context in contexts if context != "NA"]) > 1:
         plot_by_context(
             comparison_sizes, plot_dir / f"{comparison}_warm_time_by_context",
             f"{heading}: warm wall time by context", formats, "elapsed", variants, styles,
@@ -1428,6 +1530,15 @@ def main() -> int:
         plot_comparison(
             comparison, locations, size_rows, repetition_rows, cache_rows,
             plot_dir, formats, styles,
+        )
+    # One overview per context with every comparison that ran at it.
+    for context in sorted({str(row["context_bp"]) for row in size_rows}, key=context_sort_key):
+        if context == "NA":
+            continue
+        plot_overview(
+            [row for row in size_rows if str(row["context_bp"]) == context],
+            plot_dir / f"overview_{context_slug(context)}",
+            f"gfaidx and gbz-base, {context_label(context)}", formats,
         )
 
     print(f"Wrote summary tables to {table_dir}")

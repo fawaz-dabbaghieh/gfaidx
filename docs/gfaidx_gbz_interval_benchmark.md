@@ -301,7 +301,13 @@ appear as a single `legacy` comparison.
 
 ## Plots
 
-Plots are written per comparison. `<comparison>` is `reference_only`,
+`overview_ctx<N>` draws every variant at one context on a single pair of axes,
+time on the left and peak RSS on the right. gbz-base uses warm colors and
+square markers, gfaidx uses cool colors, the gfaidx marker shows the thread
+count, and output without coordinates is dashed. It uses warm values, or
+first-execution values when the run had one repetition.
+
+The remaining plots are written per comparison. `<comparison>` is `reference_only`,
 `all_haplotypes`, or `haplotype_span`, and `<context>` is `ctx<N>` (or `noctx`
 for the haplotype-span variant):
 
@@ -316,7 +322,8 @@ for the haplotype-span variant):
 - `<comparison>_<context>_output_nodes`: returned graph size for checking
   workload agreement
 - `<comparison>_warm_time_by_context` and `<comparison>_warm_memory_by_context`:
-  warm time and peak RSS against context length, one panel per interval size
+  warm time and peak RSS against context length, one panel per interval size;
+  written only when the run has two or more contexts
 - `<comparison>_cache_effect_normalized`: repeated-query time relative to run
   1, one panel per context
 

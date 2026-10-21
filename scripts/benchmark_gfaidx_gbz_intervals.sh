@@ -586,8 +586,9 @@ run_one_variant() {
     output_bytes=$(file_size_bytes "$output_gfa")
     # Counts and parity values are computed after GNU time has finished, so
     # they never contribute to the measured wall time or memory.
-    local output_nodes output_edges output_paths node_hash
-    local reference_walks reference_walk_steps reference_walk_hash
+    # A failed command keeps NA values, so its row is still recorded below.
+    local output_nodes=NA output_edges=NA output_paths=NA node_hash=NA
+    local reference_walks=NA reference_walk_steps=NA reference_walk_hash=NA
     local summary_cache="$SUMMARY_SCRATCH/${query_id}.${variant}.ctx${context}.tsv"
     (( exit_status != 0 )) || IFS=$'\t' read -r output_nodes output_edges output_paths \
         node_hash reference_walks reference_walk_steps reference_walk_hash \
