@@ -14,11 +14,19 @@ Every execution belongs to one comparison:
                    reference walk with coordinates
   all_haplotypes   gbz-base (anonymous `unknown` haplotypes) versus gfaidx
                    --mode bfs without --with_coords (matched work) and with
-                   --with_coords (named, coordinate-bearing subwalks)
+                   --with_coords (named, coordinate-bearing subwalks), plus
+                   the optional gbz-base-query --resolve with a haplotype
+                   index (named, coordinate-bearing subwalks)
   haplotype_span   optional gfaidx --mode all --with_coords; no gbz-base pair
 
 Node-set and reference-walk hashes recorded by the runner are compared per
 query, so the tables show whether paired tools extracted the same subgraph.
+
+A location (query, context, variant) with any failed execution is reported as
+NA: it is listed in failures_by_query.tsv and left out of every average. Size
+summaries count those locations in `failed_locations`, and plots omit a
+variant at any size where not every location succeeded, so a mean is never
+drawn over the surviving, easier locations only.
 """
 
 from __future__ import annotations
@@ -58,6 +66,7 @@ GFAIDX_KINDS_WITHOUT_COORDS = {"bfs"}
 GBZ_BASE_LABELS = {
     "gbz-base-ref": "gbz-base --reference-only",
     "gbz-base-all": "gbz-base (unknown haplotypes)",
+    "gbz-base-query-resolved": "gbz-base-query + haplotype index (resolved)",
     "gbz-base": "gbz-base",
 }
 
@@ -77,6 +86,7 @@ PAIRED_COMPARISONS = {"reference_only", "all_haplotypes"}
 GFAIDX_COLORS = ("#0072B2", "#56B4E9", "#009E73", "#E69F00", "#D55E00")
 GFAIDX_MARKERS = ("o", "^", "D", "v", "P")
 GBZ_BASE_STYLE = ("#CC79A7", "s", "-", True)
+GBZ_QUERY_STYLE = ("#D55E00", "D", "-", True)
 
 RAW_REQUIRED_COLUMNS = {
     "query_id",
@@ -170,6 +180,7 @@ SIZE_FIELDS = [
     "gfaidx_threads",
     "with_coords",
     "locations",
+    "failed_locations",
     "runs",
     "first_elapsed_mean",
     "first_elapsed_ci_low",
@@ -186,9 +197,15 @@ SIZE_FIELDS = [
     "warm_elapsed_vs_gbz_mean",
     "warm_elapsed_vs_gbz_ci_low",
     "warm_elapsed_vs_gbz_ci_high",
+    "warm_elapsed_vs_gbz_geomean",
+    "warm_elapsed_vs_gbz_geo_ci_low",
+    "warm_elapsed_vs_gbz_geo_ci_high",
     "warm_rss_vs_gbz_mean",
     "warm_rss_vs_gbz_ci_low",
     "warm_rss_vs_gbz_ci_high",
+    "warm_rss_vs_gbz_geomean",
+    "warm_rss_vs_gbz_geo_ci_low",
+    "warm_rss_vs_gbz_geo_ci_high",
     "output_nodes_mean",
     "output_nodes_ci_low",
     "output_nodes_ci_high",
@@ -222,6 +239,21 @@ REPETITION_FIELDS = [
     "elapsed_relative_to_run1_mean",
     "elapsed_relative_to_run1_ci_low",
     "elapsed_relative_to_run1_ci_high",
+]
+
+FAILURE_FIELDS = [
+    "query_id",
+    "locus_id",
+    "interval_bp",
+    "comparison",
+    "context_bp",
+    "tool",
+    "variant",
+    "failed_runs",
+    "runs",
+    "exit_statuses",
+    "reason",
+    "stderr_log",
 ]
 
 CACHE_FIELDS = [
@@ -274,8 +306,8 @@ def parse_number(value: str, field: str, integer: bool = False) -> float | int:
     return result
 
 
-def read_raw(path: Path) -> list[dict[str, object]]:
-    """Read successful raw executions and convert measurement columns."""
+def read_raw(path: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Read raw executions; return successful rows and failed rows separately."""
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
         missing = RAW_REQUIRED_COLUMNS.difference(reader.fieldnames or [])
@@ -283,12 +315,9 @@ def read_raw(path: Path) -> list[dict[str, object]]:
             raise ValueError(f"{path} is missing columns: {', '.join(sorted(missing))}")
 
         rows: list[dict[str, object]] = []
-        failed = 0
+        failed: list[dict[str, object]] = []
         for raw in reader:
             exit_status = int(parse_number(raw["exit_status"], "exit_status", True))
-            if exit_status != 0:
-                failed += 1
-                continue
             row: dict[str, object] = dict(raw)
             for field, default in RAW_OPTIONAL_COLUMNS.items():
                 if not row.get(field):
@@ -296,6 +325,14 @@ def read_raw(path: Path) -> list[dict[str, object]]:
             # Legacy tables stored the variant label in `tool`.
             if not row["variant"]:
                 row["variant"] = row["tool"]
+            if exit_status != 0:
+                # A failed execution has no output measurements; keep only what
+                # is needed to report it as NA.
+                row["exit_status"] = exit_status
+                for field in ("interval_bp", "run_index"):
+                    row[field] = int(parse_number(raw[field], field, True))
+                failed.append(row)
+                continue
             for field in (
                 "start",
                 "end",
@@ -313,11 +350,82 @@ def read_raw(path: Path) -> list[dict[str, object]]:
             )
             rows.append(row)
 
-    if failed:
-        print(f"warning: ignored {failed} failed raw execution(s)", file=sys.stderr)
     if not rows:
         raise ValueError(f"{path} contains no successful executions")
-    return rows
+    return rows, failed
+
+
+def failure_reason(row: dict[str, object]) -> str:
+    """Classify a failed execution from its exit status and stderr log."""
+    status = int(row["exit_status"])
+    text = ""
+    stderr_log = Path(str(row.get("stderr_log") or ""))
+    if stderr_log.is_file():
+        with stderr_log.open("r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()[-65536:]
+    if "heap out of memory" in text:
+        return "JavaScript heap out of memory"
+    if "Invalid string length" in text:
+        return "JavaScript string length limit"
+    if status > 128:
+        return f"killed by signal {status - 128}"
+    return f"exit status {status}"
+
+
+def location_key(row: dict[str, object]) -> tuple[str, str, str, str]:
+    """Identify one query location of one measured configuration."""
+    return (str(row["query_id"]),) + series_key(row)
+
+
+def build_failure_rows(
+    rows: list[dict[str, object]], failed: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Summarize every location that had at least one failed execution."""
+    runs: dict[tuple[str, str, str, str], int] = defaultdict(int)
+    for row in rows:
+        runs[location_key(row)] += 1
+    grouped: dict[tuple[str, str, str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in failed:
+        grouped[location_key(row)].append(row)
+
+    output: list[dict[str, object]] = []
+    for key, group in sorted(
+        grouped.items(),
+        key=lambda item: (
+            item[0][0],
+            comparison_sort_key(item[0][1]),
+            context_sort_key(item[0][2]),
+            variant_sort_key(item[0][3]),
+        ),
+    ):
+        group.sort(key=lambda row: int(row["run_index"]))
+        output.append(
+            {
+                "query_id": key[0],
+                "locus_id": group[0]["locus_id"],
+                "interval_bp": group[0]["interval_bp"],
+                "comparison": key[1],
+                "context_bp": key[2],
+                "tool": group[0]["tool"],
+                "variant": key[3],
+                "gfaidx_threads": group[0]["gfaidx_threads"],
+                "with_coords": group[0]["with_coords"],
+                "failed_runs": len(group),
+                "runs": len(group) + runs[key],
+                "exit_statuses": ",".join(
+                    str(value) for value in sorted({int(row["exit_status"]) for row in group})
+                ),
+                "reason": "; ".join(sorted({failure_reason(row) for row in group})),
+                "stderr_log": group[0].get("stderr_log", "NA"),
+            }
+        )
+    return output
+
+
+def failure_group(row: dict[str, object]) -> tuple[str, str, int, str]:
+    """Identify the interval-size group a location or failure belongs to."""
+    comparison, context, variant = series_key(row)
+    return comparison, context, int(row["interval_bp"]), variant
 
 
 def stable_seed(base_seed: int, key: str) -> int:
@@ -471,8 +579,12 @@ def hash_match(left: object, right: object) -> str:
 
 
 def is_gbz_base(row: dict[str, object]) -> bool:
-    """Recognize gbz-base rows from both current and legacy raw tables."""
-    return str(row["tool"]) == "gbz-base" or str(row["variant"]).startswith("gbz-base")
+    """Recognize the gbz-base baseline rows of current and legacy raw tables.
+
+    Legacy tables stored the variant label `gbz-base` in `tool`. gbz-base-query
+    is not a baseline: like a gfaidx variant it is compared with gbz-base-all.
+    """
+    return str(row["tool"]) == "gbz-base"
 
 
 def build_gbz_index(
@@ -545,6 +657,28 @@ def add_stats(
     row[f"{prefix}_ci_high"] = high
 
 
+def add_geo_stats(
+    row: dict[str, object],
+    prefix: str,
+    values: Iterable[float],
+    samples: int,
+    seed: int,
+    key: str,
+) -> None:
+    """Add `<prefix>_geomean/geo_ci_low/geo_ci_high` fields to a summary row.
+
+    The mean and bootstrap interval are taken over log ratios and transformed
+    back, so a 10x faster and a 10x slower location cancel out instead of the
+    slower one dominating the arithmetic mean.
+    """
+    center, low, high = mean_and_ci(
+        (math.log(value) for value in values if value > 0), samples, seed, key
+    )
+    row[f"{prefix}_geomean"] = None if center is None else math.exp(center)
+    row[f"{prefix}_geo_ci_low"] = None if low is None else math.exp(low)
+    row[f"{prefix}_geo_ci_high"] = None if high is None else math.exp(high)
+
+
 def match_fraction(parity: list[dict[str, object]], field: str) -> str:
     """Summarize yes/no parity values as `matches/compared`, or NA."""
     compared = [row[field] for row in parity if row[field] in ("yes", "no")]
@@ -575,14 +709,22 @@ def location_ratios(
 def build_size_rows(
     locations: list[dict[str, object]],
     parity_rows: list[dict[str, object]],
+    failure_rows: list[dict[str, object]],
     samples: int,
     seed: int,
 ) -> list[dict[str, object]]:
-    """Aggregate first and warm per-location values by interval length."""
+    """Aggregate first and warm per-location values by interval length.
+
+    Statistics cover the successful locations only; `failed_locations` says how
+    many locations of the size were NA, and a size where every location failed
+    is still listed, with NA statistics.
+    """
     grouped: dict[tuple[str, str, int, str], list[dict[str, object]]] = defaultdict(list)
     for location in locations:
-        comparison, context, variant = series_key(location)
-        grouped[(comparison, context, int(location["interval_bp"]), variant)].append(location)
+        grouped[failure_group(location)].append(location)
+    failures: dict[tuple[str, str, int, str], list[dict[str, object]]] = defaultdict(list)
+    for failure in failure_rows:
+        failures[failure_group(failure)].append(failure)
     parity_groups: dict[tuple[str, str, int, str], list[dict[str, object]]] = defaultdict(list)
     for parity in parity_rows:
         parity_groups[
@@ -614,6 +756,7 @@ def build_size_rows(
             "gfaidx_threads": group[0]["gfaidx_threads"],
             "with_coords": group[0]["with_coords"],
             "locations": len(group),
+            "failed_locations": len(failures.get((comparison, context, interval_bp, variant), [])),
             "runs": ",".join(str(value) for value in sorted({int(x["repetitions"]) for x in group})),
         }
         key = f"size:{comparison}:{context}:{interval_bp}:{variant}"
@@ -660,22 +803,16 @@ def build_size_rows(
         # Ratios are formed per location before averaging, so a slow region
         # does not dominate the relative cost estimate.
         paired = not is_gbz_base(group[0]) and comparison in PAIRED_COMPARISONS
-        add_stats(
-            row,
-            "warm_elapsed_vs_gbz",
-            location_ratios(group, gbz_index, "warm_median_elapsed_seconds") if paired else [],
-            samples,
-            seed,
-            key + ":elapsed_vs_gbz",
+        elapsed_ratios = (
+            location_ratios(group, gbz_index, "warm_median_elapsed_seconds") if paired else []
         )
-        add_stats(
-            row,
-            "warm_rss_vs_gbz",
-            location_ratios(group, gbz_index, "warm_median_max_rss_kb") if paired else [],
-            samples,
-            seed,
-            key + ":rss_vs_gbz",
+        rss_ratios = location_ratios(group, gbz_index, "warm_median_max_rss_kb") if paired else []
+        add_stats(row, "warm_elapsed_vs_gbz", elapsed_ratios, samples, seed, key + ":elapsed_vs_gbz")
+        add_geo_stats(
+            row, "warm_elapsed_vs_gbz", elapsed_ratios, samples, seed, key + ":elapsed_vs_gbz_geo"
         )
+        add_stats(row, "warm_rss_vs_gbz", rss_ratios, samples, seed, key + ":rss_vs_gbz")
+        add_geo_stats(row, "warm_rss_vs_gbz", rss_ratios, samples, seed, key + ":rss_vs_gbz_geo")
         for field in ("output_nodes", "output_edges", "output_paths", "output_bytes"):
             add_stats(
                 row,
@@ -689,6 +826,34 @@ def build_size_rows(
         row["node_set_matches"] = match_fraction(parity, "node_set_match")
         row["reference_walk_matches"] = match_fraction(parity, "reference_walk_match")
         output.append(row)
+
+    for (comparison, context, interval_bp, variant), group in failures.items():
+        if (comparison, context, interval_bp, variant) in grouped:
+            continue
+        output.append(
+            {
+                "comparison": comparison,
+                "context_bp": context,
+                "interval_bp": interval_bp,
+                "tool": group[0]["tool"],
+                "variant": variant,
+                "gfaidx_threads": group[0]["gfaidx_threads"],
+                "with_coords": group[0]["with_coords"],
+                "locations": 0,
+                "failed_locations": len(group),
+                "runs": "NA",
+                "node_set_matches": "NA",
+                "reference_walk_matches": "NA",
+            }
+        )
+    output.sort(
+        key=lambda row: (
+            comparison_sort_key(row["comparison"]),
+            context_sort_key(row["context_bp"]),
+            int(row["interval_bp"]),
+            variant_sort_key(str(row["variant"])),
+        )
+    )
     return output
 
 
@@ -854,7 +1019,9 @@ def parse_gfaidx_variant(variant: str) -> tuple[str | None, int] | None:
 
 
 def variant_sort_key(variant: str) -> tuple[int, int, int, str]:
-    """Order gbz-base first, then gfaidx variants by kind and thread count."""
+    """Order gbz-base first, then gbz-base-query, then gfaidx by kind and threads."""
+    if variant.startswith("gbz-base-query"):
+        return 0, 1, 0, variant
     if variant.startswith("gbz-base"):
         return 0, 0, 0, variant
     parsed = parse_gfaidx_variant(variant)
@@ -882,7 +1049,9 @@ def build_variant_styles(variants: list[str]) -> dict[str, tuple[str, str, str, 
     styles: dict[str, tuple[str, str, str, bool]] = {}
     for variant in variants:
         parsed = parse_gfaidx_variant(variant)
-        if variant.startswith("gbz-base"):
+        if variant.startswith("gbz-base-query"):
+            styles[variant] = GBZ_QUERY_STYLE
+        elif variant.startswith("gbz-base"):
             styles[variant] = GBZ_BASE_STYLE
         elif parsed is not None:
             kind, threads = parsed
@@ -1483,6 +1652,217 @@ def plot_comparison(
         )
 
 
+# Overview figure: every tool and mode in one figure per context and gfaidx
+# thread count. Hue encodes what was extracted, so the two tools producing the
+# same output share a color; line style and marker encode the tool. The four
+# hues pass a colorblind and normal-vision separation check on every pair.
+OVERVIEW_SERIES = (
+    # (variant, or a gfaidx kind expanded with the thread count; output class; label)
+    ("gbz-base-ref", "reference", "gbz-base --reference-only"),
+    ("gbz-base-all", "anonymous", "gbz-base, all haplotypes (unnamed walks)"),
+    ("gbz-base-query-resolved", "named", "gbz-base-query + haplotype index, all haplotypes (named)"),
+    ("ref-coords", "reference", "gfaidx --mode reference --with_coords"),
+    ("bfs", "anonymous", "gfaidx --mode bfs (no coordinates)"),
+    ("bfs-coords", "named", "gfaidx --mode bfs --with_coords (named)"),
+    ("span-coords", "span", "gfaidx --mode all --with_coords (haplotype spans, no context)"),
+)
+OVERVIEW_CLASS_COLORS = {
+    "reference": "#2a78d6",
+    "anonymous": "#eb6834",
+    "named": "#1baf7a",
+    "span": "#4a3aa7",
+}
+OVERVIEW_TOOL_STYLES = {
+    # tool: (line style, marker)
+    "gfaidx": ("-", "o"),
+    "gbz-base": ("--", "s"),
+    "gbz-base-query": ("--", "D"),
+}
+OVERVIEW_INK = {"primary": "#0b0b0b", "secondary": "#52514e", "muted": "#898781"}
+OVERVIEW_GRID = "#e1e0d9"
+OVERVIEW_AXIS = "#c3c2b7"
+
+
+def overview_series(threads: int) -> list[tuple[str, str, str, str]]:
+    """Return (variant, tool, output class, label) for one gfaidx thread count."""
+    series = []
+    for name, output_class, label in OVERVIEW_SERIES:
+        if name.startswith("gbz-base-query"):
+            series.append((name, "gbz-base-query", output_class, label))
+        elif name.startswith("gbz-base"):
+            series.append((name, "gbz-base", output_class, label))
+        else:
+            suffix = "thread" if threads == 1 else "threads"
+            series.append(
+                (f"gfaidx-{name}-{threads}t", "gfaidx", output_class, f"{label}, {threads} {suffix}")
+            )
+    return series
+
+
+def plot_overview(size_rows: list[dict[str, object]], plot_dir: Path, formats: list[str]) -> None:
+    """Draw time and memory of every variant together, first and warm runs.
+
+    One figure per context and gfaidx thread count. A variant is drawn only at
+    sizes where every location succeeded; a size with failed locations gets an
+    x at the top of the panel with the number of failed locations.
+    """
+    from matplotlib import pyplot as plt
+    from matplotlib import transforms
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter
+
+    contexts = sorted(
+        {str(row["context_bp"]) for row in size_rows if str(row["context_bp"]) != "NA"},
+        key=context_sort_key,
+    )
+    thread_counts = sorted(
+        {
+            parsed[1]
+            for parsed in (parse_gfaidx_variant(str(row["variant"])) for row in size_rows)
+            if parsed is not None
+        }
+    )
+    by_variant: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in size_rows:
+        by_variant[(str(row["variant"]), str(row["context_bp"]))].append(row)
+    sizes = sorted({int(row["interval_bp"]) for row in size_rows})
+    panels = (
+        ("first_elapsed", "First execution: wall time", "Wall time (s)", 1.0),
+        ("first_rss_kb", "First execution: peak memory", "Peak RSS (GiB)", 1024.0 * 1024.0),
+        ("warm_elapsed", "Warm (median of runs 2..N): wall time", "Wall time (s)", 1.0),
+        ("warm_rss_kb", "Warm (median of runs 2..N): peak memory", "Peak RSS (GiB)", 1024.0 * 1024.0),
+    )
+
+    for context in contexts:
+        for threads in thread_counts or [1]:
+            series = [
+                item
+                for item in overview_series(threads)
+                if by_variant.get((item[0], "NA" if item[0].startswith("gfaidx-span") else context))
+            ]
+            if not series:
+                continue
+            figure, axes_grid = plt.subplots(2, 2, figsize=(11.0, 8.2), sharex=True)
+            for panel_index, (axis, (prefix, title, ylabel, scale)) in enumerate(
+                zip([axis for row in axes_grid for axis in row], panels)
+            ):
+                failures_at: dict[int, list[tuple[str, int, int]]] = defaultdict(list)
+                for variant, tool, output_class, _label in series:
+                    row_context = "NA" if variant.startswith("gfaidx-span") else context
+                    rows = sorted(
+                        by_variant[(variant, row_context)], key=lambda row: int(row["interval_bp"])
+                    )
+                    xs, ys, low, high = [], [], [], []
+                    for row in rows:
+                        failed = int(row.get("failed_locations") or 0)
+                        if failed:
+                            failures_at[int(row["interval_bp"])].append(
+                                (output_class, failed, failed + int(row["locations"]))
+                            )
+                        xs.append(int(row["interval_bp"]))
+                        # NaN breaks the line, so it never bridges a failed size.
+                        if failed or row.get(f"{prefix}_mean") is None:
+                            ys.append(math.nan)
+                            low.append(0.0)
+                            high.append(0.0)
+                            continue
+                        center, (below, above) = error_values(row, prefix, scale)
+                        ys.append(center)
+                        low.append(below)
+                        high.append(above)
+                    linestyle, marker = OVERVIEW_TOOL_STYLES[tool]
+                    color = OVERVIEW_CLASS_COLORS[output_class]
+                    axis.errorbar(
+                        xs, ys, yerr=[low, high], color=color, linestyle=linestyle,
+                        marker=marker, markersize=5.5, markeredgecolor="white",
+                        markeredgewidth=0.9, linewidth=1.6, elinewidth=0.9, capsize=2,
+                        zorder=3,
+                    )
+                axis.set_xscale("log")
+                axis.set_yscale("log")
+                if failures_at:
+                    bottom, top = axis.get_ylim()
+                    axis.set_ylim(bottom, top * 6.0)
+                    marks = transforms.blended_transform_factory(axis.transData, axis.transAxes)
+                    for interval_bp, failed in failures_at.items():
+                        for offset, (output_class, count, total) in enumerate(failed):
+                            y = 0.955 - 0.085 * offset
+                            axis.plot(
+                                [interval_bp], [y], transform=marks, marker="x",
+                                markersize=7, markeredgewidth=1.8, linestyle="none",
+                                color=OVERVIEW_CLASS_COLORS[output_class], clip_on=False,
+                                zorder=4,
+                            )
+                            axis.text(
+                                interval_bp, y - 0.045, f"{count}/{total}", transform=marks,
+                                ha="center", va="top", fontsize=7,
+                                color=OVERVIEW_INK["secondary"],
+                            )
+                axis.xaxis.set_major_locator(FixedLocator([size for size in sizes]))
+                axis.xaxis.set_major_formatter(
+                    FuncFormatter(lambda value, _pos: format_bp(value).replace(" ", "\u2009"))
+                )
+                axis.xaxis.set_minor_formatter(NullFormatter())
+                axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:g}"))
+                axis.yaxis.set_minor_formatter(NullFormatter())
+                axis.grid(True, which="major", color=OVERVIEW_GRID, linewidth=0.6)
+                axis.set_axisbelow(True)
+                for side in ("top", "right"):
+                    axis.spines[side].set_visible(False)
+                for side in ("left", "bottom"):
+                    axis.spines[side].set_color(OVERVIEW_AXIS)
+                axis.tick_params(colors=OVERVIEW_INK["muted"], labelcolor=OVERVIEW_INK["secondary"],
+                                 labelsize=8)
+                axis.set_title(title, loc="left", fontsize=10, color=OVERVIEW_INK["primary"])
+                axis.text(-0.13, 1.04, "abcd"[panel_index], transform=axis.transAxes,
+                          fontsize=12, fontweight="bold", color=OVERVIEW_INK["primary"])
+                axis.set_ylabel(ylabel, color=OVERVIEW_INK["secondary"], fontsize=9)
+                if panel_index >= 2:
+                    axis.set_xlabel("Requested interval length", color=OVERVIEW_INK["secondary"],
+                                    fontsize=9)
+
+            # Legend columns: gbz-base tools on the left, gfaidx on the right, so
+            # each row pairs the outputs that share a color.
+            gbz_handles, gfaidx_handles = [], []
+            for variant, tool, output_class, label in series:
+                linestyle, marker = OVERVIEW_TOOL_STYLES[tool]
+                (gfaidx_handles if tool == "gfaidx" else gbz_handles).append(
+                    Line2D([], [], color=OVERVIEW_CLASS_COLORS[output_class],
+                           linestyle=linestyle, marker=marker, markersize=5.5,
+                           markeredgecolor="white", linewidth=1.6, label=label)
+                )
+            if any(int(row.get("failed_locations") or 0) for row in size_rows):
+                gbz_handles.append(
+                    Line2D([], [], color=OVERVIEW_INK["secondary"], marker="x", linestyle="none",
+                           markersize=7, markeredgewidth=1.8,
+                           label="NA: failed at k of n loci (not plotted at that size)"),
+                )
+            # Matplotlib fills legend columns top to bottom; pad the shorter one.
+            rows_per_column = max(len(gbz_handles), len(gfaidx_handles))
+            for column in (gbz_handles, gfaidx_handles):
+                column.extend(
+                    Line2D([], [], linestyle="none", label=" ")
+                    for _ in range(rows_per_column - len(column))
+                )
+            figure.legend(
+                handles=gbz_handles + gfaidx_handles, loc="lower center", ncol=2,
+                frameon=False, fontsize=8.5,
+                bbox_to_anchor=(0.5, -0.02 - 0.028 * rows_per_column),
+                labelcolor=OVERVIEW_INK["primary"],
+            )
+            suffix = "thread" if threads == 1 else "threads"
+            figure.suptitle(
+                f"Interval extraction, context {format_bp(float(context))}, "
+                f"gfaidx {threads} {suffix}; mean and 95% CI across loci",
+                fontsize=11, color=OVERVIEW_INK["primary"],
+            )
+            figure.tight_layout()
+            save_figure(
+                figure, plot_dir / f"overview_time_memory_{context_slug(context)}_{threads}t", formats
+            )
+            plt.close(figure)
+
+
 def main() -> int:
     """Build TSV summaries and publication-ready diagnostic plots."""
     args = parse_args()
@@ -1494,13 +1874,28 @@ def main() -> int:
     if not formats or any("/" in item or "\\" in item for item in formats):
         raise ValueError("--formats must contain simple comma-separated extensions")
 
-    raw_rows = read_raw(raw_path)
-    styles = build_variant_styles(ordered_variants(raw_rows))
-    locations = build_location_rows(raw_rows)
+    raw_rows, failed_runs = read_raw(raw_path)
+    failure_rows = build_failure_rows(raw_rows, failed_runs)
+    # Every repetition of a location that failed at least once is NA, so no
+    # partial location enters an average.
+    failed_keys = {location_key(row) for row in failed_runs}
+    measured_rows = [row for row in raw_rows if location_key(row) not in failed_keys]
+    if not measured_rows:
+        raise ValueError(f"{raw_path} contains no location without failures")
+    if failure_rows:
+        print(
+            f"note: {len(failed_runs)} failed execution(s) at {len(failure_rows)} "
+            f"location(s) are reported as NA; see {table_dir / 'failures_by_query.tsv'}",
+            file=sys.stderr,
+        )
+    styles = build_variant_styles(ordered_variants(raw_rows + failed_runs))
+    locations = build_location_rows(measured_rows)
     parity_rows = build_parity_rows(locations)
-    size_rows = build_size_rows(locations, parity_rows, args.bootstrap_samples, args.seed)
+    size_rows = build_size_rows(
+        locations, parity_rows, failure_rows, args.bootstrap_samples, args.seed
+    )
     repetition_rows, cache_rows = build_repetition_rows(
-        raw_rows, args.bootstrap_samples, args.seed
+        measured_rows, args.bootstrap_samples, args.seed
     )
 
     write_table(table_dir / "location_summary.tsv", LOCATION_FIELDS, locations)
@@ -1508,6 +1903,16 @@ def main() -> int:
     write_table(table_dir / "size_summary.tsv", SIZE_FIELDS, size_rows)
     write_table(table_dir / "repetition_summary.tsv", REPETITION_FIELDS, repetition_rows)
     write_table(table_dir / "cache_summary.tsv", CACHE_FIELDS, cache_rows)
+    write_table(table_dir / "failures_by_query.tsv", FAILURE_FIELDS, failure_rows)
+
+    # Plots leave a variant out at any size where some location failed, rather
+    # than averaging over the locations that happened to succeed.
+    failed_groups = {failure_group(row) for row in failure_rows}
+    plot_sizes = [row for row in size_rows if failure_group(row) not in failed_groups]
+    plot_locations = [row for row in locations if failure_group(row) not in failed_groups]
+    plot_repetitions = [
+        row for row in repetition_rows if failure_group(row) not in failed_groups
+    ]
 
     mismatches = [
         row for row in parity_rows
@@ -1516,7 +1921,7 @@ def main() -> int:
     ]
     if mismatches:
         print(
-            f"warning: {len(mismatches)} gfaidx output(s) differ from gbz-base; "
+            f"warning: {len(mismatches)} output(s) differ from gbz-base; "
             f"see {table_dir / 'parity_by_query.tsv'}",
             file=sys.stderr,
         )
@@ -1526,11 +1931,12 @@ def main() -> int:
 
     matplotlib.use("Agg")
     plot_dir.mkdir(parents=True, exist_ok=True)
-    for comparison in sorted({str(row["comparison"]) for row in size_rows}, key=comparison_sort_key):
+    for comparison in sorted({str(row["comparison"]) for row in plot_sizes}, key=comparison_sort_key):
         plot_comparison(
-            comparison, locations, size_rows, repetition_rows, cache_rows,
+            comparison, plot_locations, plot_sizes, plot_repetitions, cache_rows,
             plot_dir, formats, styles,
         )
+<<<<<<< HEAD
     # One overview per context with every comparison that ran at it.
     for context in sorted({str(row["context_bp"]) for row in size_rows}, key=context_sort_key):
         if context == "NA":
@@ -1540,6 +1946,9 @@ def main() -> int:
             plot_dir / f"overview_{context_slug(context)}",
             f"gfaidx and gbz-base, {context_label(context)}", formats,
         )
+=======
+    plot_overview(size_rows, plot_dir, formats)
+>>>>>>> 69320343d3288b40e384af23de49677717a7cff4
 
     print(f"Wrote summary tables to {table_dir}")
     print(f"Wrote plots to {plot_dir}")
