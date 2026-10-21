@@ -18,10 +18,17 @@
 #   all_haplotypes   gbz-base --context N
 #                    gfaidx --mode bfs --context N            (matched work)
 #                    gfaidx --mode bfs --context N --with_coords (full output)
+#                    optional gbz-base-query --context N --haplotypes all
+#                        --resolve --haplotype-index IDX   (full output)
 #                    gbz-base writes non-reference haplotypes as anonymous
 #                    `unknown` walks without coordinates; gfaidx without
 #                    --with_coords does matching work, while --with_coords
 #                    adds sample names and coordinates for every subwalk.
+#                    gbz-base-query (@gmod/gbz-base, Node) with a
+#                    gbz-haplotype-index database also names every subwalk
+#                    and gives it coordinates. It is run with its defaults and
+#                    may fail on large outputs; such executions are recorded
+#                    with their exit status and the benchmark continues.
 #   haplotype_span   optional gfaidx --mode all --with_coords, gfaidx's own
 #                    haplotype-span selection; it has no gbz-base counterpart
 #                    and runs once per location without a context.
@@ -49,6 +56,8 @@ GFAIDX_BIN=""
 GBZ_BASE_BIN=""
 GFAIDX_GRAPH=""
 GBZ_DB=""
+GBZ_QUERY_BIN=""
+HAPLOTYPE_INDEX=""
 QUERY_TSV=""
 OUT_DIR="gfaidx_gbz_interval_benchmark"
 TIME_BIN="/usr/bin/time"
@@ -87,6 +96,10 @@ Options:
   --contexts LIST         Comma-separated context lengths in bases passed to
                           --context of both tools (default: 100)
   --gfaidx-threads LIST   Comma-separated gfaidx thread counts (default: 1,8)
+  --gbz-query-bin PATH    gbz-base-query executable (@gmod/gbz-base); with
+                          --haplotype-index adds the resolved all-haplotypes
+                          variant. Its failures are recorded, not fatal.
+  --haplotype-index PATH  gbz-haplotype-index database for --gbz-db
   --include-all-mode      Also time gfaidx --mode all --with_coords once per
                           interval; gfaidx-only, not paired with gbz-base
   --out-dir PATH          Output directory (default: gfaidx_gbz_interval_benchmark)
@@ -165,6 +178,14 @@ while [[ $# -gt 0 ]]; do
             QUERY_TSV=${2:-}
             shift 2
             ;;
+        --gbz-query-bin)
+            GBZ_QUERY_BIN=${2:-}
+            shift 2
+            ;;
+        --haplotype-index)
+            HAPLOTYPE_INDEX=${2:-}
+            shift 2
+            ;;
         --repeats)
             REPEATS=${2:-}
             shift 2
@@ -234,6 +255,12 @@ require_executable "$TIME_BIN"
 require_file "$GFAIDX_GRAPH"
 require_file "$GBZ_DB"
 require_file "$QUERY_TSV"
+if [[ -n "$GBZ_QUERY_BIN" || -n "$HAPLOTYPE_INDEX" ]]; then
+    [[ -n "$GBZ_QUERY_BIN" && -n "$HAPLOTYPE_INDEX" ]] || \
+        die "--gbz-query-bin and --haplotype-index must be given together"
+    require_executable "$GBZ_QUERY_BIN"
+    require_file "$HAPLOTYPE_INDEX"
+fi
 require_positive_integer "--repeats" "$REPEATS"
 require_positive_integer "--bootstrap-samples" "$BOOTSTRAP_SAMPLES"
 [[ "$SHUFFLE_SEED" =~ ^[0-9]+$ ]] || die "--shuffle-seed must be a non-negative integer"
@@ -291,6 +318,9 @@ for threads in "${GFAIDX_THREAD_VALUES[@]}"; do
     add_variant "gfaidx-ref-coords-${threads}t" gfaidx reference_only reference 1 "$threads"
 done
 add_variant gbz-base-all gbz-base all_haplotypes all NA NA
+if [[ -n "$GBZ_QUERY_BIN" ]]; then
+    add_variant gbz-base-query-resolved gbz-base-query all_haplotypes all 1 NA
+fi
 for threads in "${GFAIDX_THREAD_VALUES[@]}"; do
     add_variant "gfaidx-bfs-${threads}t" gfaidx all_haplotypes bfs 0 "$threads"
     add_variant "gfaidx-bfs-coords-${threads}t" gfaidx all_haplotypes bfs 1 "$threads"
@@ -424,6 +454,15 @@ printf '%s\n' \
     printf 'shuffle_seed\t%s\n' "$SHUFFLE_SEED"
     printf 'gfaidx_version\t%s\n' "$("$GFAIDX_BIN" --version 2>&1 | tr '\n' ' ')"
     printf 'gbz_base_version\t%s\n' "$("$GBZ_BASE_BIN" --version 2>&1 | tr '\n' ' ' || true)"
+    if [[ -n "$GBZ_QUERY_BIN" ]]; then
+        # gbz-base-query has no --version; read it from the package it belongs to.
+        gbz_query_package="$(dirname "$(readlink -f "$(command -v "$GBZ_QUERY_BIN")")")/../package.json"
+        printf 'gbz_query_binary\t%s\n' "$GBZ_QUERY_BIN"
+        printf 'gbz_query_version\t%s\n' "$(grep -m 1 '"version"' "$gbz_query_package" 2>/dev/null | tr -d ' ",' || echo NA)"
+        printf 'node_version\t%s\n' "$(node --version 2>/dev/null || echo NA)"
+        printf 'node_options\t%s\n' "${NODE_OPTIONS:-unset}"
+        printf 'haplotype_index\t%s\n' "$HAPLOTYPE_INDEX"
+    fi
 } > "$OUT_DIR/metadata.tsv"
 
 time_value() {
@@ -541,6 +580,18 @@ run_one_variant() {
         [[ "$context" == "NA" ]] || command+=(--context "$context")
         [[ "$with_coords" != "1" ]] || command+=(--with_coords)
         command+=(--threads "$gfaidx_threads")
+    elif [[ "$tool" == "gbz-base-query" ]]; then
+        command=(
+            "$GBZ_QUERY_BIN" "$GBZ_DB"
+            --haplotype-index "$HAPLOTYPE_INDEX"
+            --sample "$reference"
+            --contig "$contig"
+            --interval "${start}..${end}"
+            --context "$context"
+            --haplotypes all
+            --resolve
+            --format gfa
+        )
     else
         command=(
             "$GBZ_BASE_BIN" query
@@ -564,7 +615,8 @@ run_one_variant() {
     else
         "$TIME_BIN" -v -o "$time_log" "${command[@]}" \
             > "$output_gfa" 2> "$stderr_file" || exit_status=$?
-        # gbz-base writes the GFA to stdout, so no separate stdout log exists.
+        # gbz-base and gbz-base-query write the GFA to stdout, so no separate
+        # stdout log exists.
         stdout_file="NA"
     fi
 
@@ -586,8 +638,8 @@ run_one_variant() {
     output_bytes=$(file_size_bytes "$output_gfa")
     # Counts and parity values are computed after GNU time has finished, so
     # they never contribute to the measured wall time or memory.
-    local output_nodes output_edges output_paths node_hash
-    local reference_walks reference_walk_steps reference_walk_hash
+    local output_nodes=NA output_edges=NA output_paths=NA node_hash=NA
+    local reference_walks=NA reference_walk_steps=NA reference_walk_hash=NA
     local summary_cache="$SUMMARY_SCRATCH/${query_id}.${variant}.ctx${context}.tsv"
     (( exit_status != 0 )) || IFS=$'\t' read -r output_nodes output_edges output_paths \
         node_hash reference_walks reference_walk_steps reference_walk_hash \
@@ -615,8 +667,16 @@ run_one_variant() {
     if (( KEEP_OUTPUTS == 0 )); then
         rm -f "$output_gfa"
     fi
-    (( exit_status == 0 )) || \
-        die "$variant failed for $query_id (context $context) run $run_index; see $stderr_file"
+    if (( exit_status != 0 )); then
+        # gbz-base-query is benchmarked as shipped; a failure (for example a
+        # JavaScript heap or string-length limit on a large output) is a result
+        # and is reported as NA by the summarizer. Any other tool failing is a
+        # benchmark error.
+        [[ "$tool" == "gbz-base-query" ]] || \
+            die "$variant failed for $query_id (context $context) run $run_index; see $stderr_file"
+        printf '  %s failed with exit status %d; recorded as NA (see %s)\n' \
+            "$variant" "$exit_status" "$stderr_file"
+    fi
 }
 
 execution_position=0
