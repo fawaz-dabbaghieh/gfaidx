@@ -987,7 +987,7 @@ Current query-time memory behavior:
 
 ### Repeated gfaidx thread-scaling and gbz-base interval benchmark
 
-`scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
+`benchmark/scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
 multiple genomic locations for configurable gfaidx thread counts and gbz-base,
 records GNU `time -v` measurements, and generates first-execution, warm-cache,
 thread-scaling, and regional-variation summaries and plots. See

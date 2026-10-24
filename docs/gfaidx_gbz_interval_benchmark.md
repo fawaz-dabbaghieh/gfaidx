@@ -11,9 +11,9 @@ query is executed again.
 The benchmark is intentionally independent of the larger Snakemake workflow.
 It consists of:
 
-- `scripts/benchmark_gfaidx_gbz_intervals.sh`, which runs and measures queries
-- `scripts/summarize_gfaidx_gbz_intervals.py`, which summarizes and plots them
-- `scripts/gfaidx_gbz_intervals.example.tsv`, an example interval manifest
+- `benchmark/scripts/benchmark_gfaidx_gbz_intervals.sh`, which runs and measures queries
+- `benchmark/scripts/summarize_gfaidx_gbz_intervals.py`, which summarizes and plots them
+- `benchmark/scripts/gfaidx_gbz_intervals.example.tsv`, an example interval manifest
 
 ## Comparisons
 
@@ -54,7 +54,7 @@ A suggested framing for reporting the results:
 - the `gfaidx` and `gbz-base` executables
 - GNU `time`, normally `/usr/bin/time` on Linux (Homebrew installs it as
   `gtime` on macOS)
-- Python 3 for output counts and parity hashes (`scripts/gfa_output_parity.py`,
+- Python 3 for output counts and parity hashes (`benchmark/scripts/gfa_output_parity.py`,
   run once per query, context, and variant), plus Matplotlib for summaries and
   plots
 
@@ -103,11 +103,11 @@ use the same `locus_id` and center for all three sizes.
 
 ### Stratified manifests
 
-`scripts/make_benchmark_intervals.py` draws loci uniformly at random, either
+`benchmark/scripts/make_benchmark_intervals.py` draws loci uniformly at random, either
 genome-wide or from BED annotations, and writes every interval size around each
 center. Near a chromosome end, a large window is shifted inward, so it still
-contains the smaller windows of its locus. `scripts/make_hprc_chm13_intervals.sh` uses it to build the CHM13
-manifests in `scripts/intervals/`. It downloads the T2T centromere/satellite
+contains the smaller windows of its locus. `benchmark/scripts/make_hprc_chm13_intervals.sh` uses it to build the CHM13
+manifests in `benchmark/scripts/intervals/`. It downloads the T2T centromere/satellite
 annotation and the GIAB v3.3 stratifications, then samples 33 loci, each with
 windows of 1 kb, 10 kb, 100 kb, 1 Mb, 2 Mb, 5 Mb, and 10 Mb, in these strata:
 
@@ -128,7 +128,7 @@ for stratum in random named centromere_hor pericentromere acrocentric mhc kir vd
   mkdir -p results/strata/$stratum
   awk -F'\t' -v s="$stratum" 'NR == 1 || index($4, s "-") == 1' \
     results/raw_runs.tsv > results/strata/$stratum/raw_runs.tsv
-  python3 scripts/summarize_gfaidx_gbz_intervals.py \
+  python3 benchmark/scripts/summarize_gfaidx_gbz_intervals.py \
     --raw results/strata/$stratum/raw_runs.tsv --output-dir results/strata/$stratum
 done
 ```
@@ -143,13 +143,13 @@ The `output_paths` column shows how much haplotype content each locus has.
 Copy and edit the example manifest:
 
 ```bash
-cp scripts/gfaidx_gbz_intervals.example.tsv intervals.tsv
+cp benchmark/scripts/gfaidx_gbz_intervals.example.tsv intervals.tsv
 ```
 
 Run five repetitions per variant, interval, and context:
 
 ```bash
-scripts/benchmark_gfaidx_gbz_intervals.sh \
+benchmark/scripts/benchmark_gfaidx_gbz_intervals.sh \
   --gfaidx-bin /home/fawaz/projects/gfaidx/current_build/gfaidx \
   --gbz-base-bin /home/fawaz/tools/gbz-base/target/release/gbz-base \
   --gfaidx-graph /path/to/graph.indexed.gfa.gz \
@@ -213,7 +213,7 @@ Use `--no-plots` when Matplotlib is unavailable or when only raw measurements
 are wanted. The summaries can be generated later:
 
 ```bash
-python3 scripts/summarize_gfaidx_gbz_intervals.py \
+python3 benchmark/scripts/summarize_gfaidx_gbz_intervals.py \
   --raw /path/to/results/raw_runs.tsv \
   --output-dir /path/to/results
 ```
