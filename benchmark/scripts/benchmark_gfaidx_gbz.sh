@@ -41,16 +41,18 @@ OUT_DIR="gfaidx_gbz_benchmark"
 INTERVAL_QUERIES=(
     "chr1_148m_1kb|CHM13|chr1|148000000|148001000"
     "chr1_148m_10kb|CHM13|chr1|148000000|148010000"
-    "chr1_148m_100kb|CHM13|chr1|148000000|148100000"
+    "chr1_148m_100kb|CHM13|chr2|148000000|148100000"
     "chr1_148m_1mb|CHM13|chr1|148000000|149000000"
-    "chr1_148m_5mb|CHM13|chr1|148000000|153000000"
-    "chr1_148m_10mb|CHM13|chr1|148000000|158000000"
+    "chr1_148m_5mb|CHM13|chr3|148000000|153000000"
+    "chr1_148m_10mb|CHM13|chr4|5000000|10000000"
 )
 
 # Node queries from the example commands in the project notes.
 NODE_QUERIES=(
+    "node_629060_500kb|234832|500000"
     "node_629060_1mb|629060|1000000"
     "node_629060_10mb|629060|10000000"
+    "node_5_20mb|5|20000000"
 )
 
 # ---------------------------------------------------------------------------
