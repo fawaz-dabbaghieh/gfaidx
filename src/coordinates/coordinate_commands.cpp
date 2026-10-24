@@ -231,10 +231,10 @@ std::uint32_t parse_max_nodes(const std::string& value) {
                                    true);
 }
 
-std::optional<std::uint64_t> parse_haplotype_gap_bases(
-    const std::string& value) {
+std::optional<std::uint64_t> parse_bases_option(const std::string& value,
+                                                const std::string& flag) {
     // An empty parser default distinguishes an omitted flag from an explicit
-    // zero, which means that only directly adjacent anchor occurrences join.
+    // zero, which is meaningful for both --haplotype_gap and --context.
     if (value.empty()) return std::nullopt;
 
     std::string normalized = value;
@@ -262,12 +262,17 @@ std::optional<std::uint64_t> parse_haplotype_gap_bases(
 
     const auto amount = utils::parse_u64_strict(
         normalized.substr(0, normalized.size() - suffix_size),
-        "--haplotype_gap",
+        flag,
         true);
     if (amount > std::numeric_limits<std::uint64_t>::max() / multiplier) {
-        throw std::runtime_error("--haplotype_gap is too large");
+        throw std::runtime_error(flag + " is too large");
     }
     return amount * multiplier;
+}
+
+std::optional<std::uint64_t> parse_haplotype_gap_bases(
+    const std::string& value) {
+    return parse_bases_option(value, "--haplotype_gap");
 }
 
 ParsedRegion parse_region(const std::string& region) {
@@ -465,7 +470,7 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--max_nodes")
       .default_value(std::string("10000"))
       .nargs(1)
-      .help("maximum total seeds plus BFS nodes; only used with --mode bfs");
+      .help("maximum total seeds plus BFS nodes; only used with --mode bfs without --context");
 
     parser.add_argument("--threads")
       .default_value(std::string("1"))
@@ -475,18 +480,30 @@ void configure_get_region_parser(argparse::ArgumentParser& parser) {
     // --mode is the primary selection switch. It replaces the older
     // --all_haplotypes boolean (kept below as a deprecated alias for
     // "--mode all") with an explicit, mutually exclusive three-way choice:
-    //   bfs       - explore a neighborhood up to --max_nodes (old default)
+    //   bfs       - graph neighborhood: up to --max_nodes, or every node within
+    //               --context bp; emits every P/W run inside it
     //   all       - exact reference span + anchor-bounded spans for every
-    //               other haplotype, via the .pdx posting table (new default)
-    //   reference - the same exact reference span, but skip the posting
-    //               scan entirely and never resolve any other haplotype
+    //               other haplotype, via the .pdx posting table (default)
+    //   reference - the --context subgraph, emitting only the queried
+    //               reference walk (gbz-base --reference-only)
     parser.add_argument("--mode")
       .default_value(std::string("all"))
       .nargs(1)
-      .help("selection mode: 'bfs' (graph neighborhood via --max_nodes), "
-            "'all' (exact reference span plus anchor-bounded spans for every "
-            "other haplotype; default), or 'reference' (exact reference span "
-            "only, skipping every other haplotype for speed)");
+      .help("selection mode: 'bfs' (graph neighborhood via --max_nodes or "
+            "--context, with every P/W run inside it), 'all' (exact reference "
+            "span plus anchor-bounded spans for every other haplotype; "
+            "default), or 'reference' (the --context subgraph with only the "
+            "queried reference walk)");
+
+    // --context mirrors gbz-base's query context so the two tools can extract
+    // identical subgraphs: every node with a side within this many bases of
+    // the reference interval.
+    parser.add_argument("--context")
+      .default_value(std::string(""))
+      .nargs(1)
+      .help("base-pair context around the interval for --mode reference "
+            "(default 100) or --mode bfs (replaces --max_nodes); accepts "
+            "bases or bp/kb/mb/gb suffixes");
 
     // --all_haplotypes is kept as a deprecated alias for "--mode all" so
     // existing scripts keep working. It is rejected if it disagrees with an
@@ -560,6 +577,8 @@ int run_get_region(const argparse::ArgumentParser& program) {
                                   : gfaidx::RegionMode::bfs;
         const auto haplotype_gap_bases = parse_haplotype_gap_bases(
             program.get<std::string>("haplotype_gap"));
+        const auto context_bases = parse_bases_option(
+            program.get<std::string>("context"), "--context");
 
         auto cdx_path = program.get<std::string>("cdx");
         auto pdx_path = program.get<std::string>("pdx");
@@ -621,6 +640,14 @@ int run_get_region(const argparse::ArgumentParser& program) {
             // so in both cases the option would silently do nothing.
             throw std::runtime_error("--haplotype_gap requires --mode all");
         }
+        if (context_bases.has_value() && mode == "all") {
+            // --mode all is sized by haplotype spans; a distance bound would
+            // silently do nothing there.
+            throw std::runtime_error("--context requires --mode reference or --mode bfs");
+        }
+        if (context_bases.has_value() && program.is_used("max_nodes")) {
+            throw std::runtime_error("--context and --max_nodes are mutually exclusive");
+        }
         if (haplotype_gap_bases.has_value() &&
             !file_exists(lnx_path.c_str())) {
             throw std::runtime_error(
@@ -681,6 +708,7 @@ int run_get_region(const argparse::ArgumentParser& program) {
         options.include_coordinates = with_coords;
         options.mode = region_mode;
         options.haplotype_gap = haplotype_gap_bases;
+        options.context = context_bases;
 
         std::ofstream out(output_gfa);
         if (!out) {

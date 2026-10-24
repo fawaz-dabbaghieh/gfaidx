@@ -1216,6 +1216,6 @@ phase's per-worker memory tax *and* provide the per-thread I/O primitive
    (3) — same reduction-shaped pattern, lower priority since it was smaller
    in every measurement so far.
 5. Re-run the gfaidx-vs-gbz-base interval benchmark
-   (`scripts/benchmark_gfaidx_gbz_intervals.sh`, results captured under
+   (`benchmark/scripts/benchmark_gfaidx_gbz_intervals.sh`, results captured under
    `~/gfaidx_benchmark/run/` on the benchmarking machine) after each step to
    quantify the improvement on both the pggb chr1 and mc graphs.

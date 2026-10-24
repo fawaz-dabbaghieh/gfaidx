@@ -272,12 +272,15 @@ fi
 grep -F -- "--mode must be 'bfs', 'all', or 'reference'" \
     "$work_dir/mode_invalid.stderr" >/dev/null
 
-# --mode reference resolves only the exact reference run and none of the
-# other three haplotypes. Q, R, X, and Y only exist in this fixture because of
-# insertion/reverse/repeatnoise, so they must be absent from the node set.
+# --mode reference with --context 0 selects only the nodes on the exact
+# reference run and emits only that run, like gbz-base --context 0
+# --reference-only. Q, R, X, and Y are linked to the run but lie one base away,
+# so they must be absent from the node set. tests/test_region_context.sh covers
+# nonzero contexts.
 "$gfaidx" get_region "$indexed_gfa" ref:1-4 \
     "$work_dir/mode_reference.gfa" \
     --mode reference \
+    --context 0 \
     --with_coords >/dev/null
 awk -F '\t' '$1 == "P" {print $2 "\t" $3}' "$work_dir/mode_reference.gfa" \
     >"$work_dir/actual_reference_only_paths.tsv"

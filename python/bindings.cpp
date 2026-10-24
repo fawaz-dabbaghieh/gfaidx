@@ -46,12 +46,14 @@ gfaidx::RegionOptions region_options(std::uint32_t max_nodes,
                                      bool include_coordinates,
                                      std::uint32_t threads,
                                      gfaidx::RegionMode mode,
-                                     std::optional<std::uint64_t> haplotype_gap) {
+                                     std::optional<std::uint64_t> haplotype_gap,
+                                     std::optional<std::uint64_t> context) {
     gfaidx::RegionOptions result;
     static_cast<gfaidx::ExtractionOptions&>(result) =
         extraction_options(max_nodes, include_paths, include_coordinates, threads);
     result.mode = mode;
     result.haplotype_gap = haplotype_gap;
+    result.context = context;
     return result;
 }
 
@@ -265,12 +267,13 @@ PYBIND11_MODULE(_pygfaidx, module) {
                 gfaidx::RegionMode mode,
                 std::optional<std::uint64_t> haplotype_gap,
                 std::uint32_t max_nodes, bool include_paths,
-                bool include_coordinates, std::uint32_t threads) {
+                bool include_coordinates, std::uint32_t threads,
+                std::optional<std::uint64_t> context) {
                  return graph.get_region(std::move(reference),
                      std::move(sequence), begin, end,
                      region_options(max_nodes, include_paths,
                                     include_coordinates, threads, mode,
-                                    haplotype_gap));
+                                    haplotype_gap, context));
              },
              py::arg("reference"), py::arg("sequence"), py::arg("begin"),
              py::arg("end"), py::arg("mode") = gfaidx::RegionMode::bfs,
@@ -278,6 +281,7 @@ PYBIND11_MODULE(_pygfaidx, module) {
              py::arg("max_nodes") = 10000, py::arg("include_paths") = true,
              py::arg("include_coordinates") = false,
              py::arg("threads") = 1,
+             py::arg("context") = py::none(),
              py::call_guard<py::gil_scoped_release>())
         .def("get_path_subgraph",
              [](const gfaidx::IndexedGraph& graph, std::string key,
@@ -314,9 +318,10 @@ PYBIND11_MODULE(_pygfaidx, module) {
                 py::object destination, gfaidx::RegionMode mode,
                 std::optional<std::uint64_t> haplotype_gap,
                 std::uint32_t max_nodes, bool include_paths,
-                bool include_coordinates, std::uint32_t threads) {
+                bool include_coordinates, std::uint32_t threads,
+                std::optional<std::uint64_t> context) {
                  auto options = region_options(max_nodes, include_paths,
-                     include_coordinates, threads, mode, haplotype_gap);
+                     include_coordinates, threads, mode, haplotype_gap, context);
                  stream_to_python(destination, [&](const auto& visitor) {
                      graph.stream_region(reference, sequence, begin, end,
                                          visitor, options);
@@ -328,5 +333,6 @@ PYBIND11_MODULE(_pygfaidx, module) {
              py::arg("haplotype_gap") = py::none(),
              py::arg("max_nodes") = 10000, py::arg("include_paths") = true,
              py::arg("include_coordinates") = false,
-             py::arg("threads") = 1);
+             py::arg("threads") = 1,
+             py::arg("context") = py::none());
 }

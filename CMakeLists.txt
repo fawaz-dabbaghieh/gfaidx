@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(gfaidx VERSION 2.0.0 LANGUAGES C CXX)
+project(gfaidx VERSION 2.1.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -173,6 +173,17 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 $<TARGET_FILE:gfaidx_cli>
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_paths.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_coordinate_paths.tsv
+    )
+
+    # Base-pair --context selection must follow gbz-base's distance rules:
+    # partial end nodes, long variants split across nodes, and single-step
+    # haplotype fragments.
+    add_test(
+        NAME region_context
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_region_context.sh
+                $<TARGET_FILE:gfaidx_cli>
+                ${CMAKE_SOURCE_DIR}/tests/data/context_paths.gfa
     )
 
     # Verify that BFS subgraph extraction can emit coordinate-bearing P and W

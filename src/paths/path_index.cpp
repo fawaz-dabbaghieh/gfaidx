@@ -1628,7 +1628,8 @@ SelectedNodeNameLookup::SelectedNodeNameLookup(
 }
 
 std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
-                                                   const std::vector<std::uint32_t>& node_ids) {
+                                                   const std::vector<std::uint32_t>& node_ids,
+                                                   const bool keep_single_steps) {
     std::unordered_set<std::uint32_t> unique_nodes;
     unique_nodes.reserve(node_ids.size());
 
@@ -1666,7 +1667,7 @@ std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
             const auto step_count = end_step - start_step + 1;
             // Suppress singleton runs because they are valid formally but tend
             // to confuse users and graph visualizers more than they help.
-            if (step_count < 2) {
+            if (step_count < 2 && !keep_single_steps) {
                 return;
             }
             runs.push_back(SubpathRun{entry.first, start_step, step_count});

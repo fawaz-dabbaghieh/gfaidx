@@ -433,9 +433,14 @@ Coordinates are 0-based and half-open: `[begin, end)`. Region queries require
 a `.pdx` because node ranks must be translated back to names.
 
 - `RegionMode::bfs` uses all reference-overlapping nodes as BFS seeds and
-  expands until `max_nodes`.
+  expands until `max_nodes`. When `context` is set, it instead keeps every node
+  within `context` bases of the interval (gbz-base's `--context` rules) and
+  emits every P/W run inside that subgraph, including single-step runs.
 - `RegionMode::all_haplotypes` avoids BFS and selects matching P/W runs that
   contain the reference interval nodes.
+- `RegionMode::reference` extracts the same `context` subgraph (default
+  `kDefaultRegionContext`, 100 bp) but emits only the queried reference path,
+  like gbz-base's `--reference-only`.
 - `haplotype_gap` limits how many unshared bases may bridge matches in
   all-haplotype mode. It requires a `.lnx`.
 
