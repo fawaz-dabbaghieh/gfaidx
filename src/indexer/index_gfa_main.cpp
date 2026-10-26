@@ -243,6 +243,15 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         log_map_stats("Node id map stats", node_id_map);
         log_memory("After edge list generation");
 
+        // Louvain community detection needs at least one edge, and crashes on
+        // an empty edge list, so stop with an explanation instead.
+        if (N_EDGES == 0) {
+            throw std::runtime_error(
+                "The GFA " + input_gfa + " has no L lines (edges). gfaidx splits "
+                "the graph into communities along its edges, so it cannot index "
+                "a graph without links.");
+        }
+
         /*
          * sorting the edge list with linux sort
          */

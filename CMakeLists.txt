@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(gfaidx VERSION 2.1.0 LANGUAGES C CXX)
+project(gfaidx VERSION 2.1.1 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -173,6 +173,15 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 $<TARGET_FILE:gfaidx_cli>
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_paths.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_coordinate_paths.tsv
+    )
+
+    # Graphs without links and GFA 2.0 input must stop with a clear error
+    # instead of crashing in community detection or being misread.
+    add_test(
+        NAME index_gfa_input_errors
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_index_gfa_input_errors.sh
+                $<TARGET_FILE:gfaidx_cli>
     )
 
     # Base-pair --context selection must follow gbz-base's distance rules:

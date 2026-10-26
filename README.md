@@ -193,7 +193,8 @@ gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
 Arguments:
 
 - `in_gfa`
-  input GFA graph
+  input GFA 1.x graph with at least one `L` line; GFA 2.0 input and graphs
+  without links are rejected with an error
 - `out_gfa.gz`
   output multi-member gzip graph
 

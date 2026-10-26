@@ -8,6 +8,8 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <stdexcept>
+#include <string_view>
 #include <vector>
 
 #include <sys/wait.h>
@@ -55,6 +57,32 @@ void print_c_stats(const Community& c, int level) {
               << ": network size: "
               << c.g.nb_nodes << " nodes, "
               << c.g.nb_links << " edges" << std::endl;
+}
+
+// GFA 2.0 announces itself with a VN:Z:2.x header tag, but the tag is optional,
+// so its E/G/F/O/U records also identify it. GFA 1 defines none of these.
+// Returns a description of the evidence, or an empty string for GFA 1 lines.
+std::string gfa2_evidence(std::string_view line) {
+    if (line.size() < 2 || line[1] != '\t') return {};
+    switch (line[0]) {
+        case 'E': case 'G': case 'F': case 'O': case 'U':
+            return std::string("a GFA 2.0 ") + line[0] + " record";
+        case 'H': {
+            std::size_t start = 2;
+            while (start < line.size()) {
+                auto end = line.find('\t', start);
+                if (end == std::string_view::npos) end = line.size();
+                const auto tag = line.substr(start, end - start);
+                if (tag.substr(0, 6) == "VN:Z:2") {
+                    return "a " + std::string(tag) + " header tag";
+                }
+                start = end + 1;
+            }
+            return {};
+        }
+        default:
+            return {};
+    }
 }
 
 }  // namespace
@@ -208,9 +236,21 @@ void generate_edgelist(const std::string& input_gfa,
     bool first_line = true;
     std::cout << get_time() << ": Reading the GFA file " << input_gfa << std::endl;
 
+    std::uint64_t line_number = 0;
     while (file_reader.read_line(line)) {
+        ++line_number;
         if (line.empty()) {
             continue;
+        }
+
+        // Stop before indexing: GFA 2.0 S lines carry a length field that
+        // would be read as the sequence, and its E edges would be ignored.
+        if (const auto evidence = gfa2_evidence(line); !evidence.empty()) {
+            throw std::runtime_error(
+                "Input looks like GFA 2.0 (" + evidence + " on line " +
+                std::to_string(line_number) + " of " + input_gfa +
+                "). gfaidx currently supports GFA 1.x only (S/L/P/W records); "
+                "convert the graph to GFA 1 before indexing.");
         }
 
         if (line[0] == 'L') {

@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "pygfaidx"
-version = "2.0.0"
+version = "2.1.1"
 description = "Python API for disk-backed gfaidx genome graph indexes"
 readme = "README_pygfaidx.md"
 requires-python = ">=3.9"
