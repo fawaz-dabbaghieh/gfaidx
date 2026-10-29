@@ -663,8 +663,8 @@ std::uint64_t emit_subpaths_in_parallel(
              worker_number < worker_count; ++worker_number) {
             workers.emplace_back([&]() {
                 try {
-                    // An independent file stream is required because seekg and
-                    // read mutate stream state even through const reader APIs.
+                    // Each worker owns a reader, so no reader caches are shared
+                    // between threads.
                     paths::PathIndexReader step_index(path_index_path);
                     // Short-record jobs reuse this scratch string; long-record
                     // jobs hand its allocation directly to the output slot.

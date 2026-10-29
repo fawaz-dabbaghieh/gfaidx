@@ -1395,8 +1395,6 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
                     "Dense node-name cache exceeds uint32 range");
             }
             dense_id = static_cast<std::uint32_t>(dense_node_names_.size());
-            // Node names are consumed repeatedly but their node metadata is
-            // not, so bypass the separate metadata hash cache on this miss.
             dense_node_names_.push_back(copy_node_name(node_id));
         }
         return dense_node_names_[dense_id];
@@ -1407,8 +1405,8 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
         return it->second;
     }
 
-    // Name lookup does not need to retain NodeMeta: the owned name itself is
-    // sufficient for all later hits and avoids a second large hash table.
+    // Only the owned name is cached; later hits need nothing else from the
+    // node record.
     auto [inserted_it, inserted] =
         node_name_cache_.emplace(node_id, copy_node_name(node_id));
     (void)inserted;

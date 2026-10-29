@@ -7,6 +7,11 @@ design notes remain in `ideas.md`.
 
 ### Bind `.pcx` To Its Source `.pdx` And `.lnx`
 
+Note (`.pdx` v5): `.pcx` checkpoints are cumulative sequence lengths, which do
+not depend on node ids or the step encoding, so the move to locality node ids
+does not by itself make an existing `.pcx` stale. The fingerprints below are
+still needed to catch a `.pcx` built from different path content.
+
 **Status:** deferred
 
 The current `.pcx` validation checks counts and path metadata, but it does not

@@ -23,7 +23,7 @@ HEADER_SIZE = HEADER_STRUCT.size
 HEADER_V5_STRUCT = struct.Struct("<QIIQQQII16x")
 MAGIC = b"GFPATH1\x00"
 STEP_ENCODINGS = {0: "packed32", 1: "delta_varint"}
-POSTING_ENCODINGS = {0: "path_groups"}
+POSTING_ENCODINGS = {0: "path_groups", 1: "path_slots"}
 
 PATH_RECORD_SIZE = 128
 NODE_RECORD_SIZE = 32

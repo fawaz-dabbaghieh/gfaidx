@@ -27,6 +27,7 @@ Orderings evaluated (when the inputs allow it):
   comm+first_visit  community id, then first appearance   (needs .ndx)
   name              numeric segment name                  (needs numeric names)
   comm+name         community id, then numeric name       (needs .ndx + numeric names)
+  mincomm+name      communities ordered by smallest name, then name
 """
 
 from __future__ import annotations
@@ -226,6 +227,13 @@ def main() -> int:
         orderings.append(("name", order_to_new_id(np.argsort(names, kind="stable"))))
         if comm is not None:
             orderings.append(("comm+name", order_to_new_id(np.lexsort((names, comm)))))
+            # Communities ordered by their smallest name instead of Louvain id.
+            ncomm = int(comm.max()) + 1
+            min_name = np.full(ncomm, np.iinfo(np.int64).max, dtype=np.int64)
+            np.minimum.at(min_name, comm, names)
+            comm_rank = np.empty(ncomm, dtype=np.int64)
+            comm_rank[np.argsort(min_name, kind="stable")] = np.arange(ncomm, dtype=np.int64)
+            orderings.append(("mincomm+name", order_to_new_id(np.lexsort((names, comm_rank[comm])))))
     else:
         print("(segment names are not all numeric; skipping name-based orderings)\n")
 
