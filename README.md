@@ -56,9 +56,10 @@ Main tasks:
 - `<graph>.gz.idx`
   a community-to-gzip-offset index
 - `<graph>.gz.ndx`
-  a sorted binary hash table mapping node string IDs to community IDs
+  a sorted binary hash table mapping node string IDs to integer node IDs and
+  community IDs
 - `<graph>.gz.lnx`
-  a rank-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
+  a node-ID-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
 - `<graph>.gz.pcx`
@@ -70,7 +71,7 @@ Main tasks:
 neighborhood across communities.
 
 `get_region` additionally uses `.cdx` to resolve a 0-based reference interval
-to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
+to `.ndx`/`.pdx` node IDs before running the same graph extraction pipeline.
 When `--with_coords` is requested, `.lnx` supplies node lengths without
 re-scanning all `S` lines and `.pcx` supplies cumulative path-length
 checkpoints. The `.cdx`, `.lnx`, and `.pcx` files are separate sidecars, so
@@ -90,11 +91,17 @@ The `.pdx` stores:
 
 - path metadata
 - node metadata
-- a packed step table
+- a delta-coded step table
 - compressed per-node postings
 - a shared string blob
 
-Important: `.pdx` node IDs are aligned to the sorted entry rank in the `.ndx` file used during `index_paths`. That lets `get_path` resolve node names through `.ndx` without loading a giant global node-name map into memory.
+Important: `.pdx`, `.lnx` and `.cdx` all use the integer node IDs assigned in
+the `.ndx` file. That lets `get_path` resolve node names through `.ndx` without
+loading a giant global node-name map into memory. `index_gfa` numbers nodes so
+that nodes adjacent on paths get close IDs (see
+[How the path index works](#how-the-path-index-works)), which is what makes the
+step table and postings compress well. The sidecars must therefore be built
+from the same `.ndx`; every query checks this and refuses mixed index sets.
 
 ## Build and install
 
@@ -222,6 +229,20 @@ Options:
 - `--no_paths`
   skip building `<out_gfa.gz>.pdx` and `.pcx`; still write `.gz`, `.idx`,
   `.ndx`, and `.lnx`
+- `--node_order <auto|legacy_hash>`
+  `auto` (default) numbers nodes by community, then by integer segment name
+  (or one shared prefix plus digits, such as `s123`) or by first appearance in
+  `L` lines, whichever gives smaller estimated path-step deltas on the edge
+  list. `legacy_hash` keeps the earlier hash-rank IDs and writes the previous
+  `.ndx` and v4 `.pdx` byte for byte, which older gfaidx releases can read
+- `--step_encoding <delta|packed32>`
+  `.pdx` step table layout; defaults to `delta` (`legacy_hash` forces `packed32`)
+- `--posting_encoding <slots|groups>`
+  `.pdx` posting layout; defaults to `slots` (`legacy_hash` forces `groups`)
+- `--posting_block_nodes <N>`
+  node IDs per independently decodable posting block for `slots`; defaults
+  to `32`. Larger blocks compress better but make an isolated single-node
+  lookup decode more of its block
 
 Outputs:
 
@@ -583,11 +604,17 @@ Options:
   base directory for temporary files used by the external posting sort; defaults to the output directory
 - `--progress_every <N>`
   progress logging interval while reading
+- `--step_encoding <delta|packed32>`, `--posting_encoding <slots|groups>`,
+  `--posting_block_nodes <N>`
+  as for `index_gfa`. With a legacy `.ndx`, `packed32` plus `groups` writes a
+  v4 `.pdx`; any other combination writes v5
 
 Notes:
 
 - `index_gfa` already builds `<out_gfa.gz>.pdx` by default
 - `index_paths` is mainly useful when you want to rebuild only the path index after path-index code changes
+- the `.pdx` must be rebuilt whenever its `.ndx` is rebuilt; a `.pdx` built
+  against a different node numbering is rejected at query time
 
 What gets indexed:
 
@@ -598,8 +625,9 @@ What gets indexed:
 Current behavior:
 
 - `P` and `W` are both stored as ordered walks
-- steps are stored in a packed 4-byte format
-- per-node postings are compressed with delta + varint encoding
+- steps are stored as zigzag deltas of consecutive node IDs in 128-step blocks
+- per-node postings are predicted from the neighbouring node IDs of the same
+  posting block where possible (see below)
 - large posting tables are built through disk-backed sorted runs to reduce peak RAM
 
 Example:
@@ -774,7 +802,7 @@ Coordinate rules:
 
 - only applies to node-set queries
 - affects `W` output coordinates and `P` output names
-- `.lnx` stores rank-aligned `uint32` segment lengths; fallback scanning takes
+- `.lnx` stores node-ID-aligned `uint32` segment lengths; fallback scanning takes
   length from the sequence field first, then `LN:i:`
 - if anything is missing or inconsistent, `get_path` falls back to ordinary
   subpath output and logs a warning
@@ -977,6 +1005,39 @@ This makes two workloads fast:
 - full path reconstruction
 - finding all subpaths that overlap a node set or extracted subgraph
 
+Node IDs (`.ndx` v2). `index_gfa` sorts nodes by Louvain community and, inside
+a community, by a locality key: the integer segment name when the graph
+builder numbered nodes along the paths (PGGB after `odgi sort`,
+Minigraph-Cactus), otherwise first appearance in the `L` lines. The node ID is
+the position in that order. Segment names stay the identity (they are what
+`.ndx` hashes); the integer is only a sort key. Each community owns a
+contiguous ID range, stored as a small start array in `.ndx`.
+
+Step table (`.pdx` v5, `delta`). Each step is stored as the LEB128 varint of
+`(zigzag(node_id - previous_node_id) << 1) | reverse`. Every 128 global steps
+the previous ID resets to 0, so each 128-step block decodes on its own; a
+superblock table (one 8-byte offset plus 32 two-byte offsets per 4096 steps)
+locates any block. Reading steps `[a, b)` of a path reads the covering blocks
+once and skips at most 127 values.
+
+Postings (`.pdx` v5, `slots`). Postings are coded in blocks of 32 consecutive
+node IDs. Inside a block, each path keeps the step ranks at the last node of
+the block it visited. Because neighbouring IDs are mostly consecutive steps of
+the same paths, an occurrence `(path, rank)` is usually predicted by
+`(path, rank - 1)` at an earlier node of the block, and only the subset of
+predicted occurrences (a bitmap or index list) is stored. Other occurrences
+are stored explicitly, relative to the path's last rank when it has one.
+Loops predict too, because every occurrence has its own slot. Readers keep the
+last decoded block, so runs of nearby node IDs (regions, BFS neighbourhoods)
+decode each block once.
+
+Compatibility. New binaries read v4 `.pdx` and headerless (legacy) `.ndx`
+files. Older binaries reject `.ndx` v2 and `.pdx` v5. `.pdx`, `.lnx` and
+`.cdx` contents depend on the node numbering and must be built from the same
+`.ndx`: `.pdx` stores a fingerprint of the numbering and `.cdx` a 32-bit tag
+of it, and queries refuse mismatched sets. `.pcx` stores cumulative sequence
+lengths, which do not depend on node IDs.
+
 Current query-time memory behavior:
 
 - path metadata is loaded eagerly
@@ -993,6 +1054,21 @@ records GNU `time -v` measurements, and generates first-execution, warm-cache,
 thread-scaling, and regional-variation summaries and plots. See
 [the repeated interval benchmark guide](docs/gfaidx_gbz_interval_benchmark.md)
 for the TSV schema and server command.
+
+### `.pdx` compression tooling
+
+- `scripts/pdx_size_breakdown.py` prints the section sizes of v4 and v5
+  `.pdx` files, with bytes per step and per posting (`--tsv` for tables).
+- `scripts/pdx_step_delta_estimate.py` estimates the delta step-table size of
+  a packed32 `.pdx` under alternative node orders (needs numpy).
+- `scripts/pdx_ab_benchmark.py` runs one query file against two binary/index
+  pairs, checks byte-identical outputs and reports warm and cold latency.
+- `scripts/sim_pangenome.py` simulates a Minigraph-Cactus-like GFA and
+  `scripts/rename_gfa_nodes.py` makes shuffled-integer and non-numeric
+  renamings for node-order tests.
+
+See [`docs/pdx_compression_results.md`](docs/pdx_compression_results.md) for
+the measurements behind the current formats.
 
 ### `scripts/pdx_size_breakdown.py`
 
