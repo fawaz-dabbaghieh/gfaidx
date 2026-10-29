@@ -1,8 +1,10 @@
 #ifndef GFAIDX_INDEX_GFA_HELPERS_H
 #define GFAIDX_INDEX_GFA_HELPERS_H
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <argparse/argparse.hpp>
 #include <graph_binary.h>
@@ -43,6 +45,13 @@ void add_singleton_community(const std::string& input_gfa,
                              std::unordered_map<std::string, unsigned int>& node_id_map,
                              BGraph& g,
                              const Reader::Options& reader_options);
+
+// Estimate delta-varint bytes per step if paths walked every edge of the
+// sorted "u v" edge list once, for each candidate internal id -> node id map.
+// index_gfa uses this to choose between candidate node orders.
+std::vector<double> estimate_edge_step_bytes(
+    const std::string& sorted_edgelist,
+    const std::vector<const std::vector<std::uint32_t>*>& candidate_node_ids);
 
 void output_communities(const BGraph& g,
                         const std::string& out_file,

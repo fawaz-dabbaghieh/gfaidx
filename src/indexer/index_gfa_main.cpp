@@ -99,6 +99,22 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
 
     bool keep_tmp = program.get<bool>("keep_tmp");
+    const bool legacy_node_order = program.get<std::string>("node_order") == "legacy_hash";
+    // legacy_hash reproduces the previous release's .ndx and v4 .pdx exactly.
+    gfaidx::paths::PathIndexEncoding path_encoding;
+    if (legacy_node_order || program.get<std::string>("step_encoding") == "packed32") {
+        path_encoding.steps = gfaidx::paths::StepEncoding::packed32;
+    }
+    if (legacy_node_order || program.get<std::string>("posting_encoding") == "groups") {
+        path_encoding.postings = gfaidx::paths::PostingEncoding::path_groups;
+    }
+    try {
+        path_encoding.posting_block_nodes = utils::parse_u32_strict(
+            program.get<std::string>("posting_block_nodes"), "--posting_block_nodes", 1, 1u << 16);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
 
     // check progress_every user input
     std::uint64_t progress_every;
@@ -356,7 +372,32 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         timer.reset();
         std::cout << get_time() << ": Writing node hash index to " << node_index_path << std::endl;
         // Stage the node hash index too so a later failure cannot leave a partial .ndx behind.
-        write_node_hash_index(node_id_map, id_to_comm, staged_node_index_path);
+        if (legacy_node_order) {
+            write_node_hash_index(node_id_map, id_to_comm, staged_node_index_path);
+        } else {
+            // Number nodes by community and locality key so path steps and
+            // postings of neighboring nodes get close ids (see .ndx v2).
+            NodeIdAssignment assignment = assign_node_ids(node_id_map, id_to_comm, ncom);
+            if (assignment.key != NodeOrderKey::first_appearance) {
+                // Integer names only help when the builder numbered nodes
+                // along the paths. Score both candidate orders on the edge
+                // list and keep the name order only if it is not worse.
+                NodeIdAssignment fallback = assign_node_ids(node_id_map, id_to_comm, ncom, false);
+                const auto costs = estimate_edge_step_bytes(
+                    sorted_tmp_edgelist, {&assignment.node_ids, &fallback.node_ids});
+                std::cout << get_time() << ": Estimated step bytes per edge: name order "
+                          << costs[0] << ", first-appearance order " << costs[1] << std::endl;
+                if (costs[1] < costs[0]) {
+                    assignment = std::move(fallback);
+                }
+            }
+            std::vector<std::uint32_t>().swap(id_to_comm);
+            std::cout << get_time() << ": Node ids ordered by community, then "
+                      << (assignment.key == NodeOrderKey::integer_name ? "integer segment name"
+                          : assignment.key == NodeOrderKey::prefixed_integer ? "prefixed integer segment name"
+                          : "first appearance") << std::endl;
+            write_node_hash_index(node_id_map, assignment, staged_node_index_path);
+        }
         std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
         log_memory("After node hash index");
 
@@ -385,7 +426,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                             staged_node_index_path,
                                             reader_options,
                                             tmp_dir,
-                                            keep_tmp);
+                                            keep_tmp,
+                                            path_encoding);
             std::cout << get_time() << ": Finished path index in " << timer.elapsed() << " seconds" << std::endl;
             log_memory("After path index");
 

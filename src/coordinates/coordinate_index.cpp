@@ -595,6 +595,12 @@ bool build_coordinate_index(const std::string& input_gfa,
     }
 
     indexer::NodeHashIndex node_index(node_index_path);
+    if (!path_index_path.empty()) {
+        // .cdx stores .pdx node ids, so both must use this .ndx numbering.
+        const paths::PathIndexReader path_index(path_index_path);
+        indexer::require_matching_node_ids(node_index, path_index.node_count(),
+                                           path_index.node_id_space(), ".pdx");
+    }
     std::vector<std::uint64_t> node_lengths(static_cast<std::size_t>(node_index.size()),
                                             kMissingLength);
     std::vector<std::string> reference_samples;

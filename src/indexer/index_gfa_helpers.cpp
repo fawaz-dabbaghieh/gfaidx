@@ -1,5 +1,6 @@
 #include "index_gfa_helpers.h"
 
+#include <charconv>
 #include <chrono>
 #include <cerrno>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include "fs/fs_helpers.h"
 #include "fs/gfa_line_parsers.h"
 #include "paths/path_coordinate_checkpoints.h"
+#include "paths/path_index.h"
 #include "utils/Timer.h"
 
 #define WEIGHTED     0
@@ -105,6 +107,29 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--min_chunk_nodes").default_value(std::string("0"))
       .nargs(1)
       .help("merge communities smaller than this into their strongest eligible neighbor; 0 disables");
+
+    // auto numbers nodes by community and then by a locality key so path
+    // steps delta-code well; legacy_hash reproduces the pre-v2 hash-rank ids
+    // and the v4 .pdx byte for byte, mainly for A/B comparisons.
+    parser.add_argument("--node_order").default_value(std::string("auto"))
+      .nargs(1)
+      .choices("auto", "legacy_hash")
+      .help("node id order: auto (community, then integer name or first appearance) or legacy_hash (pre-v2 .ndx and v4 .pdx)");
+
+    parser.add_argument("--step_encoding").default_value(std::string("delta"))
+      .nargs(1)
+      .choices("delta", "packed32")
+      .help(".pdx step table: delta (zigzag varint blocks) or packed32 (4 bytes per step); legacy_hash forces packed32");
+
+    parser.add_argument("--posting_encoding").default_value(std::string("slots"))
+      .nargs(1)
+      .choices("slots", "groups")
+      .help(".pdx postings: slots (predicted from neighbouring node ids) or groups (v4 per-path groups); legacy_hash forces groups");
+
+    parser.add_argument("--posting_block_nodes")
+      .default_value(std::to_string(paths::kDefaultPostingBlockNodes))
+      .nargs(1)
+      .help("node ids per independently decodable posting block for --posting_encoding slots");
 }
 
 bool run_sort(const std::string& input_edges,
@@ -230,6 +255,54 @@ void generate_edgelist(const std::string& input_gfa,
         }
     }
     out.close();
+}
+
+std::vector<double> estimate_edge_step_bytes(
+    const std::string& sorted_edgelist,
+    const std::vector<const std::vector<std::uint32_t>*>& candidate_node_ids) {
+    std::vector<std::uint64_t> total_bytes(candidate_node_ids.size(), 0);
+    std::uint64_t edges = 0;
+
+    Reader reader;
+    if (!reader.open(sorted_edgelist)) {
+        throw std::runtime_error("Failed to open sorted edge list: " + sorted_edgelist);
+    }
+    std::string_view line;
+    while (reader.read_line(line)) {
+        const auto space = line.find(' ');
+        if (space == std::string_view::npos) continue;
+        std::uint32_t u = 0;
+        std::uint32_t v = 0;
+        const auto ru = std::from_chars(line.data(), line.data() + space, u);
+        const auto rv = std::from_chars(line.data() + space + 1, line.data() + line.size(), v);
+        if (ru.ec != std::errc() || rv.ec != std::errc()) {
+            throw std::runtime_error("Malformed sorted edge list line while scoring node orders");
+        }
+        for (std::size_t c = 0; c < candidate_node_ids.size(); ++c) {
+            const auto& ids = *candidate_node_ids[c];
+            if (u >= ids.size() || v >= ids.size()) {
+                throw std::runtime_error("Edge list node id out of range while scoring node orders");
+            }
+            // Same value layout as the delta step encoder: zigzag delta, then
+            // one strand bit, as LEB128.
+            const std::int64_t delta = static_cast<std::int64_t>(ids[v]) - static_cast<std::int64_t>(ids[u]);
+            std::uint64_t value = ((static_cast<std::uint64_t>(delta) << 1) ^
+                                   static_cast<std::uint64_t>(delta >> 63)) << 1;
+            std::uint64_t bytes = 1;
+            while (value >= 0x80) {
+                value >>= 7;
+                ++bytes;
+            }
+            total_bytes[c] += bytes;
+        }
+        ++edges;
+    }
+
+    std::vector<double> out(candidate_node_ids.size(), 0.0);
+    for (std::size_t c = 0; c < out.size(); ++c) {
+        out[c] = edges == 0 ? 0.0 : static_cast<double>(total_bytes[c]) / static_cast<double>(edges);
+    }
+    return out;
 }
 
 void output_communities(const BGraph& g,

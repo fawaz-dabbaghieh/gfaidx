@@ -230,9 +230,8 @@ public:
         capabilities.coordinates = exists(paths.cdx);
         if (capabilities.paths) {
             path_index = std::make_unique<paths::PathIndexReader>(paths.pdx);
-            if (path_index->node_count() != node_index->size()) {
-                throw std::runtime_error(".pdx and .ndx node counts differ");
-            }
+            indexer::require_matching_node_ids(*node_index, path_index->node_count(),
+                                               path_index->node_id_space(), ".pdx");
         }
         if (capabilities.coordinates) {
             coordinate_index = std::make_unique<coordinates::CoordinateIndexReader>(paths.cdx);

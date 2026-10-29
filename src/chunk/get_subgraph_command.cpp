@@ -996,6 +996,8 @@ int materialize_selected_subgraph(
             // BFS extraction has no preloaded reader, so retain the existing
             // lazy path-index construction for its generic node-set query.
             paths::PathIndexReader path_index(index_paths.pdx_path);
+            indexer::require_matching_node_ids(node_index, path_index.node_count(),
+                                               path_index.node_id_space(), ".pdx");
             subpath_count = emit_subpaths_if_available(
                 out,
                 path_index,
@@ -1265,10 +1267,8 @@ int extract_subgraph_from_node_ranks(
         spans.size() >= 2 ? static_cast<std::uint32_t>(spans.size() - 1)
                           : std::numeric_limits<std::uint32_t>::max();
 
-    if (path_index.node_count() != node_index.size()) {
-        throw std::runtime_error(
-            ".pdx and .ndx node counts differ; rebuild aligned indexes");
-    }
+    indexer::require_matching_node_ids(node_index, path_index.node_count(),
+                                       path_index.node_id_space(), ".pdx");
 
     for (const auto node_rank : unique_node_ranks) {
         if (node_rank >= path_index.node_count()) {

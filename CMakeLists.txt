@@ -147,6 +147,12 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     target_link_libraries(gfaidx_graph_api_test PRIVATE gfaidx_library)
     add_test(NAME graph_api COMMAND gfaidx_graph_api_test)
 
+    # Internal codec and .ndx format tests need the private src/ headers.
+    add_executable(gfaidx_pdx_codec_test tests/test_pdx_codec.cpp)
+    target_link_libraries(gfaidx_pdx_codec_test PRIVATE gfaidx_library)
+    target_include_directories(gfaidx_pdx_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME pdx_codec COMMAND gfaidx_pdx_codec_test)
+
     add_executable(gfaidx_indexed_graph_api_test tests/test_indexed_graph_api.cpp)
     target_link_libraries(gfaidx_indexed_graph_api_test PRIVATE gfaidx_library)
     add_test(
