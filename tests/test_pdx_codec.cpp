@@ -122,6 +122,89 @@ void test_step_codec() {
     }
 }
 
+void test_slot_postings() {
+    using gfaidx::paths::codec::PathSlotPostingDecoder;
+    using gfaidx::paths::codec::PathSlotPostingEncoder;
+    using gfaidx::paths::codec::Posting;
+    std::mt19937_64 rng(7);
+    const std::uint32_t path_count = 40;
+
+    // Simulate haplotypes walking forward through consecutive node ids with
+    // bubbles, skips, backward jumps and loops, then collect node postings.
+    const std::uint32_t node_count = 3000;
+    std::vector<std::vector<Posting>> nodes(node_count);
+    for (std::uint32_t path = 0; path < path_count; ++path) {
+        if (path % 7 == 3) continue;  // some paths never appear
+        std::uint32_t rank = 0;
+        std::uint32_t node = static_cast<std::uint32_t>(rng() % 50);
+        while (node < node_count && rank < 20000) {
+            nodes[node].push_back(Posting{path, rank++});
+            const auto r = rng() % 100;
+            if (r < 75) node += 1;
+            else if (r < 90) node += 2 + static_cast<std::uint32_t>(rng() % 3);
+            else if (r < 95 && node > 40) node -= static_cast<std::uint32_t>(rng() % 40);  // loop back
+            else node += static_cast<std::uint32_t>(rng() % 200);
+        }
+    }
+    for (auto& postings : nodes) std::sort(postings.begin(), postings.end(), gfaidx::paths::codec::posting_less);
+
+    for (const std::uint32_t block_nodes : {1u, 3u, 32u, 64u}) {
+        PathSlotPostingEncoder encoder(block_nodes);
+        std::string blob;
+        std::vector<std::size_t> starts;
+        for (std::uint32_t n = 0; n < node_count; ++n) {
+            starts.push_back(blob.size());
+            encoder.encode_node(n, nodes[n].data(), nodes[n].data() + nodes[n].size(), blob);
+            if (nodes[n].empty()) CHECK(blob.size() == starts.back());
+        }
+        starts.push_back(blob.size());
+
+        // Decode every block from its first node, as the reader does.
+        const auto* base = reinterpret_cast<const unsigned char*>(blob.data());
+        PathSlotPostingDecoder decoder;
+        std::vector<Posting> out;
+        for (std::uint32_t n = 0; n < node_count; ++n) {
+            if (n % block_nodes == 0) decoder.reset();
+            if (nodes[n].empty()) continue;
+            out.clear();
+            const unsigned char* p = base + starts[n];
+            decoder.decode_node(p, base + starts[n + 1], nodes[n].size(), path_count, out);
+            CHECK(p == base + starts[n + 1]);
+            CHECK(out.size() == nodes[n].size());
+            for (std::size_t i = 0; i < out.size(); ++i) {
+                CHECK(out[i].path_id == nodes[n][i].path_id && out[i].step_rank == nodes[n][i].step_rank);
+            }
+        }
+        if (block_nodes == 32) {
+            // Locality pays off: well under the ~3 bytes of an explicit posting.
+            std::size_t total = 0;
+            for (const auto& postings : nodes) total += postings.size();
+            CHECK(blob.size() < total * 2);
+        }
+
+        // Truncated input and an impossible posting count must be rejected.
+        for (std::uint32_t n = 1; n < node_count; ++n) {
+            if (nodes[n].size() < 2 || n % block_nodes == 0) continue;
+            PathSlotPostingDecoder fresh;
+            const std::uint32_t head = n - n % block_nodes;
+            for (std::uint32_t h = head; h < n; ++h) {
+                if (nodes[h].empty()) continue;
+                out.clear();
+                const unsigned char* p = base + starts[h];
+                fresh.decode_node(p, base + starts[h + 1], nodes[h].size(), path_count, out);
+            }
+            CHECK(throws([&] {
+                PathSlotPostingDecoder copy = fresh;
+                std::vector<Posting> sink;
+                const unsigned char* p = base + starts[n];
+                copy.decode_node(p, base + starts[n + 1] - 1, nodes[n].size(), path_count, sink);
+                if (p != base + starts[n + 1] - 1) throw std::runtime_error("trailing bytes");
+            }));
+            break;
+        }
+    }
+}
+
 // Build an internal-id map in insertion order, like generate_edgelist does.
 std::unordered_map<std::string, unsigned int> make_ids(const std::vector<std::string>& names) {
     std::unordered_map<std::string, unsigned int> ids;
@@ -275,6 +358,7 @@ int main() {
     std::filesystem::create_directories(dir);
     try {
         test_step_codec();
+        test_slot_postings();
         test_assign_node_ids();
         test_node_hash_index(dir);
     } catch (const std::exception& err) {

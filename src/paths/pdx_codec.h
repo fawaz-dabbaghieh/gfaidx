@@ -230,22 +230,65 @@ inline std::size_t varint_size(std::uint64_t value) {
     return n;
 }
 
-// Shared slot bookkeeping for the encoder and the decoder.
+// Shared slot bookkeeping for the encoder and the decoder. Slots are kept in
+// one (path, rank)-sorted vector because the coded subset indexes into that
+// order. A per-path first-slot/count table makes the common update - every
+// path at the node already has as many slots as it has occurrences there - an
+// in-place overwrite of those slots; only a new path or a changed occurrence
+// count rebuilds the vector.
 class PathSlotState {
 public:
-    void reset() { slots_.clear(); }
+    static constexpr std::uint32_t kNoSlot = 0xffffffffu;
+
+    void reset() {
+        for (const auto& slot : slots_) first_slot_[slot.path_id] = kNoSlot;
+        slots_.clear();
+    }
+
     [[nodiscard]] const std::vector<Posting>& slots() const { return slots_; }
+
+    // Slots of path_id as [first, first + count); count 0 when it has none.
+    void path_slots(std::uint32_t path_id, std::uint32_t& first, std::uint32_t& count) const {
+        if (path_id >= first_slot_.size() || first_slot_[path_id] == kNoSlot) {
+            first = 0;
+            count = 0;
+            return;
+        }
+        first = first_slot_[path_id];
+        count = slot_count_[path_id];
+    }
 
     // Largest slot rank of path_id, or false when the path has no slot.
     bool last_rank(std::uint32_t path_id, std::uint32_t& out) const {
-        auto it = std::upper_bound(slots_.begin(), slots_.end(), Posting{path_id, 0xffffffffu}, posting_less);
-        if (it == slots_.begin() || (it - 1)->path_id != path_id) return false;
-        out = (it - 1)->step_rank;
+        std::uint32_t first = 0;
+        std::uint32_t count = 0;
+        path_slots(path_id, first, count);
+        if (count == 0) return false;
+        out = slots_[first + count - 1].step_rank;
         return true;
     }
 
     // Paths visiting this node replace their slots with this node's ranks.
     void advance(const Posting* begin, const Posting* end) {
+        bool in_place = true;
+        for (const Posting* q = begin; q < end && in_place;) {
+            const Posting* group_end = q + 1;
+            while (group_end < end && group_end->path_id == q->path_id) ++group_end;
+            std::uint32_t first = 0;
+            std::uint32_t count = 0;
+            path_slots(q->path_id, first, count);
+            in_place = count == static_cast<std::uint32_t>(group_end - q);
+            q = group_end;
+        }
+        if (in_place) {
+            for (const Posting* q = begin; q < end;) {
+                std::uint32_t index = first_slot_[q->path_id];
+                const auto path = q->path_id;
+                while (q < end && q->path_id == path) slots_[index++].step_rank = (q++)->step_rank;
+            }
+            return;
+        }
+
         next_.clear();
         next_.reserve(slots_.size() + static_cast<std::size_t>(end - begin));
         std::size_t a = 0;
@@ -260,11 +303,25 @@ public:
             }
         }
         slots_.swap(next_);
+        for (std::uint32_t i = 0; i < slots_.size();) {
+            const auto path = slots_[i].path_id;
+            if (path >= first_slot_.size()) {
+                first_slot_.resize(static_cast<std::size_t>(path) + 1, kNoSlot);
+                slot_count_.resize(static_cast<std::size_t>(path) + 1, 0);
+            }
+            std::uint32_t j = i + 1;
+            while (j < slots_.size() && slots_[j].path_id == path) ++j;
+            first_slot_[path] = i;
+            slot_count_[path] = j - i;
+            i = j;
+        }
     }
 
 private:
     std::vector<Posting> slots_;
     std::vector<Posting> next_;
+    std::vector<std::uint32_t> first_slot_;
+    std::vector<std::uint32_t> slot_count_;
 };
 
 class PathSlotPostingEncoder {
@@ -287,20 +344,23 @@ public:
         const auto& slots = state_.slots();
         predicted_.clear();
         explicit_.clear();
-        std::size_t si = 0;
-        for (const Posting* q = begin; q < end; ++q) {
-            while (si < slots.size() &&
-                   (slots[si].path_id < q->path_id ||
-                    (slots[si].path_id == q->path_id && slots[si].step_rank + 1 < q->step_rank))) {
-                ++si;
-            }
-            if (si < slots.size() && slots[si].path_id == q->path_id &&
-                slots[si].step_rank + 1 == q->step_rank) {
-                predicted_.push_back(static_cast<std::uint32_t>(si++));
-            } else {
-                explicit_.push_back(*q);
+        for (const Posting* q = begin; q < end;) {
+            std::uint32_t si = 0;
+            std::uint32_t count = 0;
+            state_.path_slots(q->path_id, si, count);
+            const std::uint32_t slot_end = si + count;
+            const auto path = q->path_id;
+            for (; q < end && q->path_id == path; ++q) {
+                while (si < slot_end && slots[si].step_rank + 1 < q->step_rank) ++si;
+                if (si < slot_end && slots[si].step_rank + 1 == q->step_rank) {
+                    predicted_.push_back(si++);
+                } else {
+                    explicit_.push_back(*q);
+                }
             }
         }
+        // Predicted slot indices must be in slot order for the subset coding.
+        std::sort(predicted_.begin(), predicted_.end());
 
         // Pick the cheapest description of the predicted subset.
         const std::size_t m = slots.size();

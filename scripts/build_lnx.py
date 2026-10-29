@@ -2,9 +2,10 @@
 """Build a rank-aligned .lnx node-length sidecar for an existing gfaidx index.
 
 The .lnx payload is a uint32 array where element i is the segment length for
-node rank i in the matching .ndx file. The script only needs the indexed GFA
-and the matching .ndx, so existing large graphs can get .lnx files without
-rerunning gfaidx index_gfa.
+node id i in the matching .ndx file (the sorted entry rank for legacy
+headerless .ndx files, the stored node id for .ndx v2). The script only needs
+the indexed GFA and the matching .ndx, so existing large graphs can get .lnx
+files without rerunning gfaidx index_gfa.
 """
 
 from __future__ import annotations
@@ -23,6 +24,10 @@ VERSION = 1
 VALUE_WIDTH = 4
 HEADER_STRUCT = struct.Struct("<8sIIQ")
 NDX_ENTRY_STRUCT = struct.Struct("<QII")
+# .ndx v2: magic, version, node order key, entry count, community count,
+# entries offset, community starts offset, node id space, reserved.
+NDX_V2_MAGIC = b"GFANDX02"
+NDX_V2_HEADER_STRUCT = struct.Struct("<8sIIQQQQQQ")
 UINT32_MAX = (1 << 32) - 1
 
 
@@ -49,17 +54,30 @@ class NodeHashIndex:
         self.path = path
         self.file = path.open("rb")
         self.size_bytes = path.stat().st_size
-        if self.size_bytes % NDX_ENTRY_STRUCT.size != 0:
-            raise RuntimeError(f"Invalid .ndx size: {path}")
-        self.count = self.size_bytes // NDX_ENTRY_STRUCT.size
         self.map = mmap.mmap(self.file.fileno(), 0, access=mmap.ACCESS_READ)
+        # Legacy files are a bare entry array (size a multiple of 16) and use
+        # the entry rank as node id; v2 files are 8 mod 16 and store node ids.
+        if self.size_bytes % NDX_ENTRY_STRUCT.size == 0:
+            self.legacy = True
+            self.entries_offset = 0
+            self.count = self.size_bytes // NDX_ENTRY_STRUCT.size
+        elif self.size_bytes % 16 == 8 and self.size_bytes >= NDX_V2_HEADER_STRUCT.size:
+            magic, version, _, count, _, entries_offset, _, _, _ = \
+                NDX_V2_HEADER_STRUCT.unpack_from(self.map, 0)
+            if magic != NDX_V2_MAGIC or version != 2:
+                raise RuntimeError(f"Unsupported .ndx header: {path}")
+            self.legacy = False
+            self.entries_offset = entries_offset
+            self.count = count
+        else:
+            raise RuntimeError(f"Invalid .ndx size: {path}")
 
     def close(self) -> None:
         self.map.close()
         self.file.close()
 
     def entry(self, rank: int) -> tuple[int, int, int]:
-        return NDX_ENTRY_STRUCT.unpack_from(self.map, rank * NDX_ENTRY_STRUCT.size)
+        return NDX_ENTRY_STRUCT.unpack_from(self.map, self.entries_offset + rank * NDX_ENTRY_STRUCT.size)
 
     def lookup_rank(self, node_name: bytes) -> int | None:
         query_hash = fnv1a64(node_name)
@@ -80,11 +98,11 @@ class NodeHashIndex:
                     left -= 1
                 rank = left
                 while rank < self.count:
-                    current_hash, current_hash32, _ = self.entry(rank)
+                    current_hash, current_hash32, payload = self.entry(rank)
                     if current_hash != query_hash:
                         break
                     if current_hash32 == query_hash32:
-                        return rank
+                        return rank if self.legacy else payload
                     rank += 1
                 return None
         return None

@@ -19,6 +19,7 @@
 #include "coordinates/path_coordinate_query.h"
 #include "coordinates/path_haplotype_query.h"
 #include "fs/fs_helpers.h"
+#include "indexer/node_hash_index.h"
 #include "indexer/node_length_index.h"
 #include "paths/p_path_coordinates.h"
 #include "paths/path_index.h"
@@ -613,11 +614,13 @@ int run_get_region(const argparse::ArgumentParser& program) {
                 coordinate_index =
                     std::make_unique<CoordinateIndexReader>(cdx_path);
                 if (path_index != nullptr &&
-                    coordinate_index->node_count() !=
-                        path_index->node_count()) {
+                    (coordinate_index->node_count() !=
+                         path_index->node_count() ||
+                     coordinate_index->node_id_space_tag() !=
+                         indexer::node_id_space_tag(path_index->node_id_space()))) {
                     throw std::runtime_error(
-                        ".cdx and .pdx node counts differ; rebuild them "
-                        "against the same .ndx");
+                        ".cdx and .pdx node counts or node numbering differ; "
+                        "rebuild them against the same .ndx");
                 }
             }
             write_available_coordinate_paths(

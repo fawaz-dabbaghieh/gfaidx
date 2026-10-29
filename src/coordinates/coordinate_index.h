@@ -61,6 +61,8 @@ public:
     explicit CoordinateIndexReader(const std::string& index_path);
 
     [[nodiscard]] std::uint64_t node_count() const { return node_count_; }
+    // indexer::node_id_space_tag() of the .ndx this index was built from.
+    [[nodiscard]] std::uint32_t node_id_space_tag() const { return node_id_space_tag_; }
     [[nodiscard]] const std::vector<CoordinateTrackInfo>& tracks() const { return tracks_; }
 
     // Return both unique graph ranks and the exact track slices that
@@ -94,6 +96,7 @@ private:
     std::string index_path_;
     mutable std::ifstream in_;
     std::uint64_t node_count_{};
+    std::uint32_t node_id_space_tag_{};
     std::uint64_t entry_count_{};
     std::uint64_t entry_table_offset_{};
     std::vector<CoordinateTrackInfo> tracks_;

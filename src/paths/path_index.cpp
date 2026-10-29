@@ -11,7 +11,6 @@
 #include <queue>
 #include <stdexcept>
 #include <system_error>
-#include <unordered_set>
 #include <utility>
 
 #include <fcntl.h>
@@ -1819,12 +1818,11 @@ SelectedNodeNameLookup::SelectedNodeNameLookup(
 std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
                                                    const std::vector<std::uint32_t>& node_ids,
                                                    const bool keep_single_steps) {
-    std::unordered_set<std::uint32_t> unique_nodes;
-    unique_nodes.reserve(node_ids.size());
-
-    for (const auto node_id : node_ids) {
-        unique_nodes.insert(node_id);
-    }
+    // Visit nodes in id order: neighbouring ids share posting blocks, so the
+    // reader's block cache decodes each block once.
+    std::vector<std::uint32_t> unique_nodes = node_ids;
+    std::sort(unique_nodes.begin(), unique_nodes.end());
+    unique_nodes.erase(std::unique(unique_nodes.begin(), unique_nodes.end()), unique_nodes.end());
 
     // Collect every step occurrence of every requested node, grouped by path.
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> path_to_steps;

@@ -500,4 +500,19 @@ void require_matching_node_ids(const NodeHashIndex& node_index,
     }
 }
 
+void require_matching_node_id_tag(const NodeHashIndex& node_index,
+                                  std::uint64_t node_count,
+                                  std::uint32_t tag,
+                                  const char* other_index) {
+    if (node_count != node_index.size()) {
+        throw std::runtime_error(std::string(other_index) +
+                                 " and .ndx node counts differ; rebuild aligned indexes");
+    }
+    if (tag != node_id_space_tag(node_index.node_id_space())) {
+        throw std::runtime_error(std::string(other_index) +
+                                 " was built against a different .ndx node numbering; "
+                                 "rebuild it with index_coordinates from this .ndx");
+    }
+}
+
 }  // namespace gfaidx::indexer

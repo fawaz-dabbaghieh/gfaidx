@@ -95,12 +95,27 @@ private:
     std::uint64_t node_id_space_ = 0;
 };
 
+// 32-bit tag of a node id space for sidecars that only have a spare uint32
+// header field (.cdx). Zero stays zero (legacy ids); any other space maps to
+// a non-zero tag.
+inline std::uint32_t node_id_space_tag(std::uint64_t node_id_space) {
+    if (node_id_space == 0) return 0;
+    const auto tag = static_cast<std::uint32_t>(node_id_space ^ (node_id_space >> 32));
+    return tag == 0 ? 1u : tag;
+}
+
 // Throw unless a path index built against node_id_space can be used with this
 // .ndx (same node count and the same id numbering).
 void require_matching_node_ids(const NodeHashIndex& node_index,
                                std::uint64_t node_count,
                                std::uint64_t node_id_space,
                                const char* other_index);
+
+// Same check for a sidecar that stores node_id_space_tag() instead.
+void require_matching_node_id_tag(const NodeHashIndex& node_index,
+                                  std::uint64_t node_count,
+                                  std::uint32_t node_id_space_tag,
+                                  const char* other_index);
 
 }  // namespace gfaidx::indexer
 

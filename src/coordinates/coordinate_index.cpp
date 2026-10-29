@@ -24,7 +24,9 @@ constexpr std::uint64_t kMissingLength = std::numeric_limits<std::uint64_t>::max
 struct CoordinateIndexHeaderDisk {
     char magic[8]{};
     std::uint32_t version{};
-    std::uint32_t reserved{};
+    // node_id_space_tag() of the .ndx numbering the node ranks use; files
+    // written before .ndx v2 have 0 here, matching legacy hash-rank ids.
+    std::uint32_t node_id_space_tag{};
     std::uint64_t node_count{};
     std::uint64_t track_count{};
     std::uint64_t entry_count{};
@@ -868,6 +870,7 @@ bool build_coordinate_index(const std::string& input_gfa,
     CoordinateIndexHeaderDisk header{};
     std::memcpy(header.magic, kCoordinateIndexMagic, sizeof(header.magic));
     header.version = kCoordinateIndexVersion;
+    header.node_id_space_tag = indexer::node_id_space_tag(node_index.node_id_space());
     header.node_count = node_index.size();
     header.track_count = track_records.size();
     header.entry_count = entry_records.size();
@@ -945,6 +948,7 @@ CoordinateIndexReader::CoordinateIndexReader(const std::string& index_path)
     }
 
     node_count_ = header.node_count;
+    node_id_space_tag_ = header.node_id_space_tag;
     entry_count_ = header.entry_count;
     entry_table_offset_ = header.entry_table_offset;
 

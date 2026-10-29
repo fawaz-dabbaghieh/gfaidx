@@ -153,6 +153,16 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     target_include_directories(gfaidx_pdx_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME pdx_codec COMMAND gfaidx_pdx_codec_test)
 
+    # Locality node ids and the compressed .pdx must not change any query
+    # output relative to --node_order legacy_hash, and mixed index sets built
+    # against different node numberings must be rejected.
+    add_test(
+        NAME node_order_equivalence
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_node_order_equivalence.sh
+                $<TARGET_FILE:gfaidx_cli>
+                ${CMAKE_SOURCE_DIR})
+
     add_executable(gfaidx_indexed_graph_api_test tests/test_indexed_graph_api.cpp)
     target_link_libraries(gfaidx_indexed_graph_api_test PRIVATE gfaidx_library)
     add_test(

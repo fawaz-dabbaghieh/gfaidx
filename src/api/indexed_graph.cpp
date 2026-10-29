@@ -235,9 +235,8 @@ public:
         }
         if (capabilities.coordinates) {
             coordinate_index = std::make_unique<coordinates::CoordinateIndexReader>(paths.cdx);
-            if (coordinate_index->node_count() != node_index->size()) {
-                throw std::runtime_error(".cdx and .ndx node counts differ");
-            }
+            indexer::require_matching_node_id_tag(*node_index, coordinate_index->node_count(),
+                                                  coordinate_index->node_id_space_tag(), ".cdx");
         }
     }
 
