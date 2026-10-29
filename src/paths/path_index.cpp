@@ -1454,12 +1454,60 @@ void PathIndexReader::check_section(std::uint64_t offset, std::uint64_t bytes) c
     }
 }
 
+namespace detail {
+
+struct StepBlockCache {
+    static constexpr std::uint64_t kNone = std::numeric_limits<std::uint64_t>::max();
+    static constexpr std::size_t kBlocks = 8;
+
+    std::uint64_t superblock{kNone};
+    codec::StepSuperblockDisk record{};
+    // Direct-mapped by block id, so interleaved runs from a few paths stay hot.
+    std::uint64_t block_ids[kBlocks]{kNone, kNone, kNone, kNone, kNone, kNone, kNone, kNone};
+    std::vector<StepRecord> blocks[kBlocks];
+    std::vector<unsigned char> bytes;
+};
+
+}  // namespace detail
+
 std::uint64_t PathIndexReader::step_block_offset(std::uint64_t block) const {
     const std::uint64_t superblock = block / codec::kStepSuperblockBlocks;
     if (superblock >= step_superblock_count_) return step_data_bytes_;
-    codec::StepSuperblockDisk record{};
-    read_exact(step_index_offset_ + superblock * sizeof(record), &record, sizeof(record));
-    return record.base_offset + record.block_offsets[block % codec::kStepSuperblockBlocks];
+    if (!step_cache_) step_cache_ = std::make_unique<detail::StepBlockCache>();
+    auto& cache = *step_cache_;
+    if (cache.superblock != superblock) {
+        cache.superblock = detail::StepBlockCache::kNone;
+        read_exact(step_index_offset_ + superblock * sizeof(cache.record),
+                   &cache.record, sizeof(cache.record));
+        cache.superblock = superblock;
+    }
+    return cache.record.base_offset + cache.record.block_offsets[block % codec::kStepSuperblockBlocks];
+}
+
+const std::vector<StepRecord>& PathIndexReader::cached_step_block(std::uint64_t block) const {
+    if (!step_cache_) step_cache_ = std::make_unique<detail::StepBlockCache>();
+    const std::size_t slot = static_cast<std::size_t>(block % detail::StepBlockCache::kBlocks);
+    if (step_cache_->block_ids[slot] == block) return step_cache_->blocks[slot];
+
+    const std::uint64_t begin_byte = step_block_offset(block);
+    const std::uint64_t end_byte = step_block_offset(block + 1);
+    if (end_byte < begin_byte || end_byte > step_data_bytes_) {
+        throw std::runtime_error("Corrupt .pdx step block index");
+    }
+    auto& cache = *step_cache_;
+    cache.block_ids[slot] = detail::StepBlockCache::kNone;
+    cache.bytes.resize(static_cast<std::size_t>(end_byte - begin_byte));
+    read_exact(step_table_offset_ + begin_byte, cache.bytes.data(), cache.bytes.size());
+    auto& steps = cache.blocks[slot];
+    steps.clear();
+    const std::uint64_t first = block * codec::kStepBlockSteps;
+    const std::uint64_t count = std::min<std::uint64_t>(codec::kStepBlockSteps, total_step_count_ - first);
+    codec::decode_delta_steps(cache.bytes.data(), cache.bytes.data() + cache.bytes.size(), first, count,
+                              node_count_, [&](std::uint32_t node_id, bool is_reverse) {
+                                  steps.push_back(StepRecord{node_id, is_reverse});
+                              });
+    cache.block_ids[slot] = block;
+    return steps;
 }
 
 template <typename Fn>
@@ -1492,9 +1540,25 @@ void PathIndexReader::visit_global_steps(std::uint64_t first, std::uint64_t coun
     // blocks through the superblock table, read it, and decode it in order,
     // skipping at most kStepBlockSteps - 1 values before `first`.
     constexpr std::uint64_t kChunkBlocks = kChunkSteps / codec::kStepBlockSteps;
+    constexpr std::uint64_t kCachedRangeBlocks = 4;
     const std::uint64_t first_block = first / codec::kStepBlockSteps;
     const std::uint64_t end_block = (first + count - 1) / codec::kStepBlockSteps + 1;
     const std::uint64_t stop = first + count;
+    if (end_block - first_block <= kCachedRangeBlocks) {
+        // Short ranges go through the decoded-block cache. The slice is copied
+        // out first so a callback may read steps again without invalidating it.
+        StepRecord slice[kCachedRangeBlocks * codec::kStepBlockSteps];
+        std::size_t taken = 0;
+        for (std::uint64_t block = first_block; block < end_block; ++block) {
+            const auto& steps = cached_step_block(block);
+            const std::uint64_t block_first = block * codec::kStepBlockSteps;
+            const std::uint64_t from = std::max(first, block_first) - block_first;
+            const std::uint64_t to = std::min(stop, block_first + steps.size()) - block_first;
+            for (std::uint64_t i = from; i < to; ++i) slice[taken++] = steps[static_cast<std::size_t>(i)];
+        }
+        for (std::size_t i = 0; i < taken; ++i) fn(slice[i]);
+        return;
+    }
     std::vector<unsigned char> buffer;
     std::uint64_t begin_byte = step_block_offset(first_block);
     for (std::uint64_t block = first_block; block < end_block;) {
@@ -1557,9 +1621,11 @@ void PathIndexReader::for_each_step(
 namespace detail {
 
 // Per-thread posting decode state. For path_slots postings it holds one
-// block: its node records, encoded bytes, and the postings of the nodes
-// decoded so far, so later lookups in the same block resume decoding instead
-// of starting over.
+// block: its node records, encoded bytes and the decoder state after the
+// last decoded node, from which that node's postings can be read again.
+// Callers visit node ids in ascending order, so later lookups in the block
+// resume decoding; earlier nodes' postings are not kept because repeat nodes
+// can have millions of them.
 struct PostingBlockCache {
     static constexpr std::uint64_t kNoBlock = std::numeric_limits<std::uint64_t>::max();
 
@@ -1568,9 +1634,15 @@ struct PostingBlockCache {
     std::vector<NodeRecordDisk> records;
     std::vector<unsigned char> bytes;
     std::size_t cursor{};
-    std::vector<codec::Posting> postings;
-    std::vector<std::uint32_t> node_starts;
+    // Nodes [0, decoded) of the block have been decoded.
+    std::uint32_t decoded{};
     codec::PathSlotPostingDecoder decoder;
+
+    void restart() {
+        cursor = 0;
+        decoded = 0;
+        decoder.reset();
+    }
 };
 
 }  // namespace detail
@@ -1676,45 +1748,39 @@ void PathIndexReader::decode_node_postings(
         }
         cache.bytes.resize(static_cast<std::size_t>(end - begin));
         read_exact(posting_table_offset_ + begin, cache.bytes.data(), cache.bytes.size());
-        cache.cursor = 0;
-        cache.postings.clear();
-        cache.node_starts.assign(1, 0);
-        cache.decoder.reset();
+        cache.restart();
         cache.first_node = first;
         cache.block = block;
     }
 
     const std::uint32_t index = node_id - cache.first_node;
+    // Going back inside a block means decoding it again from its first node.
+    if (index + 1 < cache.decoded) cache.restart();
     const std::uint64_t block_begin = cache.records.front().posting_begin;
-    while (cache.node_starts.size() <= index + 1) {
-        const std::size_t i = cache.node_starts.size() - 1;
-        const auto& record = cache.records[i];
+    while (cache.decoded <= index) {
+        const auto& record = cache.records[cache.decoded];
         if (record.posting_begin - block_begin != cache.cursor) {
             cache.block = detail::PostingBlockCache::kNoBlock;
             throw std::runtime_error("Compressed posting block offsets do not match the node table");
         }
         if (record.posting_count > 0) {
             const unsigned char* p = cache.bytes.data() + cache.cursor;
-            const std::size_t before = cache.postings.size();
             try {
                 cache.decoder.decode_node(p, cache.bytes.data() + cache.bytes.size(),
-                                          record.posting_count, path_count(), cache.postings);
+                                          record.posting_count, path_count());
             } catch (...) {
                 cache.block = detail::PostingBlockCache::kNoBlock;
                 throw;
             }
-            if (cache.postings.size() - before != record.posting_count) {
-                cache.block = detail::PostingBlockCache::kNoBlock;
-                throw std::runtime_error("Compressed posting block decoded the wrong posting count");
-            }
             cache.cursor = static_cast<std::size_t>(p - cache.bytes.data());
         }
-        cache.node_starts.push_back(static_cast<std::uint32_t>(cache.postings.size()));
+        ++cache.decoded;
     }
 
-    for (std::uint32_t i = cache.node_starts[index]; i < cache.node_starts[index + 1]; ++i) {
-        callback(cache.postings[i].path_id, cache.postings[i].step_rank);
-    }
+    // The decoder state now ends at this node; empty nodes left it untouched.
+    if (cache.records[index].posting_count == 0) return;
+    cache.decoder.for_each_node_posting(
+        [&](std::uint32_t path_id, std::uint32_t step_rank) { callback(path_id, step_rank); });
 }
 
 void PathIndexReader::for_each_node_posting(

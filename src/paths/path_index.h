@@ -146,6 +146,8 @@ class PathIndexReader;
 namespace detail {
 // Decoded posting block plus the decoder state needed to continue it.
 struct PostingBlockCache;
+// Recently decoded 128-step blocks and the last step superblock record.
+struct StepBlockCache;
 }  // namespace detail
 
 // Posting-only view of one .pdx for one worker thread. Reads use pread on the
@@ -176,7 +178,9 @@ public:
     explicit PathIndexReader(const std::string& index_path);
     ~PathIndexReader();
 
-    // The reader owns its file descriptor.
+    // The reader owns its file descriptor. Like the node-name caches, the
+    // step and posting caches make one reader unsafe to share between
+    // threads; workers open their own reader or PostingCursor.
     PathIndexReader(const PathIndexReader&) = delete;
     PathIndexReader& operator=(const PathIndexReader&) = delete;
 
@@ -265,6 +269,8 @@ private:
     template <typename Fn>
     void visit_global_steps(std::uint64_t first, std::uint64_t count, Fn&& fn) const;
     [[nodiscard]] std::uint64_t step_block_offset(std::uint64_t block) const;
+    // Decoded steps of one 128-step block, served from the step cache.
+    [[nodiscard]] const std::vector<StepRecord>& cached_step_block(std::uint64_t block) const;
 
     void decode_node_postings(
         std::uint32_t node_id,
@@ -305,6 +311,9 @@ private:
     mutable std::vector<std::uint32_t> node_name_rank_to_dense_;
     mutable std::deque<std::string> dense_node_names_;
     mutable std::unique_ptr<detail::PostingBlockCache> posting_cache_;
+    // Short step reads (one subpath run each) often hit the same few blocks:
+    // node-set queries in repeats yield millions of runs a few steps apart.
+    mutable std::unique_ptr<detail::StepBlockCache> step_cache_;
 };
 
 // Immutable rank-to-name lookup over names already owned by extraction. Small

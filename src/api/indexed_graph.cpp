@@ -662,8 +662,8 @@ public:
                 [&](const std::string& message) { warn(callbacks, message); });
         }
         // Format one interval with an explicitly supplied reader. Parallel
-        // workers each own a reader because seek/read mutate std::ifstream
-        // state even though the high-level query is logically const.
+        // workers each own a reader because its step and name caches are
+        // mutable state even though the high-level query is logically const.
         const auto format_run = [&](paths::PathIndexReader& reader,
                                     const paths::SubpathRun& run,
                                     const std::function<void(const std::string&)>&

@@ -232,10 +232,12 @@ inline std::size_t varint_size(std::uint64_t value) {
 
 // Shared slot bookkeeping for the encoder and the decoder. Slots are kept in
 // one (path, rank)-sorted vector because the coded subset indexes into that
-// order. A per-path first-slot/count table makes the common update - every
-// path at the node already has as many slots as it has occurrences there - an
-// in-place overwrite of those slots; only a new path or a changed occurrence
-// count rebuilds the vector.
+// order; each active path owns a contiguous range of it. The common update -
+// every path at the node keeps its occurrence count - overwrites those ranges
+// in place; only a new path or a changed count rebuilds the vector. A node's
+// postings are read back from the updated slots instead of being kept
+// separately, so decoding a node with N occurrences needs about 16 bytes per
+// occurrence (repeat nodes can have tens of millions).
 class PathSlotState {
 public:
     static constexpr std::uint32_t kNoSlot = 0xffffffffu;
@@ -243,9 +245,11 @@ public:
     void reset() {
         for (const auto& slot : slots_) first_slot_[slot.path_id] = kNoSlot;
         slots_.clear();
+        node_paths_.clear();
     }
 
-    [[nodiscard]] const std::vector<Posting>& slots() const { return slots_; }
+    [[nodiscard]] std::size_t slot_count() const { return slots_.size(); }
+    [[nodiscard]] std::uint32_t rank(std::size_t slot) const { return slots_[slot].step_rank; }
 
     // Slots of path_id as [first, first + count); count 0 when it has none.
     void path_slots(std::uint32_t path_id, std::uint32_t& first, std::uint32_t& count) const {
@@ -268,40 +272,88 @@ public:
         return true;
     }
 
-    // Paths visiting this node replace their slots with this node's ranks.
-    void advance(const Posting* begin, const Posting* end) {
+    // Move to the next node. Its occurrences are the predicted slots (each
+    // slot rank + 1), given as sorted slot indices, merged with the explicit
+    // postings, which are sorted by (path, rank). Paths at the node replace
+    // their slots with its ranks; other paths keep theirs.
+    void advance(const std::uint32_t* predicted, std::size_t predicted_count,
+                 const Posting* explicit_begin, const Posting* explicit_end) {
+        node_ranks_.clear();
+        node_paths_.clear();
+        node_counts_.clear();
         bool in_place = true;
-        for (const Posting* q = begin; q < end && in_place;) {
-            const Posting* group_end = q + 1;
-            while (group_end < end && group_end->path_id == q->path_id) ++group_end;
+        std::size_t pi = 0;
+        const Posting* e = explicit_begin;
+        while (pi < predicted_count || e < explicit_end) {
+            std::uint32_t path = kNoSlot;
+            if (pi < predicted_count) {
+                if (predicted[pi] >= slots_.size()) {
+                    throw std::runtime_error("Encoded .pdx posting index exceeds the slot count");
+                }
+                path = slots_[predicted[pi]].path_id;
+            }
+            if (e < explicit_end && e->path_id < path) path = e->path_id;
             std::uint32_t first = 0;
             std::uint32_t count = 0;
-            path_slots(q->path_id, first, count);
-            in_place = count == static_cast<std::uint32_t>(group_end - q);
-            q = group_end;
+            path_slots(path, first, count);
+            const std::uint32_t slot_end = first + count;
+            const std::size_t start = node_ranks_.size();
+            while (true) {
+                const bool have_predicted = pi < predicted_count && predicted[pi] < slot_end;
+                const bool have_explicit = e < explicit_end && e->path_id == path;
+                if (!have_predicted && !have_explicit) break;
+                std::uint64_t rank = 0;
+                const std::uint64_t predicted_rank =
+                    have_predicted ? static_cast<std::uint64_t>(slots_[predicted[pi]].step_rank) + 1 : 0;
+                if (have_predicted && (!have_explicit || predicted_rank <= e->step_rank)) {
+                    if (have_explicit && predicted_rank == e->step_rank) {
+                        throw std::runtime_error("Encoded .pdx postings contain a duplicate occurrence");
+                    }
+                    rank = predicted_rank;
+                    ++pi;
+                } else {
+                    rank = e->step_rank;
+                    ++e;
+                }
+                if (rank > 0xffffffffULL ||
+                    (node_ranks_.size() > start && node_ranks_.back() >= rank)) {
+                    throw std::runtime_error("Encoded .pdx postings are out of order");
+                }
+                node_ranks_.push_back(static_cast<std::uint32_t>(rank));
+            }
+            const auto node_count = static_cast<std::uint32_t>(node_ranks_.size() - start);
+            node_paths_.push_back(path);
+            node_counts_.push_back(node_count);
+            in_place = in_place && node_count == count;
         }
+
         if (in_place) {
-            for (const Posting* q = begin; q < end;) {
-                std::uint32_t index = first_slot_[q->path_id];
-                const auto path = q->path_id;
-                while (q < end && q->path_id == path) slots_[index++].step_rank = (q++)->step_rank;
+            // Every path at the node keeps its slot count: overwrite in place.
+            std::size_t offset = 0;
+            for (std::size_t i = 0; i < node_paths_.size(); ++i) {
+                Posting* slot = slots_.data() + first_slot_[node_paths_[i]];
+                for (std::uint32_t j = 0; j < node_counts_[i]; ++j) slot[j].step_rank = node_ranks_[offset + j];
+                offset += node_counts_[i];
             }
             return;
         }
 
+        // A path appeared or changed its occurrence count: rebuild the slots,
+        // keeping the ranges of paths that are not at the node.
         next_.clear();
-        next_.reserve(slots_.size() + static_cast<std::size_t>(end - begin));
+        next_.reserve(slots_.size() + node_ranks_.size());
         std::size_t a = 0;
-        const Posting* b = begin;
-        while (a < slots_.size() || b < end) {
-            if (b < end && (a == slots_.size() || b->path_id <= slots_[a].path_id)) {
-                const auto path = b->path_id;
-                while (a < slots_.size() && slots_[a].path_id == path) ++a;
-                while (b < end && b->path_id == path) next_.push_back(*b++);
-            } else {
-                next_.push_back(slots_[a++]);
+        std::size_t offset = 0;
+        for (std::size_t i = 0; i < node_paths_.size(); ++i) {
+            const auto path = node_paths_[i];
+            while (a < slots_.size() && slots_[a].path_id < path) next_.push_back(slots_[a++]);
+            while (a < slots_.size() && slots_[a].path_id == path) ++a;
+            for (std::uint32_t j = 0; j < node_counts_[i]; ++j) {
+                next_.push_back(Posting{path, node_ranks_[offset + j]});
             }
+            offset += node_counts_[i];
         }
+        next_.insert(next_.end(), slots_.begin() + static_cast<std::ptrdiff_t>(a), slots_.end());
         slots_.swap(next_);
         for (std::uint32_t i = 0; i < slots_.size();) {
             const auto path = slots_[i].path_id;
@@ -317,9 +369,21 @@ public:
         }
     }
 
+    // Postings of the node passed to the last advance(), by (path, rank).
+    template <typename Fn>
+    void for_each_node_posting(Fn&& fn) const {
+        for (const auto path : node_paths_) {
+            const Posting* slot = slots_.data() + first_slot_[path];
+            for (std::uint32_t j = 0; j < slot_count_[path]; ++j) fn(path, slot[j].step_rank);
+        }
+    }
+
 private:
     std::vector<Posting> slots_;
     std::vector<Posting> next_;
+    std::vector<std::uint32_t> node_paths_;
+    std::vector<std::uint32_t> node_counts_;
+    std::vector<std::uint32_t> node_ranks_;
     std::vector<std::uint32_t> first_slot_;
     std::vector<std::uint32_t> slot_count_;
 };
@@ -341,7 +405,6 @@ public:
         }
         if (begin == end) return;
 
-        const auto& slots = state_.slots();
         predicted_.clear();
         explicit_.clear();
         for (const Posting* q = begin; q < end;) {
@@ -351,8 +414,8 @@ public:
             const std::uint32_t slot_end = si + count;
             const auto path = q->path_id;
             for (; q < end && q->path_id == path; ++q) {
-                while (si < slot_end && slots[si].step_rank + 1 < q->step_rank) ++si;
-                if (si < slot_end && slots[si].step_rank + 1 == q->step_rank) {
+                while (si < slot_end && static_cast<std::uint64_t>(state_.rank(si)) + 1 < q->step_rank) ++si;
+                if (si < slot_end && static_cast<std::uint64_t>(state_.rank(si)) + 1 == q->step_rank) {
                     predicted_.push_back(si++);
                 } else {
                     explicit_.push_back(*q);
@@ -363,7 +426,7 @@ public:
         std::sort(predicted_.begin(), predicted_.end());
 
         // Pick the cheapest description of the predicted subset.
-        const std::size_t m = slots.size();
+        const std::size_t m = state_.slot_count();
         const std::size_t k = predicted_.size();
         SubsetMode mode = SubsetMode::none;
         if (k == m && m > 0) {
@@ -438,7 +501,8 @@ public:
             prev_path = q.path_id;
         }
 
-        state_.advance(begin, end);
+        // The node's occurrences become the slots of its paths.
+        state_.advance(nullptr, 0, begin, end);
     }
 
 private:
@@ -455,19 +519,18 @@ public:
     // Call at the first node of every block (whether or not it is empty).
     void reset() { state_.reset(); }
 
-    // Decode one non-empty node of posting_count postings from [p, end),
-    // appending them to out sorted by (path, rank).
+    // Decode one non-empty node of posting_count postings from [p, end) and
+    // advance the slot state; read the postings with for_each_node_posting().
     void decode_node(const unsigned char*& p,
                      const unsigned char* end,
                      std::uint64_t posting_count,
-                     std::uint32_t path_limit,
-                     std::vector<Posting>& out) {
+                     std::uint32_t path_limit) {
         if (p >= end) throw std::runtime_error("Unexpected end of encoded .pdx postings");
         const auto mode = static_cast<SubsetMode>(*p++);
-        const auto& slots = state_.slots();
-        const std::size_t m = slots.size();
+        const std::size_t m = state_.slot_count();
 
         predicted_.clear();
+        std::size_t predicted_count = 0;
         switch (mode) {
             case SubsetMode::none:
                 break;
@@ -522,13 +585,14 @@ public:
             default:
                 throw std::runtime_error("Unknown .pdx posting subset mode");
         }
-        if (predicted_.size() > posting_count) {
+        predicted_count = predicted_.size();
+        if (predicted_count > posting_count) {
             throw std::runtime_error("Encoded .pdx postings predict more than the node posting count");
         }
 
         // Explicit postings, already in (path, rank) order.
         explicit_.clear();
-        const std::uint64_t explicit_count = posting_count - predicted_.size();
+        const std::uint64_t explicit_count = posting_count - predicted_count;
         std::uint64_t path = 0;
         for (std::uint64_t i = 0; i < explicit_count; ++i) {
             path += read_varint(p, end);
@@ -550,19 +614,14 @@ public:
             explicit_.push_back(Posting{path_id, static_cast<std::uint32_t>(rank)});
         }
 
-        // Merge predicted (slot order is (path, rank) order) with explicit.
-        const std::size_t first = out.size();
-        std::size_t ei = 0;
-        for (const auto index : predicted_) {
-            const Posting q{slots[index].path_id, slots[index].step_rank + 1};
-            while (ei < explicit_.size() && posting_less(explicit_[ei], q)) out.push_back(explicit_[ei++]);
-            if (ei < explicit_.size() && !posting_less(q, explicit_[ei])) {
-                throw std::runtime_error("Encoded .pdx postings contain a duplicate occurrence");
-            }
-            out.push_back(q);
-        }
-        while (ei < explicit_.size()) out.push_back(explicit_[ei++]);
-        state_.advance(out.data() + first, out.data() + out.size());
+        state_.advance(predicted_.data(), predicted_.size(),
+                       explicit_.data(), explicit_.data() + explicit_.size());
+    }
+
+    // Postings of the last decoded node, sorted by (path, rank).
+    template <typename Fn>
+    void for_each_node_posting(Fn&& fn) const {
+        state_.for_each_node_posting(fn);
     }
 
 private:

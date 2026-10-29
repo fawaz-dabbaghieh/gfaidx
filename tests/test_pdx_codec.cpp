@@ -168,7 +168,10 @@ void test_slot_postings() {
             if (nodes[n].empty()) continue;
             out.clear();
             const unsigned char* p = base + starts[n];
-            decoder.decode_node(p, base + starts[n + 1], nodes[n].size(), path_count, out);
+            decoder.decode_node(p, base + starts[n + 1], nodes[n].size(), path_count);
+            decoder.for_each_node_posting([&](std::uint32_t path, std::uint32_t rank) {
+                out.push_back(Posting{path, rank});
+            });
             CHECK(p == base + starts[n + 1]);
             CHECK(out.size() == nodes[n].size());
             for (std::size_t i = 0; i < out.size(); ++i) {
@@ -189,15 +192,13 @@ void test_slot_postings() {
             const std::uint32_t head = n - n % block_nodes;
             for (std::uint32_t h = head; h < n; ++h) {
                 if (nodes[h].empty()) continue;
-                out.clear();
                 const unsigned char* p = base + starts[h];
-                fresh.decode_node(p, base + starts[h + 1], nodes[h].size(), path_count, out);
+                fresh.decode_node(p, base + starts[h + 1], nodes[h].size(), path_count);
             }
             CHECK(throws([&] {
                 PathSlotPostingDecoder copy = fresh;
-                std::vector<Posting> sink;
                 const unsigned char* p = base + starts[n];
-                copy.decode_node(p, base + starts[n + 1] - 1, nodes[n].size(), path_count, sink);
+                copy.decode_node(p, base + starts[n + 1] - 1, nodes[n].size(), path_count);
                 if (p != base + starts[n + 1] - 1) throw std::runtime_error("trailing bytes");
             }));
             break;
