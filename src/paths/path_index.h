@@ -232,6 +232,14 @@ public:
         std::uint64_t max_steps,
         const std::function<void(const StepRecord& step, std::uint64_t step_rank)>& callback) const;
 
+    // Ask the kernel to start reading the step data of these runs (and the
+    // block index entries that locate them) before they are read one by
+    // one. On a cold page cache this turns one dependent disk read per run
+    // into one batch of parallel reads; on a warm cache it costs a few
+    // syscalls. Very large batches are skipped because they are bandwidth
+    // bound anyway.
+    void prefetch_runs(const std::vector<SubpathRun>& runs) const;
+
     // Uses a reader-owned block cache, so like the node-name caches it is not
     // safe to call concurrently; worker threads use open_posting_cursor().
     // Postings are delivered sorted by (path id, step rank).

@@ -347,6 +347,25 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
             });
     };
 
+    {
+        // Start reading every selected span's steps at once before they are
+        // walked one path at a time below.
+        std::vector<paths::SubpathRun> selected_spans;
+        for (std::uint32_t path_id = 0; path_id < path_bounds.size(); ++path_id) {
+            const auto& bounds = path_bounds[path_id];
+            if (!bounds.seen) continue;
+            if (!exact_runs[path_id].empty()) {
+                selected_spans.insert(selected_spans.end(), exact_runs[path_id].begin(),
+                                      exact_runs[path_id].end());
+            } else if (bounds.max_step >= bounds.min_step) {
+                selected_spans.push_back(paths::SubpathRun{
+                    path_id, bounds.min_step,
+                    static_cast<std::uint64_t>(bounds.max_step) - bounds.min_step + 1});
+            }
+        }
+        path_index.prefetch_runs(selected_spans);
+    }
+
     for (std::uint32_t path_id = 0; path_id < path_bounds.size(); ++path_id) {
         const auto& bounds = path_bounds[path_id];
         if (!bounds.seen) continue;

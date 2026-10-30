@@ -651,6 +651,7 @@ public:
                                                            selection.keep_single_step_runs);
             runs = &discovered;
         }
+        path_index->prefetch_runs(*runs);
         paths::SelectedNodeNameLookup names(path_index->node_count(), selection.ranks,
                                             selection.names);
         paths::WalkCoordState coordinates;

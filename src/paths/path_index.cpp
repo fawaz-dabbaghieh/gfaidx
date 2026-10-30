@@ -1618,6 +1618,84 @@ void PathIndexReader::for_each_step(
                        [&](const StepRecord& step) { callback(step, step_rank++); });
 }
 
+namespace {
+
+// Coalesce file ranges by page and pass them to posix_fadvise(WILLNEED).
+void advise_willneed(int fd, std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) {
+#ifdef POSIX_FADV_WILLNEED
+    constexpr std::uint64_t kPage = 4096;
+    std::sort(ranges.begin(), ranges.end());
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    bool open = false;
+    for (const auto& range : ranges) {
+        const std::uint64_t b = range.first - range.first % kPage;
+        const std::uint64_t e = range.second;
+        if (open && b <= end + kPage) {
+            end = std::max(end, e);
+            continue;
+        }
+        if (open) ::posix_fadvise(fd, static_cast<off_t>(begin), static_cast<off_t>(end - begin), POSIX_FADV_WILLNEED);
+        begin = b;
+        end = e;
+        open = true;
+    }
+    if (open) ::posix_fadvise(fd, static_cast<off_t>(begin), static_cast<off_t>(end - begin), POSIX_FADV_WILLNEED);
+#else
+    (void)fd;
+    (void)ranges;
+#endif
+}
+
+}  // namespace
+
+void PathIndexReader::prefetch_runs(const std::vector<SubpathRun>& runs) const {
+    constexpr std::size_t kMaxPrefetchRuns = 1u << 16;
+    if (runs.empty() || runs.size() > kMaxPrefetchRuns) return;
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    ranges.reserve(runs.size());
+    if (step_encoding_ == StepEncoding::packed32) {
+        for (const auto& run : runs) {
+            if (run.path_id >= paths_.size() || run.step_count == 0) continue;
+            const std::uint64_t first = paths_[run.path_id].step_begin + run.start_step;
+            const std::uint64_t offset = step_table_offset_ + first * sizeof(StepRecordDisk);
+            ranges.emplace_back(offset, offset + run.step_count * sizeof(StepRecordDisk));
+        }
+        advise_willneed(fd_, ranges);
+        return;
+    }
+
+    // Delta steps need the superblock records first: prefetch them all, then
+    // read them (the reads now overlap) and prefetch the step data.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> blocks;
+    blocks.reserve(runs.size());
+    for (const auto& run : runs) {
+        if (run.path_id >= paths_.size() || run.step_count == 0) continue;
+        const std::uint64_t first = paths_[run.path_id].step_begin + run.start_step;
+        if (first + run.step_count > total_step_count_) continue;
+        const std::uint64_t first_block = first / codec::kStepBlockSteps;
+        const std::uint64_t end_block = (first + run.step_count - 1) / codec::kStepBlockSteps + 1;
+        blocks.emplace_back(first_block, end_block);
+        for (const auto block : {first_block, end_block}) {
+            const std::uint64_t superblock = block / codec::kStepSuperblockBlocks;
+            if (superblock >= step_superblock_count_) continue;
+            const std::uint64_t offset = step_index_offset_ + superblock * sizeof(codec::StepSuperblockDisk);
+            ranges.emplace_back(offset, offset + sizeof(codec::StepSuperblockDisk));
+        }
+    }
+    advise_willneed(fd_, ranges);
+    ranges.clear();
+    std::sort(blocks.begin(), blocks.end());
+    for (const auto& [first_block, end_block] : blocks) {
+        const std::uint64_t begin = step_block_offset(first_block);
+        const std::uint64_t end = step_block_offset(end_block);
+        if (end < begin || end > step_data_bytes_) continue;
+        ranges.emplace_back(step_table_offset_ + begin, step_table_offset_ + end);
+    }
+    advise_willneed(fd_, ranges);
+}
+
 namespace detail {
 
 // Per-thread posting decode state. For path_slots postings it holds one

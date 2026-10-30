@@ -802,6 +802,7 @@ std::uint64_t emit_subpaths_if_available(std::ostream& out,
             "Using " + std::to_string(runs->size()) +
             " preserved all-haplotype path intervals");
     }
+    index.prefetch_runs(*runs);
     info_get_subgraph("Subpath interval discovery finished in " +
                       elapsed_seconds(discovery_timer) + " with " +
                       std::to_string(runs->size()) + " intervals");

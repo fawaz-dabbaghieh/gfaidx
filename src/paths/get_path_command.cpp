@@ -422,6 +422,7 @@ int run_get_path(const argparse::ArgumentParser& program) {
             std::cerr << "No subpaths overlap the requested node set" << std::endl;
             return 1;
         }
+        index.prefetch_runs(runs);
 
         // W records have SeqStart/SeqEnd fields. P records can use an encoded
         // name interval, or local coordinates when no interval is present.
