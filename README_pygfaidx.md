@@ -193,7 +193,8 @@ print(index.index_paths.lnx)
 ```
 
 The graph and all supplied sidecars must come from the same indexing bundle.
-gfaidx rejects detectable node-count or rank-alignment mismatches.
+gfaidx rejects node-count mismatches, and a `.pdx` or `.cdx` built against a
+different `.ndx` node numbering.
 
 ## Look up nodes, links, and communities
 

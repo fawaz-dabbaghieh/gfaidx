@@ -228,7 +228,8 @@ std::cout << index.index_paths().lnx << '\n';
 ```
 
 The graph and all supplied sidecars must originate from the same indexing
-bundle. gfaidx rejects detectable count or alignment mismatches.
+bundle. gfaidx rejects count mismatches, and a `.pdx` or `.cdx` built against
+a different `.ndx` node numbering.
 
 ## Look up nodes, links, and communities
 
