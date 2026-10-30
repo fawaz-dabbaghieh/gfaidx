@@ -163,6 +163,13 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 $<TARGET_FILE:gfaidx_cli>
                 ${CMAKE_SOURCE_DIR})
 
+    # A GFA without L lines skips Louvain instead of crashing in it.
+    add_test(
+        NAME no_links
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_no_links.sh
+                $<TARGET_FILE:gfaidx_cli>)
+
     add_executable(gfaidx_indexed_graph_api_test tests/test_indexed_graph_api.cpp)
     target_link_libraries(gfaidx_indexed_graph_api_test PRIVATE gfaidx_library)
     add_test(

@@ -273,14 +273,19 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         /*
          * converting the edge list to binary format for faster processing
          */
-        std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
-        timer.reset();
-        // I made this functions instead of using the Louvain graph object from the earlier versions of gfaidx
-        // I think that object was too big, and one can build the binary version from the edge list directly
-        // but having to spend a bit more time due to passing through the list twice
-        write_binary_graph_from_edgelist(sorted_tmp_edgelist, tmp_binary, N_NODES);
-        std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
-        log_memory("After binary graph write");
+        // Louvain crashes on an empty graph, so a GFA without L lines skips it and
+        // all of its S nodes land in the singleton community below.
+        const bool has_edges = N_EDGES > 0;
+        if (has_edges) {
+            std::cout <<  get_time() << ": Saving the graph as a compressed binary to disk to: " << tmp_binary << std::endl;
+            timer.reset();
+            // I made this functions instead of using the Louvain graph object from the earlier versions of gfaidx
+            // I think that object was too big, and one can build the binary version from the edge list directly
+            // but having to spend a bit more time due to passing through the list twice
+            write_binary_graph_from_edgelist(sorted_tmp_edgelist, tmp_binary, N_NODES);
+            std::cout <<  get_time() << ": Finished saving the binary graph to disk in " << timer.elapsed() << " seconds" << std::endl;
+            log_memory("After binary graph write");
+        }
 
         /*
          * performing community detection on the binary graph
@@ -290,13 +295,16 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         std::uint32_t ncom = 0;
         // scoping so objects that are not needed anymore get destructed, mainly final_graph
         {
-            timer.reset();
-            std::cout << get_time() << ": Starting community detection" << std::endl;
-
             BGraph final_graph; // binary graph
-            generate_communities(tmp_binary, final_graph, display_level);
-            std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
-            log_memory("After community detection");
+            if (has_edges) {
+                timer.reset();
+                std::cout << get_time() << ": Starting community detection" << std::endl;
+                generate_communities(tmp_binary, final_graph, display_level);
+                std::cout << get_time() << ": Finished community detection in " << timer.elapsed() << " seconds" << std::endl;
+                log_memory("After community detection");
+            } else {
+                std::cout << get_time() << ": The GFA has no L lines, skipping community detection" << std::endl;
+            }
 
             timer.reset();
             std::cout << get_time() << ": Scanning for singleton nodes" << std::endl;
