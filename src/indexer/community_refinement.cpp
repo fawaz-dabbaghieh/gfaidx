@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "fs/fs_helpers.h"
@@ -49,42 +50,101 @@ LocalNodeMap build_local_node_map(const std::vector<int>& global_nodes) {
     return local_map;
 }
 
-// Stream the sorted global edge list once and keep only the edges whose
-// endpoints both fall inside the oversized community currently being refined.
-std::uint64_t build_local_edge_list(const std::string& sorted_edge_list_path,
-                                    const LocalNodeMap& local_map,
-                                    const std::string& local_edge_list_path) {
+using Edge = std::pair<std::uint32_t, std::uint32_t>;
+
+// Internal edges of every oversized community, grouped by work item: item i
+// owns edges[offsets[i], offsets[i + 1]), in sorted edge-list order.
+struct RoutedEdges {
+    std::vector<std::uint64_t> offsets;
+    std::vector<Edge> edges;
+};
+
+// Call fn(src, dst) for every edge of the sorted global edge list.
+template <typename Fn>
+void for_each_global_edge(const std::string& sorted_edge_list_path, Fn&& fn) {
     std::ifstream in(sorted_edge_list_path);
     if (!in) {
         throw std::runtime_error("Failed to open sorted edge list for refinement: " + sorted_edge_list_path);
     }
+    std::uint32_t src = 0;
+    std::uint32_t dst = 0;
+    while (in >> src >> dst) {
+        fn(src, dst);
+    }
+}
 
+// Hand every oversized community its internal edges (both endpoints in its
+// node list) with two passes over the global edge list, one to count and one
+// to fill, instead of one full pass per community. Each community's edges keep
+// the edge-list order, so its local edge list is the same as a per-community
+// scan would produce.
+RoutedEdges route_refinement_edges(const std::string& sorted_edge_list_path,
+                                   const std::vector<CommunityRefinementWorkItem>& work_items,
+                                   std::size_t node_count) {
+    constexpr std::uint32_t kNoItem = std::numeric_limits<std::uint32_t>::max();
+    std::vector<std::uint32_t> node_item(node_count, kNoItem);
+    for (std::uint32_t item = 0; item < work_items.size(); ++item) {
+        for (const int node : work_items[item].global_nodes) {
+            if (node < 0) {
+                throw std::runtime_error("Negative global node id encountered during community refinement");
+            }
+            if (static_cast<std::size_t>(node) < node_count) {
+                node_item[static_cast<std::size_t>(node)] = item;
+            }
+        }
+    }
+    auto item_of_edge = [&](std::uint32_t src, std::uint32_t dst) {
+        if (src >= node_count || dst >= node_count) return kNoItem;
+        const std::uint32_t item = node_item[src];
+        return item == node_item[dst] ? item : kNoItem;
+    };
+
+    RoutedEdges routed;
+    routed.offsets.assign(work_items.size() + 1, 0);
+    for_each_global_edge(sorted_edge_list_path, [&](std::uint32_t src, std::uint32_t dst) {
+        const std::uint32_t item = item_of_edge(src, dst);
+        if (item != kNoItem) ++routed.offsets[item + 1];
+    });
+    for (std::size_t i = 1; i < routed.offsets.size(); ++i) {
+        routed.offsets[i] += routed.offsets[i - 1];
+    }
+
+    routed.edges.resize(routed.offsets.back());
+    std::vector<std::uint64_t> fill(routed.offsets.begin(), routed.offsets.end() - 1);
+    for_each_global_edge(sorted_edge_list_path, [&](std::uint32_t src, std::uint32_t dst) {
+        const std::uint32_t item = item_of_edge(src, dst);
+        if (item != kNoItem) routed.edges[fill[item]++] = Edge{src, dst};
+    });
+    for (std::size_t item = 0; item < work_items.size(); ++item) {
+        if (fill[item] != routed.offsets[item + 1]) {
+            throw std::runtime_error("Sorted edge list changed while routing refinement edges");
+        }
+    }
+    return routed;
+}
+
+// Write one community's routed edges as a local edge list in local node ids.
+std::uint64_t build_local_edge_list(const Edge* begin,
+                                    const Edge* end,
+                                    const LocalNodeMap& local_map,
+                                    const std::string& local_edge_list_path) {
     std::ofstream out(local_edge_list_path);
     if (!out) {
         throw std::runtime_error("Failed to open local edge list for refinement: " + local_edge_list_path);
     }
 
     bool first_line = true;
-    std::uint64_t kept_edges = 0;
-    std::uint32_t src = 0;
-    std::uint32_t dst = 0;
-    while (in >> src >> dst) {
-        const auto src_it = local_map.global_to_local.find(src);
-        if (src_it == local_map.global_to_local.end()) {
-            continue;
+    for (const Edge* edge = begin; edge < end; ++edge) {
+        const auto src_it = local_map.global_to_local.find(edge->first);
+        const auto dst_it = local_map.global_to_local.find(edge->second);
+        if (src_it == local_map.global_to_local.end() || dst_it == local_map.global_to_local.end()) {
+            throw std::runtime_error("Routed refinement edge is outside its community");
         }
-
-        const auto dst_it = local_map.global_to_local.find(dst);
-        if (dst_it == local_map.global_to_local.end()) {
-            continue;
-        }
-
         if (!first_line) {
             out << '\n';
         }
         out << src_it->second << ' ' << dst_it->second;
         first_line = false;
-        kept_edges++;
     }
 
     out.close();
@@ -92,7 +152,7 @@ std::uint64_t build_local_edge_list(const std::string& sorted_edge_list_path,
         throw std::runtime_error("Failed while writing local edge list: " + local_edge_list_path);
     }
 
-    return kept_edges;
+    return static_cast<std::uint64_t>(end - begin);
 }
 
 // Rewrite the refined local Louvain result back onto the global node ids while
@@ -198,11 +258,28 @@ CommunityRefinementSummary refine_oversized_communities(
     // Group local refinement artifacts under a dedicated subdirectory so they are easy to inspect or remove.
     fs::create_directories(refine_dir);
 
+    Timer route_timer;
+    const RoutedEdges routed = route_refinement_edges(sorted_edge_list_path, work_items, id_to_comm.size());
+    std::cout << get_time() << ": Routed " << routed.edges.size() << " internal edges to "
+              << work_items.size() << " oversized communities in " << route_timer.elapsed()
+              << " seconds" << std::endl;
+
     std::uint32_t next_community_id = initial_community_count;
-    for (const auto& work_item : work_items) {
+    for (std::size_t item = 0; item < work_items.size(); ++item) {
+        const auto& work_item = work_items[item];
         Timer refine_timer;
         std::cout << get_time() << ": Refining community " << work_item.original_community_id
                   << " with " << work_item.global_nodes.size() << " nodes" << std::endl;
+
+        const Edge* edges_begin = routed.edges.data() + routed.offsets[item];
+        const Edge* edges_end = routed.edges.data() + routed.offsets[item + 1];
+        if (edges_begin == edges_end) {
+            // Louvain needs at least one edge; a community without internal
+            // edges cannot be split along them anyway.
+            std::cout << get_time() << ": Community " << work_item.original_community_id
+                      << " has no internal edges, leaving it unchanged" << std::endl;
+            continue;
+        }
 
         const LocalNodeMap local_map = build_local_node_map(work_item.global_nodes);
         const fs::path local_edge_list_path =
@@ -210,7 +287,8 @@ CommunityRefinementSummary refine_oversized_communities(
         const fs::path local_binary_path =
             refine_dir / ("community_" + std::to_string(work_item.original_community_id) + ".bin");
 
-        const std::uint64_t local_edge_count = build_local_edge_list(sorted_edge_list_path,
+        const std::uint64_t local_edge_count = build_local_edge_list(edges_begin,
+                                                                     edges_end,
                                                                      local_map,
                                                                      local_edge_list_path.string());
 

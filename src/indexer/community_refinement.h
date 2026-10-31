@@ -33,9 +33,10 @@ std::vector<CommunityRefinementWorkItem> collect_oversized_community_work(
     std::uint32_t max_chunk_nodes,
     std::optional<std::uint32_t> singleton_community_id);
 
-// Refine the selected oversized communities one at a time by streaming the
-// global sorted edge list, building a local subgraph, and remapping the final
-// local Louvain communities back onto the global node ids.
+// Refine the selected oversized communities one at a time: two passes over
+// the global sorted edge list hand every community its internal edges, then
+// each community's local subgraph goes through Louvain and the local
+// communities are remapped back onto the global node ids.
 CommunityRefinementSummary refine_oversized_communities(
     const std::string& sorted_edge_list_path,
     const std::string& tmp_dir,

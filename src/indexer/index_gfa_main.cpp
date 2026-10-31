@@ -406,6 +406,11 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                           : "first appearance") << std::endl;
             write_node_hash_index(node_id_map, assignment, staged_node_index_path);
         }
+        // Everything after this point resolves names through the .ndx. The
+        // path index builds its own name table, so drop this one first rather
+        // than holding two copies of every node name during path indexing.
+        std::unordered_map<std::string, unsigned int>().swap(node_id_map);
+        std::vector<std::uint32_t>().swap(id_to_comm);
         std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
         log_memory("After node hash index");
 
