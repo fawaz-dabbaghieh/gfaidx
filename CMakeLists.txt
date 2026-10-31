@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(gfaidx VERSION 2.2.0 LANGUAGES C CXX)
+project(gfaidx VERSION 2.3.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
