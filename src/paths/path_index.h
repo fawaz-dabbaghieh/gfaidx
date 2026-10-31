@@ -6,6 +6,7 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iosfwd>
 #include <limits>
 #include <memory>
@@ -76,14 +77,17 @@ struct PathIndexEncoding {
 // Build the disk-backed .pdx path index for P/W records in a GFA file. Node
 // ids are aligned to the supplied .ndx file so path queries and graph queries
 // share the same integer node space. A legacy .ndx with the v4 encodings
-// writes a v4 file byte for byte; everything else writes v5.
+// writes a v4 file byte for byte; everything else writes v5. threads > 1
+// resolves the steps of long path lines, sorts posting runs and merges run
+// groups in parallel; the output is the same for every thread count.
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
                       const std::string& node_index_path,
                       const Reader::Options& reader_options = Reader::Options{},
                       const std::string& tmp_base_dir = std::string(""),
                       bool keep_tmp = false,
-                      const PathIndexEncoding& encoding = PathIndexEncoding{});
+                      const PathIndexEncoding& encoding = PathIndexEncoding{},
+                      unsigned threads = 1);
 
 namespace detail {
 
@@ -96,12 +100,20 @@ struct TempPosting {
 };
 
 // Bounded in-memory posting accumulator that spills sorted posting runs to disk
-// once the configured chunk size is reached.
+// once the configured chunk size is reached. With background_spills > 0 a full
+// chunk is sorted and written by a worker thread while new postings go into a
+// fresh chunk; at most background_spills chunks are in flight at once.
 class PostingRunBuilder {
 public:
-    explicit PostingRunBuilder(std::string temp_dir, std::size_t max_records);
+    PostingRunBuilder(std::string temp_dir, std::size_t max_records, unsigned background_spills = 0);
+    ~PostingRunBuilder();
+
+    PostingRunBuilder(const PostingRunBuilder&) = delete;
+    PostingRunBuilder& operator=(const PostingRunBuilder&) = delete;
 
     void add(std::uint32_t node_id, std::uint32_t path_id, std::uint32_t step_rank);
+    // Spill the last chunk and wait for every background spill; rethrows the
+    // first spill error.
     void finish();
 
     [[nodiscard]] const std::vector<std::string>& run_paths() const;
@@ -110,12 +122,15 @@ public:
 
 private:
     void flush_run();
+    void wait_for_oldest_spill();
 
     std::string temp_dir_;
     std::size_t max_records_{};
+    unsigned background_spills_{};
     std::uint64_t total_postings_{};
     std::vector<TempPosting> chunk_;
     std::vector<std::string> run_paths_;
+    std::deque<std::future<void>> pending_spills_;
 };
 
 // Sequential reader over one sorted posting run file used during k-way merge.

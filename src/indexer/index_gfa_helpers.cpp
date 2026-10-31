@@ -130,6 +130,11 @@ void configure_index_gfa_parser(argparse::ArgumentParser& parser) {
       .default_value(std::to_string(paths::kDefaultPostingBlockNodes))
       .nargs(1)
       .help("node ids per independently decodable posting block for --posting_encoding slots");
+
+    parser.add_argument("--threads")
+      .default_value(std::string("1"))
+      .nargs(1)
+      .help("threads for building the path index; the output is the same for every thread count");
 }
 
 bool run_sort(const std::string& input_edges,

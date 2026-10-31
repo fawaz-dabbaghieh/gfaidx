@@ -163,6 +163,13 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 $<TARGET_FILE:gfaidx_cli>
                 ${CMAKE_SOURCE_DIR})
 
+    # --threads must not change any index file, and errors must match serial parsing.
+    add_test(
+        NAME parallel_build
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_parallel_build.sh
+                $<TARGET_FILE:gfaidx_cli>)
+
     # A GFA without L lines skips Louvain instead of crashing in it.
     add_test(
         NAME no_links

@@ -44,6 +44,11 @@ void configure_index_paths_parser(argparse::ArgumentParser& parser) {
       .default_value(std::to_string(kDefaultPostingBlockNodes))
       .nargs(1)
       .help("node ids per independently decodable posting block for --posting_encoding slots");
+
+    parser.add_argument("--threads")
+      .default_value(std::string("1"))
+      .nargs(1)
+      .help("threads for building the path index; the output is the same for every thread count");
 }
 
 int run_index_paths(const argparse::ArgumentParser& program) {
@@ -96,7 +101,9 @@ int run_index_paths(const argparse::ArgumentParser& program) {
         }
         encoding.posting_block_nodes = utils::parse_u32_strict(
             program.get<std::string>("posting_block_nodes"), "--posting_block_nodes", 1, 1u << 16);
-        build_path_index(input_gfa, out_index, node_index, reader_options, tmp_dir, false, encoding);
+        const unsigned threads =
+            utils::parse_u32_strict(program.get<std::string>("threads"), "--threads", 1, 1024);
+        build_path_index(input_gfa, out_index, node_index, reader_options, tmp_dir, false, encoding, threads);
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         return 1;

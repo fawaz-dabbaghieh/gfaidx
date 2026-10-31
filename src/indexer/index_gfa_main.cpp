@@ -108,9 +108,11 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     if (legacy_node_order || program.get<std::string>("posting_encoding") == "groups") {
         path_encoding.postings = gfaidx::paths::PostingEncoding::path_groups;
     }
+    unsigned threads = 1;
     try {
         path_encoding.posting_block_nodes = utils::parse_u32_strict(
             program.get<std::string>("posting_block_nodes"), "--posting_block_nodes", 1, 1u << 16);
+        threads = utils::parse_u32_strict(program.get<std::string>("threads"), "--threads", 1, 1024);
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         return 1;
@@ -440,7 +442,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                             reader_options,
                                             tmp_dir,
                                             keep_tmp,
-                                            path_encoding);
+                                            path_encoding,
+                                            threads);
             std::cout << get_time() << ": Finished path index in " << timer.elapsed() << " seconds" << std::endl;
             log_memory("After path index");
 

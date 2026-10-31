@@ -243,6 +243,12 @@ Options:
   node IDs per independently decodable posting block for `slots`; defaults
   to `32`. Larger blocks compress better but make an isolated single-node
   lookup decode more of its block
+- `--threads <N>`
+  threads for building the path index; defaults to `1`. Long `P`/`W` lines
+  have their node names resolved in parallel, posting runs are sorted in the
+  background (up to 4 runs of 64 MB in flight), and posting-run merge groups
+  run in parallel as far as the soft open-file limit allows. Every thread
+  count writes the same files
 
 Outputs:
 
@@ -605,7 +611,7 @@ Options:
 - `--progress_every <N>`
   progress logging interval while reading
 - `--step_encoding <delta|packed32>`, `--posting_encoding <slots|groups>`,
-  `--posting_block_nodes <N>`
+  `--posting_block_nodes <N>`, `--threads <N>`
   as for `index_gfa`. With a legacy `.ndx`, `packed32` plus `groups` writes a
   v4 `.pdx`; any other combination writes v5
 

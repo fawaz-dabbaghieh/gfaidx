@@ -1,19 +1,26 @@
 #include "paths/path_index.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <charconv>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <queue>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -172,6 +179,18 @@ constexpr std::uint64_t kPostingMergeProgressInterval = 100000000;
 // collapsing large run sets in multiple passes when needed.
 constexpr std::size_t kPostingMergeFanIn = 128;
 
+// File descriptors left for everything other than posting-run merges when the
+// merge width is fitted to the soft open-file limit.
+constexpr std::size_t kReservedFileDescriptors = 64;
+
+// With threads > 1, a P/W line with at least this much step text has its
+// steps resolved by several threads; shorter lines are not worth splitting.
+constexpr std::size_t kParallelParseMinBytes = 1ULL << 20;
+
+// At most this many full posting chunks are sorted and written in the
+// background at once (each holds kPostingChunkBytes).
+constexpr unsigned kMaxBackgroundSpills = 4;
+
 constexpr std::size_t kFileCopyBufferBytes = 1ULL << 20;
 
 // Hash lookup is cheaper for small node sets; rank-addressed lookup wins once
@@ -185,6 +204,67 @@ using detail::PostingRunCursor;
 using detail::TempPosting;
 
 using codec::append_varint;
+
+// Build parameters that never change the output. The environment overrides
+// exist so tests can force many posting runs, deep merges and parallel line
+// parsing on small inputs.
+struct BuildTuning {
+    std::size_t posting_chunk_records{kPostingChunkRecords};
+    std::size_t merge_fan_in{kPostingMergeFanIn};
+    std::size_t parallel_parse_min_bytes{kParallelParseMinBytes};
+};
+
+std::size_t env_size_or(const char* name, std::size_t fallback, std::size_t minimum) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return fallback;
+    std::size_t parsed = 0;
+    const char* end = value + std::strlen(value);
+    const auto result = std::from_chars(value, end, parsed);
+    if (result.ec != std::errc() || result.ptr != end || parsed < minimum) {
+        throw std::runtime_error(std::string("Invalid value for ") + name + ": " + value);
+    }
+    return parsed;
+}
+
+BuildTuning build_tuning_from_env() {
+    BuildTuning tuning;
+    tuning.posting_chunk_records =
+        env_size_or("GFAIDX_TEST_POSTING_CHUNK_RECORDS", tuning.posting_chunk_records, 1);
+    tuning.merge_fan_in = env_size_or("GFAIDX_TEST_POSTING_MERGE_FAN_IN", tuning.merge_fan_in, 2);
+    tuning.parallel_parse_min_bytes =
+        env_size_or("GFAIDX_TEST_PARALLEL_PARSE_MIN_BYTES", tuning.parallel_parse_min_bytes, 1);
+    return tuning;
+}
+
+// Soft open-file limit of this process, or 0 when it is unlimited or unknown.
+// The limit is only read, never raised.
+std::size_t soft_open_file_limit() {
+    struct rlimit limit {};
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) return 0;
+    return static_cast<std::size_t>(limit.rlim_cur);
+}
+
+// Merge width that fits the soft open-file limit: a merge holds fan_in inputs
+// and one output, plus the reserve for everything else.
+std::size_t fitted_merge_fan_in(std::size_t fan_in) {
+    const std::size_t limit = soft_open_file_limit();
+    if (limit == 0) return fan_in;
+    const std::size_t available = limit > kReservedFileDescriptors + 3 ? limit - kReservedFileDescriptors - 1 : 2;
+    return std::max<std::size_t>(2, std::min(fan_in, available));
+}
+
+// Number of merge groups to run at once: at most one per thread, and only as
+// many as the soft open-file limit allows.
+std::size_t concurrent_merge_groups(std::size_t fan_in, unsigned threads, std::size_t groups) {
+    std::size_t workers = std::min<std::size_t>(threads, groups);
+    const std::size_t limit = soft_open_file_limit();
+    if (limit != 0) {
+        const std::size_t by_limit =
+            limit > kReservedFileDescriptors ? (limit - kReservedFileDescriptors) / (fan_in + 1) : 1;
+        workers = std::min(workers, by_limit);
+    }
+    return std::max<std::size_t>(1, workers);
+}
 
 bool test_seen_bit(const std::vector<std::uint64_t>& bits, std::uint32_t value) {
     const std::size_t word = value / 64;
@@ -423,48 +503,79 @@ void merge_sorted_runs_to_run_file(const std::vector<std::string>& run_paths,
 }
 
 // Repeatedly merge posting runs in bounded groups until the final merge width
-// fits under the configured fan-in cap.
+// fits under the fan-in cap. The groups of one pass are independent, so with
+// threads > 1 several are merged at once, within the open-file limit; each
+// group still produces the same file as a serial pass.
 std::vector<std::string> collapse_posting_runs(std::vector<std::string> run_paths,
-                                               const std::string& temp_dir) {
-    if (run_paths.size() <= kPostingMergeFanIn) {
+                                               const std::string& temp_dir,
+                                               std::size_t fan_in,
+                                               unsigned threads) {
+    if (run_paths.size() <= fan_in) {
         return run_paths;
     }
 
     std::cout << get_time() << ": Collapsing " << run_paths.size()
-              << " posting runs with fan-in " << kPostingMergeFanIn << std::endl;
+              << " posting runs with fan-in " << fan_in << std::endl;
 
     std::size_t pass = 0;
-    while (run_paths.size() > kPostingMergeFanIn) {
-        std::vector<std::string> merged_paths;
-        merged_paths.reserve((run_paths.size() + kPostingMergeFanIn - 1) / kPostingMergeFanIn);
-        const std::size_t input_run_count = run_paths.size();
-        const std::size_t total_groups = merged_paths.capacity();
+    while (run_paths.size() > fan_in) {
+        const std::size_t total_groups = (run_paths.size() + fan_in - 1) / fan_in;
+        const std::size_t workers = concurrent_merge_groups(fan_in, threads, total_groups);
+        std::vector<std::string> merged_paths(total_groups);
+        for (std::size_t group = 0; group < total_groups; ++group) {
+            merged_paths[group] = temp_dir + "/posting_merge_pass_" + std::to_string(pass) + "_" +
+                                  std::to_string(group) + ".bin";
+        }
 
         std::cout << get_time() << ": Merge pass " << pass
-                  << ": " << input_run_count << " runs -> "
-                  << total_groups << " merged runs" << std::endl;
+                  << ": " << run_paths.size() << " runs -> "
+                  << total_groups << " merged runs";
+        if (workers > 1) std::cout << " (" << workers << " groups at a time)";
+        std::cout << std::endl;
 
-        for (std::size_t begin = 0; begin < run_paths.size(); begin += kPostingMergeFanIn) {
-            const std::size_t end = std::min(run_paths.size(), begin + kPostingMergeFanIn);
-            std::vector<std::string> group(run_paths.begin() + static_cast<std::ptrdiff_t>(begin),
-                                           run_paths.begin() + static_cast<std::ptrdiff_t>(end));
+        std::atomic<std::size_t> next_group{0};
+        std::size_t completed_groups = 0;
+        std::exception_ptr first_error;
+        std::mutex mutex;
+        auto merge_groups = [&]() {
+            while (true) {
+                const std::size_t group = next_group.fetch_add(1);
+                if (group >= total_groups) return;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (first_error) return;
+                }
+                try {
+                    const std::size_t begin = group * fan_in;
+                    const std::size_t end = std::min(run_paths.size(), begin + fan_in);
+                    const std::vector<std::string> inputs(
+                        run_paths.begin() + static_cast<std::ptrdiff_t>(begin),
+                        run_paths.begin() + static_cast<std::ptrdiff_t>(end));
+                    merge_sorted_runs_to_run_file(inputs, merged_paths[group]);
+                    // Once a bounded-fan-in merge group has been materialized, its input
+                    // runs are no longer needed for later passes or final assembly.
+                    remove_paths_if_present(inputs);
 
-            const std::string merged_path =
-                temp_dir + "/posting_merge_pass_" + std::to_string(pass) + "_" +
-                std::to_string(merged_paths.size()) + ".bin";
-            merge_sorted_runs_to_run_file(group, merged_path);
-            merged_paths.push_back(merged_path);
-
-            // Once a bounded-fan-in merge group has been materialized, its input
-            // runs are no longer needed for later passes or final assembly.
-            remove_paths_if_present(group);
-
-            if (merged_paths.size() % 10 == 0 || merged_paths.size() == total_groups) {
-                std::cout << get_time() << ": Merge pass " << pass
-                          << " completed " << merged_paths.size()
-                          << "/" << total_groups << " groups" << std::endl;
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ++completed_groups;
+                    if (completed_groups % 10 == 0 || completed_groups == total_groups) {
+                        std::cout << get_time() << ": Merge pass " << pass
+                                  << " completed " << completed_groups
+                                  << "/" << total_groups << " groups" << std::endl;
+                    }
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (!first_error) first_error = std::current_exception();
+                    return;
+                }
             }
-        }
+        };
+
+        std::vector<std::thread> pool;
+        for (std::size_t i = 1; i < workers; ++i) pool.emplace_back(merge_groups);
+        merge_groups();
+        for (auto& worker : pool) worker.join();
+        if (first_error) std::rethrow_exception(first_error);
 
         run_paths.swap(merged_paths);
         ++pass;
@@ -751,6 +862,145 @@ std::uint64_t parse_walk_steps(
     return step_rank;
 }
 
+// Parallel step resolution for long P/W lines. The step text is cut into one
+// range of token starts per thread; tokens are always found over the whole
+// line, so a cut never splits a token and each range visits exactly the tokens
+// a serial pass would visit there. Ranges resolve names to packed
+// (node_id << 1 | reverse) values concurrently, then the steps are emitted in
+// order, and the error reported is the one a serial pass would hit first.
+struct StepRange {
+    std::size_t first{};
+    std::size_t last{};
+    std::vector<std::uint32_t> packed;
+    std::optional<std::string> error;
+};
+
+std::uint32_t pack_resolved_step(std::uint32_t node_id, bool is_reverse) {
+    return (node_id << 1) | (is_reverse ? 1u : 0u);
+}
+
+// P-line tokens starting in [range.first, range.last).
+void resolve_path_range(std::string_view segments,
+                        const std::unordered_map<std::string, std::uint32_t>& node_to_id,
+                        StepRange& range) {
+    std::string node_name;
+    for (size_t pos = range.first; pos < range.last;) {
+        const size_t comma = segments.find_first_of(",;", pos);
+        const size_t end = (comma == npos) ? segments.size() : comma;
+        const std::string_view token = segments.substr(pos, end - pos);
+        if (token.size() < 2) {
+            range.error = "Malformed path step token";
+            return;
+        }
+        const char orient = token.back();
+        if (orient != '+' && orient != '-') {
+            range.error = "Malformed path step orientation";
+            return;
+        }
+        node_name.assign(token.data(), token.size() - 1);
+        const auto it = node_to_id.find(node_name);
+        if (it == node_to_id.end()) {
+            range.error = "Path references unknown node id: " + node_name;
+            return;
+        }
+        range.packed.push_back(pack_resolved_step(it->second, orient == '-'));
+        if (comma == npos) break;
+        pos = comma + 1;
+    }
+}
+
+// W-line tokens starting in [range.first, range.last).
+void resolve_walk_range(std::string_view walk,
+                        const std::unordered_map<std::string, std::uint32_t>& node_to_id,
+                        StepRange& range) {
+    std::string node_name;
+    for (size_t pos = range.first; pos < range.last;) {
+        const char orient = walk[pos];
+        if (orient != '>' && orient != '<') {
+            range.error = "Malformed W walk orientation";
+            return;
+        }
+        const size_t next = walk.find_first_of("><", pos + 1);
+        const size_t end = (next == npos) ? walk.size() : next;
+        if (end <= pos + 1) {
+            range.error = "Malformed W walk token";
+            return;
+        }
+        node_name.assign(walk.data() + pos + 1, end - (pos + 1));
+        const auto it = node_to_id.find(node_name);
+        if (it == node_to_id.end()) {
+            range.error = "Walk references unknown node id: " + node_name;
+            return;
+        }
+        range.packed.push_back(pack_resolved_step(it->second, orient == '<'));
+        pos = end;
+    }
+}
+
+std::uint64_t parse_steps_parallel(
+    std::string_view text,
+    bool is_walk,
+    const std::unordered_map<std::string, std::uint32_t>& node_to_id,
+    std::uint32_t path_id,
+    unsigned threads,
+    StepTableWriter& steps_out,
+    PostingRunBuilder& posting_runs) {
+
+    // First token start at or after pos: just past a separator in a P line,
+    // at an orientation character in a W line.
+    auto token_start_at_or_after = [&](std::size_t pos) {
+        if (is_walk) {
+            const size_t next = text.find_first_of("><", pos);
+            return next == npos ? text.size() : next;
+        }
+        const size_t sep = text.find_first_of(",;", pos);
+        return sep == npos ? text.size() : sep + 1;
+    };
+
+    std::vector<StepRange> ranges(threads);
+    std::size_t first = 0;
+    for (unsigned i = 0; i < threads; ++i) {
+        const std::size_t last = (i + 1 == threads)
+            ? text.size()
+            : std::max(first, token_start_at_or_after(text.size() / threads * (i + 1)));
+        ranges[i].first = first;
+        ranges[i].last = last;
+        first = last;
+    }
+
+    auto resolve = [&](StepRange& range) {
+        try {
+            if (is_walk) {
+                resolve_walk_range(text, node_to_id, range);
+            } else {
+                resolve_path_range(text, node_to_id, range);
+            }
+        } catch (const std::exception& e) {
+            range.error = e.what();
+        }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(threads - 1);
+    for (unsigned i = 1; i < threads; ++i) {
+        pool.emplace_back(resolve, std::ref(ranges[i]));
+    }
+    resolve(ranges[0]);
+    for (auto& worker : pool) worker.join();
+
+    std::uint32_t step_rank = 0;
+    for (auto& range : ranges) {
+        for (const auto packed : range.packed) {
+            const std::uint32_t node_id = packed >> 1;
+            steps_out.add(node_id, (packed & 1u) != 0);
+            posting_runs.add(node_id, path_id, step_rank);
+            ++step_rank;
+        }
+        if (range.error) throw std::runtime_error(*range.error);
+        std::vector<std::uint32_t>().swap(range.packed);
+    }
+    return step_rank;
+}
+
 // Reconstruct just the overlap slice for a subpath. A subpath with N steps has
 // N-1 overlap tokens; GFA also permits '*' when per-edge overlaps are absent.
 std::string make_overlap_slice(std::string_view raw,
@@ -810,10 +1060,20 @@ void write_w_segments(std::ostream& out,
 
 namespace detail {
 
-PostingRunBuilder::PostingRunBuilder(std::string temp_dir, std::size_t max_records)
+PostingRunBuilder::PostingRunBuilder(std::string temp_dir,
+                                     std::size_t max_records,
+                                     unsigned background_spills)
     : temp_dir_(std::move(temp_dir)),
-      max_records_(std::max<std::size_t>(1, max_records)) {
+      max_records_(std::max<std::size_t>(1, max_records)),
+      background_spills_(background_spills) {
     chunk_.reserve(max_records_);
+}
+
+PostingRunBuilder::~PostingRunBuilder() {
+    // Never leave a worker writing into the temp directory after an error.
+    for (auto& spill : pending_spills_) {
+        if (spill.valid()) spill.wait();
+    }
 }
 
 void PostingRunBuilder::add(std::uint32_t node_id,
@@ -828,6 +1088,13 @@ void PostingRunBuilder::add(std::uint32_t node_id,
 
 void PostingRunBuilder::finish() {
     flush_run();
+    while (!pending_spills_.empty()) wait_for_oldest_spill();
+}
+
+void PostingRunBuilder::wait_for_oldest_spill() {
+    std::future<void> spill = std::move(pending_spills_.front());
+    pending_spills_.pop_front();
+    spill.get();
 }
 
 const std::vector<std::string>& PostingRunBuilder::run_paths() const {
@@ -845,21 +1112,34 @@ std::size_t PostingRunBuilder::run_count() const {
 void PostingRunBuilder::flush_run() {
     if (chunk_.empty()) return;
 
-    std::sort(chunk_.begin(), chunk_.end(), temp_posting_less);
-
     const std::string run_path =
         temp_dir_ + "/posting_run_" + std::to_string(run_paths_.size()) + ".bin";
-    std::ofstream out(run_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("Failed to open posting run file: " + run_path);
-    }
-    write_vector(out, chunk_);
-    if (!out.good()) {
-        throw std::runtime_error("Failed while writing posting run file: " + run_path);
-    }
+    auto sort_and_write = [](std::vector<TempPosting>& chunk, const std::string& path) {
+        std::sort(chunk.begin(), chunk.end(), temp_posting_less);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("Failed to open posting run file: " + path);
+        }
+        write_vector(out, chunk);
+        if (!out.good()) {
+            throw std::runtime_error("Failed while writing posting run file: " + path);
+        }
+    };
 
+    if (background_spills_ == 0) {
+        sort_and_write(chunk_, run_path);
+        chunk_.clear();
+    } else {
+        while (pending_spills_.size() >= background_spills_) wait_for_oldest_spill();
+        pending_spills_.push_back(std::async(
+            std::launch::async,
+            [sort_and_write, run_path, chunk = std::move(chunk_)]() mutable {
+                sort_and_write(chunk, run_path);
+            }));
+        chunk_ = std::vector<TempPosting>();
+        chunk_.reserve(max_records_);
+    }
     run_paths_.push_back(run_path);
-    chunk_.clear();
 
     if (run_paths_.size() % kPostingRunProgressInterval == 0) {
         std::cout << get_time() << ": Spilled "
@@ -902,8 +1182,12 @@ bool build_path_index(const std::string& input_gfa,
                       const Reader::Options& reader_options,
                       const std::string& tmp_base_dir,
                       bool keep_tmp,
-                      const PathIndexEncoding& encoding) {
+                      const PathIndexEncoding& encoding,
+                      unsigned threads) {
     Timer timer;
+    threads = std::max(1u, threads);
+    const BuildTuning tuning = build_tuning_from_env();
+    const std::size_t merge_fan_in = fitted_merge_fan_in(tuning.merge_fan_in);
     // Stage the final .pdx beside its destination so failed builds never leave a truncated index behind.
     const std::string temp_output_index = make_temp_output_path(output_index);
 
@@ -998,7 +1282,9 @@ bool build_path_index(const std::string& input_gfa,
         std::vector<PathBuildEntry> paths;
         std::uint64_t total_steps = 0;
         StepTableWriter steps_out(encoding.steps, tmp_steps_path, tmp_step_index_path);
-        PostingRunBuilder posting_runs(tmp_dir, kPostingChunkRecords);
+        PostingRunBuilder posting_runs(tmp_dir,
+                                       tuning.posting_chunk_records,
+                                       threads > 1 ? std::min(threads - 1, kMaxBackgroundSpills) : 0);
 
         {
             // Pass 2: write packed steps straight to a temp file and spill
@@ -1024,11 +1310,12 @@ bool build_path_index(const std::string& input_gfa,
                     entry.name = std::move(parsed.name);
                     entry.overlaps = std::string(parsed.overlaps);
                     entry.tags = std::string(parsed.tags);
-                    entry.step_count = parse_path_steps(parsed.segments,
-                                                        node_to_id,
-                                                        path_id,
-                                                        steps_out,
-                                                        posting_runs);
+                    entry.step_count =
+                        (threads > 1 && parsed.segments.size() >= tuning.parallel_parse_min_bytes)
+                            ? parse_steps_parallel(parsed.segments, false, node_to_id, path_id,
+                                                   threads, steps_out, posting_runs)
+                            : parse_path_steps(parsed.segments, node_to_id, path_id,
+                                               steps_out, posting_runs);
                 } else {
                     ParsedWalkFields parsed = parse_walk_fields(line);
                     entry.record_type = 'W';
@@ -1043,11 +1330,12 @@ bool build_path_index(const std::string& input_gfa,
                                                entry.seq_start,
                                                entry.seq_end);
                     entry.tags = std::string(parsed.tags);
-                    entry.step_count = parse_walk_steps(parsed.walk,
-                                                        node_to_id,
-                                                        path_id,
-                                                        steps_out,
-                                                        posting_runs);
+                    entry.step_count =
+                        (threads > 1 && parsed.walk.size() >= tuning.parallel_parse_min_bytes)
+                            ? parse_steps_parallel(parsed.walk, true, node_to_id, path_id,
+                                                   threads, steps_out, posting_runs)
+                            : parse_walk_steps(parsed.walk, node_to_id, path_id,
+                                               steps_out, posting_runs);
                 }
 
                 total_steps += entry.step_count;
@@ -1099,7 +1387,8 @@ bool build_path_index(const std::string& input_gfa,
         std::cout << get_time() << ": Building per-node path postings" << std::endl;
         // Cap the final merge width so very large graphs do not require one
         // open file handle per spilled posting run.
-        auto final_run_paths = collapse_posting_runs(posting_runs.run_paths(), tmp_dir);
+        auto final_run_paths = collapse_posting_runs(posting_runs.run_paths(), tmp_dir,
+                                                     merge_fan_in, threads);
         const std::uint64_t posting_blob_bytes =
             build_compressed_posting_blob_from_runs(final_run_paths,
                                                     node_records,
