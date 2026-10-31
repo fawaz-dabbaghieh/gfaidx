@@ -249,9 +249,20 @@ Options:
   threads for building the path index; defaults to `1`. Long `P`/`W` lines
   have their node names resolved in parallel, posting runs are sorted in the
   background (up to 4 runs of 64 MB in flight), and posting-run merge groups
-  run in parallel as far as the soft open-file limit allows. Each merge group
-  running at the same time holds up to about 8.6 GB of extra temporary files
-  until it finishes. Every thread count writes the same files
+  run in parallel as far as the soft open-file limit allows. Every thread
+  count writes the same files.
+
+  More threads need more temporary disk space. Path indexing writes 12 bytes
+  per path step to `--tmp_dir` as sorted 64 MB runs (about 12 GB per billion
+  steps). Above 128 runs (about 716 million steps), groups of 128 runs are
+  merged into one file of about 8.6 GB each. A group's input runs are deleted
+  only once its merged file is complete, so every group being merged needs
+  about 8.6 GB on top of the runs. With `--threads N`, up to N groups are
+  merged at once, which needs up to (N - 1) x 8.6 GB more than one thread:
+  about 26 GB more with 4 threads and 60 GB more with 8, however large the
+  graph. For example, on a PGGB chr1 graph with 4.5 billion path steps, the
+  runs took 54 GB. With 8 threads, path indexing needed about 45 GB more
+  temporary space and took 7.4 minutes instead of 27
 
 Outputs:
 
