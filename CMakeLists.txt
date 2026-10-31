@@ -170,6 +170,14 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 ${CMAKE_SOURCE_DIR}/tests/test_parallel_build.sh
                 $<TARGET_FILE:gfaidx_cli>)
 
+    # Refinement keeps the last Louvain level whose pieces fit --max_chunk_nodes.
+    add_test(
+        NAME refinement_limit
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_refinement_limit.sh
+                $<TARGET_FILE:gfaidx_cli>
+                ${CMAKE_SOURCE_DIR})
+
     # A GFA without L lines skips Louvain instead of crashing in it.
     add_test(
         NAME no_links

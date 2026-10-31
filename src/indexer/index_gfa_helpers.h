@@ -36,10 +36,16 @@ void generate_edgelist(const std::string& input_gfa,
                        std::unordered_map<std::string, unsigned int>& node_id_map,
                        const Reader::Options& reader_options);
 
+// Run Louvain levels until modularity stops improving. Each level merges
+// whole communities of the previous one, so communities only grow; with
+// max_piece_nodes > 0, a level that would create a community above that many
+// nodes is not taken and the previous level is kept (the first level is
+// always taken).
 void generate_communities(const std::string& binary_graph,
                           BGraph& g,
                           int display_level = -1,
-                          bool verbose = false);
+                          bool verbose = false,
+                          std::uint32_t max_piece_nodes = 0);
 
 void add_singleton_community(const std::string& input_gfa,
                              std::unordered_map<std::string, unsigned int>& node_id_map,

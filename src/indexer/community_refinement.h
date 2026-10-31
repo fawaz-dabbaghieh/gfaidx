@@ -36,13 +36,15 @@ std::vector<CommunityRefinementWorkItem> collect_oversized_community_work(
 // Refine the selected oversized communities one at a time: two passes over
 // the global sorted edge list hand every community its internal edges, then
 // each community's local subgraph goes through Louvain and the local
-// communities are remapped back onto the global node ids.
+// communities are remapped back onto the global node ids. Louvain stops
+// before a level that would create a piece above max_chunk_nodes.
 CommunityRefinementSummary refine_oversized_communities(
     const std::string& sorted_edge_list_path,
     const std::string& tmp_dir,
     const std::vector<CommunityRefinementWorkItem>& work_items,
     std::vector<std::uint32_t>& id_to_comm,
     std::uint32_t initial_community_count,
+    std::uint32_t max_chunk_nodes,
     bool keep_tmp);
 
 }  // namespace gfaidx::indexer

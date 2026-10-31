@@ -1,5 +1,6 @@
 #include "index_gfa_helpers.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cerrno>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <utility>
 #include <vector>
 
 #include <sys/wait.h>
@@ -339,7 +341,8 @@ void output_communities(const BGraph& g,
 void generate_communities(const std::string& binary_graph,
                           BGraph& g,
                           int display_level,
-                          bool verbose) {
+                          bool verbose,
+                          std::uint32_t max_piece_nodes) {
     Community c(binary_graph.c_str(), nullptr, UNWEIGHTED, -1, precision);
     bool improvement = true;
     double mod = c.modularity();
@@ -363,7 +366,19 @@ void generate_communities(const std::string& binary_graph,
 
         const double new_mod = c.modularity();
         level++;
-        g = c.partition2graph_binary();
+        BGraph next = c.partition2graph_binary();
+        if (max_piece_nodes > 0 && iterations > 1) {
+            std::size_t largest = 0;
+            for (const auto& members : next.nodes) largest = std::max(largest, members.size());
+            if (largest > max_piece_nodes) {
+                std::cout << get_time() << ": Keeping Louvain level " << level - 1
+                          << " because level " << level << " would create a community of "
+                          << largest << " nodes, above the limit of " << max_piece_nodes
+                          << std::endl;
+                break;
+            }
+        }
+        g = std::move(next);
         c = Community(g, -1, precision);
         std::cout << get_time() << ": old modularity is " << mod << " and new modularity is " << new_mod << std::endl;
         mod = new_mod;

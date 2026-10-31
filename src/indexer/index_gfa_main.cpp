@@ -354,6 +354,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                              refinement_work_items,
                                              id_to_comm,
                                              ncom,
+                                             max_chunk_nodes,
                                              keep_tmp);
             ncom = refinement_summary.final_community_count;
             std::cout << get_time() << ": Finished community refinement; refined "

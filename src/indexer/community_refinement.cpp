@@ -246,6 +246,7 @@ CommunityRefinementSummary refine_oversized_communities(
     const std::vector<CommunityRefinementWorkItem>& work_items,
     std::vector<std::uint32_t>& id_to_comm,
     std::uint32_t initial_community_count,
+    std::uint32_t max_chunk_nodes,
     bool keep_tmp) {
     CommunityRefinementSummary summary;
     summary.final_community_count = initial_community_count;
@@ -299,7 +300,8 @@ CommunityRefinementSummary refine_oversized_communities(
 
         BGraph refined_graph;
         // Reuse the same Louvain driver for the local subgraph so this stays a true one-extra-pass refinement.
-        generate_communities(local_binary_path.string(), refined_graph, display_level);
+        generate_communities(local_binary_path.string(), refined_graph, display_level, false,
+                             max_chunk_nodes);
 
         const std::uint32_t added_communities = apply_refined_partition(work_item,
                                                                         refined_graph,

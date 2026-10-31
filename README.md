@@ -222,7 +222,9 @@ Options:
 - `--max_chunk_nodes <N>`
   re-run Louvain inside communities containing at least `N` nodes and prevent
   small-community merges from producing a chunk larger than `N`; `0` disables
-  refinement and leaves merging without an upper bound
+  refinement and leaves merging without an upper bound. Louvain levels only
+  merge communities, so refinement stops before a level that would create a
+  piece larger than `N` and keeps the previous level
 - `--min_chunk_nodes <N>`
   merge communities smaller than `N` nodes into the neighboring community with
   the most connecting edges; `0` disables small-community merging
