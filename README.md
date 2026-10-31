@@ -249,8 +249,9 @@ Options:
   threads for building the path index; defaults to `1`. Long `P`/`W` lines
   have their node names resolved in parallel, posting runs are sorted in the
   background (up to 4 runs of 64 MB in flight), and posting-run merge groups
-  run in parallel as far as the soft open-file limit allows. Every thread
-  count writes the same files
+  run in parallel as far as the soft open-file limit allows. Each merge group
+  running at the same time holds up to about 8.6 GB of extra temporary files
+  until it finishes. Every thread count writes the same files
 
 Outputs:
 
