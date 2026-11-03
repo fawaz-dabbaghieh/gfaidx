@@ -101,6 +101,11 @@ if(GFAIDX_BUILD_PYTHON)
     install(TARGETS _pygfaidx
         LIBRARY DESTINATION pygfaidx
         RUNTIME DESTINATION pygfaidx)
+    # An importable package in the build tree for the python_api test.
+    set_target_properties(_pygfaidx PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/python/pygfaidx)
+    configure_file(python/pygfaidx/__init__.py
+        ${CMAKE_CURRENT_BINARY_DIR}/python/pygfaidx/__init__.py COPYONLY)
 endif()
 
 # Install the CLI into the standard binary directory so package managers can use
@@ -308,4 +313,20 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_overlapping_paths.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_overlapping_path_names.tsv
     )
+
+    # pygfaidx tests, when the extension is built and its Python has pytest.
+    if(GFAIDX_BUILD_PYTHON)
+        execute_process(COMMAND ${Python_EXECUTABLE} -c "import pytest"
+                        RESULT_VARIABLE gfaidx_pytest_missing OUTPUT_QUIET ERROR_QUIET)
+        if(gfaidx_pytest_missing)
+            message(STATUS "pytest not found for ${Python_EXECUTABLE}; the python_api test is not registered")
+        else()
+            add_test(
+                NAME python_api
+                COMMAND ${Python_EXECUTABLE} -m pytest -q -p no:cacheprovider
+                        ${CMAKE_SOURCE_DIR}/python/tests)
+            set_tests_properties(python_api PROPERTIES ENVIRONMENT
+                "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python;GFAIDX_BIN=$<TARGET_FILE:gfaidx_cli>")
+        endif()
+    endif()
 endif()

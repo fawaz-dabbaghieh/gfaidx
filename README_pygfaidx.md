@@ -69,6 +69,17 @@ The build uses scikit-build-core and pybind11. It requires Python 3.9 or newer,
 a C++17 compiler, CMake, zlib, and pthread support. Linux and macOS are
 supported.
 
+To run the tests, install pytest and point `GFAIDX_BIN` at the gfaidx CLI,
+which builds the test indexes:
+
+```bash
+python -m pip install . pytest
+GFAIDX_BIN=/path/to/gfaidx python -m pytest python/tests
+```
+
+A CMake build configured with `-DGFAIDX_BUILD_PYTHON=ON` runs the same tests
+as the `python_api` ctest when its Python has pytest.
+
 ## Five-minute example
 
 This complete script extracts a neighborhood from an indexed graph:
