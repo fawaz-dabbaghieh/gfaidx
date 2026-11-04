@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "fs/fs_helpers.h"
+#include "fs/gfa_line_parsers.h"
 #include "indexer/node_hash_index.h"
 #include "paths/p_path_coordinates.h"
 #include "paths/path_index.h"
@@ -618,6 +619,7 @@ bool build_coordinate_index(const std::string& input_gfa,
     while (first_pass.read_line(line)) {
         if (line.empty()) continue;
         if (line[0] == 'H') {
+            reject_gfa2_header(line);
             const auto parsed = parse_reference_samples(line);
             reference_samples.insert(reference_samples.end(), parsed.begin(), parsed.end());
             continue;

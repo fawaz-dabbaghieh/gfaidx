@@ -200,7 +200,8 @@ gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
 Arguments:
 
 - `in_gfa`
-  input GFA graph
+  input GFA 1 graph (GFA 1.0, 1.1, or 1.2), plain or gzipped; a GFA 2 file
+  (`VN:Z:2.0` in its `H` line) is rejected
 - `out_gfa.gz`
   output multi-member gzip graph
 

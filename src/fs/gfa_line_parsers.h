@@ -17,6 +17,10 @@ inline void offending_line(const std::string_view line) {
     exit(1);
 }
 
+// Throws if an H line declares GFA 2 (VN:Z:2...). gfaidx reads GFA 1 only, and
+// GFA 2 S lines would otherwise be read with the length field as the sequence.
+void reject_gfa2_header(std::string_view line);
+
 std::pair<std::string, std::string> extract_L_nodes(std::string_view line);
 
 void extract_P_nodes(std::string_view line, std::string& path_name,

@@ -190,6 +190,14 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 ${CMAKE_SOURCE_DIR}/tests/test_no_links.sh
                 $<TARGET_FILE:gfaidx_cli>)
 
+    # Malformed or unusual GFA input must index or be rejected with a message,
+    # and queries on whatever was indexed must not crash. GFA 2 is rejected.
+    add_test(
+        NAME malformed_gfa
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_malformed_gfa.sh
+                $<TARGET_FILE:gfaidx_cli>)
+
     add_executable(gfaidx_indexed_graph_api_test tests/test_indexed_graph_api.cpp)
     target_link_libraries(gfaidx_indexed_graph_api_test PRIVATE gfaidx_library)
     add_test(

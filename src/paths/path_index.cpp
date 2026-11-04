@@ -1252,6 +1252,7 @@ bool build_path_index(const std::string& input_gfa,
 
             std::cout << get_time() << ": Scanning S lines for node ids" << std::endl;
             while (reader.read_line(line)) {
+                if (!line.empty() && line[0] == 'H') reject_gfa2_header(line);
                 if (line.empty() || line[0] != 'S') continue;
                 auto node_id = extract_s_node_id(line);
 

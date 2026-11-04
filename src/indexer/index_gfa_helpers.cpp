@@ -245,7 +245,9 @@ void generate_edgelist(const std::string& input_gfa,
             continue;
         }
 
-        if (line[0] == 'L') {
+        if (line[0] == 'H') {
+            reject_gfa2_header(line);
+        } else if (line[0] == 'L') {
             N_EDGES++;
             auto [fst, snd] = extract_L_nodes(line);
             unsigned int src, dest;

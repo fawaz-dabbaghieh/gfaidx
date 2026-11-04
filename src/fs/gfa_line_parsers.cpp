@@ -4,6 +4,22 @@
 
 #include "gfa_line_parsers.h"
 
+#include <stdexcept>
+
+
+void reject_gfa2_header(std::string_view line) {
+    for (size_t start = 0; start < line.size();) {
+        size_t end = line.find('\t', start);
+        if (end == npos) end = line.size();
+        const auto field = line.substr(start, end - start);
+        if (field.substr(0, 5) == "VN:Z:" && field.substr(5, 1) == "2") {
+            throw std::runtime_error("GFA version 2 is not supported; gfaidx indexes GFA 1 files (H line has " +
+                                     std::string(field) + ")");
+        }
+        start = end + 1;
+    }
+}
+
 
 void extract_S_node(std::string_view line, std::string& seq_name, std::string& seq) {
 
