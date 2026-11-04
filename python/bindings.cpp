@@ -238,6 +238,9 @@ PYBIND11_MODULE(_pygfaidx, module) {
              py::arg("node_id"), py::call_guard<py::gil_scoped_release>())
         .def("get_community", &gfaidx::IndexedGraph::get_community,
              py::arg("community_id"), py::call_guard<py::gil_scoped_release>())
+        .def("cross_community_edges",
+             &gfaidx::IndexedGraph::cross_community_edges,
+             py::call_guard<py::gil_scoped_release>())
         .def("paths", &gfaidx::IndexedGraph::paths,
              py::call_guard<py::gil_scoped_release>())
         .def("get_path", &gfaidx::IndexedGraph::get_path,

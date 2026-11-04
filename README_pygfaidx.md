@@ -241,6 +241,26 @@ Use `incident_edges()` for orientation-aware algorithms or when distinct
 parallel links matter. Use `node_exists()` before `get_node()` when a
 missing id is an expected condition.
 
+### Traverse the whole graph community by community
+
+`incident_edges()` decompresses the node's community on every call, so it
+suits occasional lookups rather than a pass over every node. To visit the
+whole graph, iterate over the communities instead. `get_community()` returns
+only the links inside one community; the links between communities are
+returned once by `cross_community_edges()`. Together they cover every link
+exactly once:
+
+```python
+# Usually a small fraction of all links: community detection keeps most
+# links inside a community.
+cross = index.cross_community_edges()
+
+for community_id in range(index.community_count):
+    community = index.get_community(community_id)
+    for edge in community.edges:
+        ...  # both endpoints are in this community
+```
+
 ## Extract a mutable neighborhood
 
 `get_subgraph()` performs an orientation-agnostic breadth-first traversal
@@ -608,7 +628,7 @@ reporting their message gives users the native gfaidx diagnostic.
 | --- | --- |
 | Open an index | `IndexedGraph(graph_path, index_paths=...)` |
 | Test or fetch one indexed node | `node_exists`, `get_node` |
-| Explore topology | `neighbors`, `incident_edges`, `get_community` |
+| Explore topology | `neighbors`, `incident_edges`, `get_community`, `cross_community_edges` |
 | Extract a mutable BFS result | `get_subgraph` |
 | List or slice paths | `paths`, `get_path`, `path_steps` |
 | Extract a path interval | `get_path_subgraph` |

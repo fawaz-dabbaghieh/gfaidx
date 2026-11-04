@@ -939,6 +939,21 @@ Graph IndexedGraph::get_community(std::uint32_t id) const {
     return impl_->materialize(impl_->selection_from_names(std::move(names)), options, {});
 }
 
+std::vector<Edge> IndexedGraph::cross_community_edges() const {
+    std::vector<Edge> result;
+    const auto shared = impl_->shared_community();
+    if (shared >= impl_->spans.size()) return result;
+    impl_->stream_member(shared, [&](const std::string& line) {
+        if (!line.empty() && line[0] == 'L') {
+            auto edge = parse_edge_line(line);
+            edge.id = result.size() + 1;
+            result.push_back(std::move(edge));
+        }
+        return true;
+    });
+    return result;
+}
+
 std::vector<PathDescriptor> IndexedGraph::paths() const {
     const std::lock_guard<std::recursive_mutex> lock(impl_->reader_mutex);
     if (!impl_->path_index) return {};

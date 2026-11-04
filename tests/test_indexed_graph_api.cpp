@@ -13,6 +13,10 @@ int main(int argc, char** argv) {
     assert(index.get_node("1").sequence == "AA");
     assert(index.neighbors("1") == std::vector<std::string>{"2"});
     assert(index.paths().size() == 2);
+    // One community, so the shared member holds no cross-community links.
+    assert(index.community_count() == 1);
+    assert(index.cross_community_edges().empty());
+    assert(index.get_community(0).edge_count() == 2);
 
     gfaidx::ExtractionOptions options;
     options.max_nodes = 3;

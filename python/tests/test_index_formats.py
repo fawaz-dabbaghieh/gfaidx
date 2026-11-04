@@ -31,6 +31,15 @@ def stream(call):
     return out.getvalue()
 
 
+def edge_key(edge):
+    # The same canonical form as GraphTruth.edges: an L line and its reverse
+    # complement are one edge.
+    a, b = edge.from_endpoint, edge.to_endpoint
+    forward = (a.node_id, "-" if a.reverse else "+", b.node_id, "-" if b.reverse else "+")
+    backward = (b.node_id, "+" if b.reverse else "-", a.node_id, "+" if a.reverse else "-")
+    return min(forward, backward)
+
+
 def test_bundles_use_different_formats(bubble_graph):
     _, bundles = bubble_graph
     default_ndx = Path(f"{bundles['default']}.ndx").read_bytes()
@@ -50,6 +59,25 @@ def test_nodes_match_gfa(bubble_graph, fmt):
         assert index.get_node(node).sequence == sequence
         assert set(index.neighbors(node)) == truth.neighbors(node)
     assert not index.node_exists("not_a_node")
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_communities_and_cross_edges_cover_gfa(bubble_graph, fmt):
+    truth, bundles = bubble_graph
+    index = open_index(bundles, fmt)
+    internal = []
+    for community in range(index.community_count):
+        for edge in index.get_community(community).edges:
+            assert index.community_id(edge.from_endpoint.node_id) == community
+            assert index.community_id(edge.to_endpoint.node_id) == community
+            internal.append(edge_key(edge))
+    cross = index.cross_community_edges()
+    assert cross, "the bubble graph spans several communities"
+    for edge in cross:
+        assert (index.community_id(edge.from_endpoint.node_id)
+                != index.community_id(edge.to_endpoint.node_id))
+    # Every link is reported exactly once: in its community or as a cross link.
+    assert sorted(internal + [edge_key(e) for e in cross]) == sorted(truth.edges)
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
@@ -73,6 +101,7 @@ def query_results(index, scratch):
     results["community_id"] = [index.community_id(n) for n in nodes]
     results["communities"] = [sorted(node.id for node in index.get_community(c).nodes)
                               for c in range(index.community_count)]
+    results["cross_community_edges"] = sorted(edge_key(e) for e in index.cross_community_edges())
 
     seeds = ["1", "401", "1200"]
     for max_nodes in (50, 5000):

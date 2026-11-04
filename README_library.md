@@ -259,6 +259,12 @@ if (index.node_exists(node_id)) {
     const std::uint32_t community = index.community_id(node_id);
     gfaidx::Graph member = index.get_community(community);
     std::cout << "community nodes: " << member.node_count() << '\n';
+
+    // get_community() keeps only links inside the community. The links
+    // between communities come from cross_community_edges(); the two
+    // together cover every link once.
+    std::cout << "cross-community links: "
+              << index.cross_community_edges().size() << '\n';
 }
 ```
 
@@ -586,7 +592,7 @@ application boundary and include `what()` in diagnostics.
 | Goal | API |
 | --- | --- |
 | Test or fetch one indexed node | `node_exists`, `get_node` |
-| Explore topology | `neighbors`, `incident_edges`, `get_community` |
+| Explore topology | `neighbors`, `incident_edges`, `get_community`, `cross_community_edges` |
 | Extract a mutable BFS result | `get_subgraph` |
 | List or slice paths | `paths`, `get_path`, `path_steps` |
 | Extract a path interval | `get_path_subgraph` |

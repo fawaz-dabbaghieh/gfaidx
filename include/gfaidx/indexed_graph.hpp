@@ -135,6 +135,10 @@ public:
     [[nodiscard]] std::vector<std::string> neighbors(std::string_view node_id) const;
     [[nodiscard]] std::vector<Edge> incident_edges(std::string_view node_id) const;
     [[nodiscard]] Graph get_community(std::uint32_t community_id) const;
+    // Links whose endpoints lie in different communities, read from the final
+    // shared member. get_community() keeps only links inside one community,
+    // so these complete the topology of a community-by-community traversal.
+    [[nodiscard]] std::vector<Edge> cross_community_edges() const;
 
     [[nodiscard]] std::vector<PathDescriptor> paths() const;
     [[nodiscard]] PathDescriptor get_path(std::string_view path_key) const;
