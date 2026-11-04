@@ -266,6 +266,10 @@ for community_id in range(index.community_count):
 community can hold hundreds of megabases, and the default copies all of it
 into the returned `Graph`.
 
+[`python/examples/bubblegun`](python/examples/bubblegun) uses this pattern to
+run BubbleGun's bubble detection on an indexed graph with a bounded cache of
+communities, instead of loading the whole graph.
+
 ## Extract a mutable neighborhood
 
 `get_subgraph()` performs an orientation-agnostic breadth-first traversal
