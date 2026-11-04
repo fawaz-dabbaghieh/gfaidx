@@ -97,6 +97,22 @@ def test_community_matches_subgraph_extraction(bubble_graph, fmt, tmp_path):
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_community_without_sequences(bubble_graph, fmt):
+    truth, bundles = bubble_graph
+    index = open_index(bundles, fmt)
+    for community in range(index.community_count):
+        full = index.get_community(community)
+        bare = index.get_community(community, include_sequences=False)
+        for node in full.nodes:
+            assert node.sequence == truth.sequences[node.id]
+        assert [n.id for n in bare.nodes] == [n.id for n in full.nodes]
+        assert [edge_key(e) for e in bare.edges] == [edge_key(e) for e in full.edges]
+        for node in bare.nodes:
+            assert node.sequence == "*"
+            assert node.tags == [f"LN:i:{len(truth.sequences[node.id])}"]
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_paths_match_gfa(bubble_graph, fmt):
     truth, bundles = bubble_graph
     index = open_index(bundles, fmt)

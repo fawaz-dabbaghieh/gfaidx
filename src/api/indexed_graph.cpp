@@ -96,15 +96,28 @@ Edge parse_edge_line(const std::string& line) {
     return edge;
 }
 
-// An S record as Graph::from_gfa stores it.
-Node parse_segment_line(std::string_view line) {
+// An S record as Graph::from_gfa stores it. Without its sequence, the record
+// keeps "*", GFA's marker for an omitted sequence, and records the length in
+// an LN:i tag unless it already carries one.
+Node parse_segment_line(std::string_view line, bool include_sequence) {
     const auto f = fields(line);
     if (f.size() < 3 || f[0] != "S") throw std::runtime_error("Malformed S record");
     Node node;
     node.id = std::string(f[1]);
-    node.sequence = std::string(f[2]);
+    bool has_length = false;
     node.tags.reserve(f.size() - 3);
-    for (std::size_t i = 3; i < f.size(); ++i) node.tags.emplace_back(f[i]);
+    for (std::size_t i = 3; i < f.size(); ++i) {
+        node.tags.emplace_back(f[i]);
+        if (f[i].substr(0, 3) == "LN:") has_length = true;
+    }
+    if (include_sequence) {
+        node.sequence = std::string(f[2]);
+    } else {
+        node.sequence = "*";
+        if (!has_length && f[2] != "*") {
+            node.tags.push_back("LN:i:" + std::to_string(f[2].size()));
+        }
+    }
     return node;
 }
 
@@ -939,7 +952,7 @@ std::vector<std::string> IndexedGraph::neighbors(std::string_view node_id) const
     return result;
 }
 
-Graph IndexedGraph::get_community(std::uint32_t id) const {
+Graph IndexedGraph::get_community(std::uint32_t id, bool include_sequences) const {
     if (id >= community_count()) throw std::out_of_range("Community id is out of range");
     Graph graph;
     // Headers open the first member, as in every other extraction.
@@ -957,7 +970,7 @@ Graph IndexedGraph::get_community(std::uint32_t id) const {
     impl_->stream_member(id, [&](const std::string& line) {
         if (line.empty()) return true;
         if (line[0] == 'S') {
-            graph.add_node(parse_segment_line(line));
+            graph.add_node(parse_segment_line(line, include_sequences));
         } else if (line[0] == 'L') {
             links.push_back(parse_edge_line(line));
         }

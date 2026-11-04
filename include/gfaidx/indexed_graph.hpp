@@ -134,7 +134,10 @@ public:
     [[nodiscard]] Node get_node(std::string_view node_id) const;
     [[nodiscard]] std::vector<std::string> neighbors(std::string_view node_id) const;
     [[nodiscard]] std::vector<Edge> incident_edges(std::string_view node_id) const;
-    [[nodiscard]] Graph get_community(std::uint32_t community_id) const;
+    // With include_sequences=false every S record gets the sequence "*" and an
+    // LN:i length tag, so topology can be read without copying sequences.
+    [[nodiscard]] Graph get_community(std::uint32_t community_id,
+                                      bool include_sequences = true) const;
     // Links whose endpoints lie in different communities, read from the final
     // shared member. get_community() keeps only links inside one community,
     // so these complete the topology of a community-by-community traversal.

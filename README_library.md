@@ -265,6 +265,10 @@ if (index.node_exists(node_id)) {
     // together cover every link once.
     std::cout << "cross-community links: "
               << index.cross_community_edges().size() << '\n';
+
+    // Topology only: S records get the sequence "*" and an LN:i tag.
+    gfaidx::Graph topology = index.get_community(community, false);
+    std::cout << "community links: " << topology.edge_count() << '\n';
 }
 ```
 

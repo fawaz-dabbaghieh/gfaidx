@@ -256,10 +256,15 @@ exactly once:
 cross = index.cross_community_edges()
 
 for community_id in range(index.community_count):
-    community = index.get_community(community_id)
+    # Topology only: each S record gets the sequence "*" and an LN:i tag.
+    community = index.get_community(community_id, include_sequences=False)
     for edge in community.edges:
         ...  # both endpoints are in this community
 ```
+
+`include_sequences=False` matters for graphs with long nodes. One PGGB
+community can hold hundreds of megabases, and the default copies all of it
+into the returned `Graph`.
 
 ## Extract a mutable neighborhood
 
