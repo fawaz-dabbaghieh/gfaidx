@@ -171,6 +171,17 @@ check_output "$work_dir/from_cdx_parallel.gfa"
     --with_coords >/dev/null
 check_gap_zero_output "$work_dir/gap_zero.gfa"
 
+# Gap mode reads postings with the same worker pool as the default mode.
+"$gfaidx" get_region \
+    "$indexed_gfa" \
+    ref:1-4 \
+    "$work_dir/gap_zero_parallel.gfa" \
+    --all_haplotypes \
+    --haplotype_gap 0 \
+    --with_coords \
+    --threads 4 >/dev/null
+cmp "$work_dir/gap_zero.gfa" "$work_dir/gap_zero_parallel.gfa"
+
 # Unit suffixes are case-insensitive. The one-base result is deterministic
 # across the same ordered formatter worker pool used by the default mode.
 "$gfaidx" get_region \

@@ -1112,8 +1112,7 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
     if (options.mode == RegionMode::all_haplotypes) {
         coordinates::PathHaplotypeQueryOptions query_options;
         // Reuses the same threads value as P/W formatting for the
-        // postings-reduction phase; see PathHaplotypeQueryOptions::threads
-        // for the gap-mode caveat (local gap clustering always runs serially).
+        // postings-reduction phase.
         query_options.threads = options.threads;
         std::unique_ptr<indexer::NodeLengthIndexReader> lengths;
         if (options.haplotype_gap) {
