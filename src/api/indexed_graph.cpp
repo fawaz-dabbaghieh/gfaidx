@@ -96,6 +96,18 @@ Edge parse_edge_line(const std::string& line) {
     return edge;
 }
 
+// An S record as Graph::from_gfa stores it.
+Node parse_segment_line(std::string_view line) {
+    const auto f = fields(line);
+    if (f.size() < 3 || f[0] != "S") throw std::runtime_error("Malformed S record");
+    Node node;
+    node.id = std::string(f[1]);
+    node.sequence = std::string(f[2]);
+    node.tags.reserve(f.size() - 3);
+    for (std::size_t i = 3; i < f.size(); ++i) node.tags.emplace_back(f[i]);
+    return node;
+}
+
 std::string tags_string_to_field(std::string_view tags) {
     return std::string(tags);
 }
@@ -929,14 +941,34 @@ std::vector<std::string> IndexedGraph::neighbors(std::string_view node_id) const
 
 Graph IndexedGraph::get_community(std::uint32_t id) const {
     if (id >= community_count()) throw std::out_of_range("Community id is out of range");
-    std::vector<std::string> names;
-    impl_->stream_member(id, [&](const std::string& line) {
-        if (!line.empty() && line[0] == 'S') names.push_back(segment_name(line));
+    Graph graph;
+    // Headers open the first member, as in every other extraction.
+    impl_->stream_member(0, [&](const std::string& line) {
+        if (line.empty()) return true;
+        if (line[0] != 'H') return false;
+        graph.add_header(line);
         return true;
     });
-    ExtractionOptions options;
-    options.include_paths = false;
-    return impl_->materialize(impl_->selection_from_names(std::move(names)), options, {});
+    // One pass over the community's member, building the Graph directly. The
+    // shared member is not read: it holds only links between communities, so
+    // none of its links can have both endpoints here. Links wait until every
+    // S record is known, as in Graph::from_gfa.
+    std::vector<Edge> links;
+    impl_->stream_member(id, [&](const std::string& line) {
+        if (line.empty()) return true;
+        if (line[0] == 'S') {
+            graph.add_node(parse_segment_line(line));
+        } else if (line[0] == 'L') {
+            links.push_back(parse_edge_line(line));
+        }
+        return true;
+    });
+    for (auto& edge : links) {
+        if (graph.node_exists(edge.from.node_id) && graph.node_exists(edge.to.node_id)) {
+            (void)graph.add_edge(std::move(edge));
+        }
+    }
+    return graph;
 }
 
 std::vector<Edge> IndexedGraph::cross_community_edges() const {

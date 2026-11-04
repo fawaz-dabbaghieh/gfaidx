@@ -81,6 +81,22 @@ def test_communities_and_cross_edges_cover_gfa(bubble_graph, fmt):
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_community_matches_subgraph_extraction(bubble_graph, fmt, tmp_path):
+    # get_community() reads its member directly; it must write the same GFA
+    # as the general extraction path selecting the same nodes.
+    _, bundles = bubble_graph
+    index = open_index(bundles, fmt)
+    direct, extracted = tmp_path / "direct.gfa", tmp_path / "extracted.gfa"
+    for community in range(index.community_count):
+        graph = index.get_community(community)
+        graph.write_gfa(str(direct))
+        names = [node.id for node in graph.nodes]
+        index.get_subgraph(names, max_nodes=len(names),
+                           include_paths=False).write_gfa(str(extracted))
+        assert direct.read_text() == extracted.read_text()
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_paths_match_gfa(bubble_graph, fmt):
     truth, bundles = bubble_graph
     index = open_index(bundles, fmt)
