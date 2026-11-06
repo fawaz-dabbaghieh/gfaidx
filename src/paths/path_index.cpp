@@ -1188,8 +1188,6 @@ bool build_path_index(const std::string& input_gfa,
     threads = std::max(1u, threads);
     const BuildTuning tuning = build_tuning_from_env();
     const std::size_t merge_fan_in = fitted_merge_fan_in(tuning.merge_fan_in);
-    // Stage the final .pdx beside its destination so failed builds never leave a truncated index behind.
-    const std::string temp_output_index = make_temp_output_path(output_index);
 
     indexer::NodeHashIndex node_index(node_index_path);
     if (node_index.size() > kStepPackedNodeMask) {
@@ -1215,6 +1213,9 @@ bool build_path_index(const std::string& input_gfa,
     const std::string tmp_steps_path = tmp_dir + "/tmp_steps.bin";
     const std::string tmp_step_index_path = tmp_dir + "/tmp_step_index.bin";
     const std::string tmp_posting_blob_path = tmp_dir + "/tmp_posting_blob.bin";
+    // Stage the final .pdx in the work directory so failed or interrupted
+    // builds never leave a truncated index beside the output.
+    const std::string temp_output_index = make_temp_output_path(output_index, tmp_dir);
 
     if (keep_tmp) {
         std::cout << get_time() << ": Using path-index temp directory " << tmp_dir << std::endl;

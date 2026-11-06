@@ -191,24 +191,6 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         return 1;
     }
 
-    // Stage every final artifact on hidden sibling paths so validation and failures stay side-effect free.
-    const std::string staged_out_gzip = make_temp_output_path(out_gzip);
-    const std::string staged_chunk_index_path = utils::companion_path(staged_out_gzip, ".idx");
-    const std::string staged_node_index_path = utils::companion_path(staged_out_gzip, ".ndx");
-    const std::string staged_node_length_index_path = utils::companion_path(staged_out_gzip, ".lnx");
-    const std::string staged_path_index_path = utils::companion_path(staged_out_gzip, ".pdx");
-    const std::string staged_path_checkpoint_index_path =
-        utils::companion_path(staged_out_gzip, ".pcx");
-    auto cleanup_staged_outputs = [&]() {
-        // Remove any staged final artifacts that were not successfully published.
-        remove_path_if_exists(staged_out_gzip);
-        remove_path_if_exists(staged_chunk_index_path);
-        remove_path_if_exists(staged_node_index_path);
-        remove_path_if_exists(staged_node_length_index_path);
-        remove_path_if_exists(staged_path_index_path);
-        remove_path_if_exists(staged_path_checkpoint_index_path);
-    };
-
     Timer timer;
 
     /*
@@ -234,6 +216,25 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::string tmp_edgelist = tmp_dir + sep + "tmp_edgelist.txt";
     std::string sorted_tmp_edgelist = tmp_dir + sep + "tmp_edgelist_sorted.txt";
     std::string tmp_binary = tmp_dir + sep + "tmp_binary.bin";
+
+    // Stage every final artifact in the run directory too, so failures and
+    // interruptions leave nothing beside the output; publish renames them out.
+    const std::string staged_out_gzip = make_temp_output_path(out_gzip, tmp_dir);
+    const std::string staged_chunk_index_path = utils::companion_path(staged_out_gzip, ".idx");
+    const std::string staged_node_index_path = utils::companion_path(staged_out_gzip, ".ndx");
+    const std::string staged_node_length_index_path = utils::companion_path(staged_out_gzip, ".lnx");
+    const std::string staged_path_index_path = utils::companion_path(staged_out_gzip, ".pdx");
+    const std::string staged_path_checkpoint_index_path =
+        utils::companion_path(staged_out_gzip, ".pcx");
+    auto cleanup_staged_outputs = [&]() {
+        // Remove any staged final artifacts that were not successfully published.
+        remove_path_if_exists(staged_out_gzip);
+        remove_path_if_exists(staged_chunk_index_path);
+        remove_path_if_exists(staged_node_index_path);
+        remove_path_if_exists(staged_node_length_index_path);
+        remove_path_if_exists(staged_path_index_path);
+        remove_path_if_exists(staged_path_checkpoint_index_path);
+    };
     auto cleanup_work_dir = [&]() {
         if (!keep_tmp) {
             // Remove the major intermediate files first so a partially removed temp dir is still small.

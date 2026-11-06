@@ -112,19 +112,14 @@ inline unsigned int get_node_comm(const std::string& node_id, const std::unorder
     const std::vector<std::uint32_t>& id_to_comm) {
 
     if (node_id.empty()) {
-        std::cerr << "Empty node ID encountered" << std::endl;
-        exit(1);
+        throw std::runtime_error("Empty node ID encountered");
     }
 
-    unsigned int node_int_id;
-    try {
-        node_int_id = node_to_id.at(node_id);
-    } catch (const std::out_of_range& e) {
-        std::cerr << "Node " << node_id << " not found in the map" << std::endl;
-        std::cerr << e.what() << std::endl;
-        exit(1);
+    const auto found = node_to_id.find(node_id);
+    if (found == node_to_id.end()) {
+        throw std::runtime_error("Node " + node_id + " not found in the map");
     }
-    return id_to_comm[node_int_id];
+    return id_to_comm[found->second];
 
 }
 // for line processing, should split it to separate functions maybe
@@ -143,8 +138,7 @@ static void split_gfa_to_parts(const std::string& in_gfa,
     std::string_view line;
     Reader file_reader(reader_options);
     if (!file_reader.open(in_gfa)) {
-        std::cerr << "Could not open file: " << in_gfa << std::endl;
-        exit(1);
+        throw std::runtime_error("Could not open file: " + in_gfa);
     }
 
     std::cout << get_time() << ": Starting splitting the GFA into communities" << std::endl;

@@ -6,15 +6,16 @@
 #define GFAIDX_GFA_LINE_PARSERS_H
 
 
+#include <stdexcept>
 #include <string>
 #include <iostream>
 #include <vector>
 
 static constexpr size_t npos = -1; // size_type(-1);
 
-inline void offending_line(const std::string_view line) {
-    std::cerr << "Offending line: " << line << std::endl;
-    exit(1);
+// Throws rather than exiting so callers can remove their temp files first.
+[[noreturn]] inline void offending_line(const std::string_view line) {
+    throw std::runtime_error("Offending line: " + std::string(line));
 }
 
 // Throws if an H line declares GFA 2 (VN:Z:2...). gfaidx reads GFA 1 only, and

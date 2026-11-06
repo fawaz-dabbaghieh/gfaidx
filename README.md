@@ -210,7 +210,10 @@ Options:
 - `--keep_tmp`
   keep temporary files instead of deleting them at the end
 - `--tmp_dir <dir>`
-  base directory for temporary files
+  base directory for the run's `gfaidx_tmp_*` directory (default: the input
+  GFA's directory). All intermediate files, and the outputs until they are
+  complete, are written there; the outputs are then moved to their final
+  paths (copied if `--tmp_dir` is on a different filesystem)
 - `--progress_every <N>`
   progress logging interval while reading the GFA
 - `--gzip_level <1..9>`

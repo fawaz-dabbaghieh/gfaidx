@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -231,8 +232,7 @@ void generate_edgelist(const std::string& input_gfa,
 
     Reader file_reader(reader_options);
     if (!file_reader.open(input_gfa)) {
-        std::cerr << "Could not open file: " << input_gfa << std::endl;
-        exit(1);
+        throw std::runtime_error("Could not open file: " + input_gfa);
     }
 
     std::ofstream out;
@@ -324,8 +324,7 @@ void output_communities(const BGraph& g,
     }
 
     if (!file_writable(out_file.c_str())) {
-        std::cerr << "Output file is not writable: " << out_file << std::endl;
-        exit(1);
+        throw std::runtime_error("Output file is not writable: " + out_file);
     }
 
     ofstream out;
@@ -394,8 +393,7 @@ void add_singleton_community(const std::string& input_gfa,
     std::string_view line;
     Reader file_reader(reader_options);
     if (!file_reader.open(input_gfa)) {
-        std::cerr << "Could not open file: " << input_gfa << std::endl;
-        exit(1);
+        throw std::runtime_error("Could not open file: " + input_gfa);
     }
 
     std::vector<int> singleton_nodes;

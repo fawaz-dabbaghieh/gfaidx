@@ -60,6 +60,11 @@ check_case() {
     run "$name index_gfa legacy_hash" "$gfaidx" index_gfa "$dir/in.gfa" "$dir/legacy.gz" \
         --progress_every 0 --tmp_dir "$dir" --node_order legacy_hash
     [[ $status == "$indexed" ]] || fail "$name: legacy_hash exit status $status, default $indexed"
+    # Each run removes its temp directory, latest symlink and staged files:
+    # only the input and the published outputs remain.
+    local stray
+    stray=$(ls -A "$dir" | grep -v -x -E 'in\.gfa|(g|t2|legacy)\.gz(\.(idx|ndx|lnx|pdx|pcx))?' || true)
+    [[ -z $stray ]] || fail "$name: index_gfa left behind:" $stray
     if [[ $indexed != 0 ]]; then
         # A rejected input leaves no partial index behind.
         if ls "$out"* >/dev/null 2>&1; then
