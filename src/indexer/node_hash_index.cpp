@@ -285,7 +285,14 @@ void write_node_hash_index(const std::unordered_map<std::string, unsigned int>& 
     hash_u32(space, static_cast<std::uint32_t>(header.entry_count));
     hash_u32(space, static_cast<std::uint32_t>(header.community_count));
     for (const auto start : assignment.community_starts) hash_u32(space, start);
-    for (const auto& e : entries) hash_u32(space, e.payload);
+    // Hash the name hashes too: ids alone match for two node sets whose names
+    // fall in the same hash order (a,b and x,y).
+    for (const auto& e : entries) {
+        hash_u32(space, static_cast<std::uint32_t>(e.hash));
+        hash_u32(space, static_cast<std::uint32_t>(e.hash >> 32));
+        hash_u32(space, e.hash32);
+        hash_u32(space, e.payload);
+    }
     header.node_id_space = space == 0 ? 1 : space;
 
     const std::size_t starts_bytes = assignment.community_starts.size() * sizeof(std::uint32_t);
