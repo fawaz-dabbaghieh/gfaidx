@@ -64,6 +64,11 @@ Main tasks:
   a binary path index for `P` and `W` lines
 - `<graph>.gz.pcx`
   a small path-coordinate checkpoint index used to avoid long `.pdx` prefix scans
+- `<graph>.gz.params`
+  a JSON summary of the run: the gfaidx version, the options used, graph
+  counts (segments, links, total sequence length in bp, paths, walks, path
+  steps), the number of communities, the node id order, and the output file
+  sizes. Queries do not read it
 - `<graph>.gz.cdx`
   an optional standalone reference-coordinate index built by `index_coordinates`
 
@@ -190,8 +195,8 @@ engine rather than using the former pure-Python prototype. See
 
 ### `gfaidx index_gfa`
 
-Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`
-and `.pcx`.
+Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, `.params`, and by
+default `.pdx` and `.pcx`.
 
 ```bash
 gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
@@ -276,6 +281,8 @@ Outputs:
 - `<out_gfa.gz>.lnx`
 - `<out_gfa.gz>.pdx` unless `--no_paths` is used
 - `<out_gfa.gz>.pcx` unless `--no_paths` is used
+- `<out_gfa.gz>.params`, a JSON summary of the options and the graph;
+  `path_steps` is `null` with `--no_paths`
 
 Example:
 

@@ -63,7 +63,7 @@ check_case() {
     # Each run removes its temp directory, latest symlink and staged files:
     # only the input and the published outputs remain.
     local stray
-    stray=$(ls -A "$dir" | grep -v -x -E 'in\.gfa|(g|t2|legacy)\.gz(\.(idx|ndx|lnx|pdx|pcx))?' || true)
+    stray=$(ls -A "$dir" | grep -v -x -E 'in\.gfa|(g|t2|legacy)\.gz(\.(idx|ndx|lnx|pdx|pcx|params))?' || true)
     [[ -z $stray ]] || fail "$name: index_gfa left behind:" $stray
     if [[ $indexed != 0 ]]; then
         # A rejected input leaves no partial index behind.

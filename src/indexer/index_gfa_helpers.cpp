@@ -40,6 +40,8 @@ int display_level = -1;
 int k1 = 16;
 unsigned int N_NODES = 0;
 unsigned int N_EDGES = 0;
+std::uint64_t N_PATHS = 0;
+std::uint64_t N_WALKS = 0;
 std::string in_gfa="in_gfa";
 std::string out_graph="out_indexed_graph";
 
@@ -299,6 +301,10 @@ void generate_edgelist(const std::string& input_gfa,
                 if (src > dest) out << "\n" << dest << " " << src;
                 else out << "\n" << src << " " << dest;
             }
+        } else if (line[0] == 'P') {
+            N_PATHS++;
+        } else if (line[0] == 'W') {
+            N_WALKS++;
         }
     }
     out.close();

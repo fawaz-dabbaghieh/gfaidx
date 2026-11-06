@@ -76,6 +76,7 @@ add_executable(gfaidx_cli
         src/indexer/direct_binary_writer.cpp
         src/indexer/index_gfa_main.cpp
         src/indexer/index_gfa_helpers.cpp
+        src/indexer/index_params.cpp
         src/paths/get_path_command.cpp
         src/paths/index_path_checkpoints_command.cpp
         src/paths/index_paths_command.cpp

@@ -19,6 +19,9 @@ extern int display_level;
 extern int k1;
 extern unsigned int N_NODES;
 extern unsigned int N_EDGES;
+// P and W lines seen by generate_edgelist, for the .params summary.
+extern std::uint64_t N_PATHS;
+extern std::uint64_t N_WALKS;
 extern std::string in_gfa;
 extern std::string out_graph;
 
