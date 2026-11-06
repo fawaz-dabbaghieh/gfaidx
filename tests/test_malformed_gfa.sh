@@ -95,9 +95,7 @@ long_name=$(head -c 100000 /dev/zero | tr '\0' 'n')
 
 # Valid GFA 1 that differs from the usual layout.
 check_case valid ok "$H$S$L$P$W"
-check_case no_links ok "$H$S$P$W"
 check_case no_paths ok "$H$S$L"
-check_case one_segment ok $'H\tVN:Z:1.0\nS\t1\tACGT\n'
 check_case no_header ok "$S$L$P$W"
 check_case records_out_of_order ok "$H$W$P$L$S"
 check_case gfa_1_2 ok $'H\tVN:Z:1.2\n'"$S$L$P$W"
@@ -119,7 +117,10 @@ check_case walk_star_coordinates ok "$H$S$L$P"$'W\ts1\t1\tchr1\t*\t*\t>1>2>3\n'
 check_case walk_length_mismatch ok "$H$S$L$P"$'W\ts1\t1\tchr1\t0\t100\t>1>2>3\n'
 check_case walk_overlapping_fragments ok "$H$S$L$P$W"$'W\ts1\t1\tchr1\t4\t9\t>2>3\n'
 
-# Inputs that cannot be indexed.
+# Inputs that cannot be indexed. Communities are built along links, so a
+# graph without L lines would be one block and is rejected.
+check_case no_links fail "$H$S$P$W"
+check_case one_segment fail $'H\tVN:Z:1.0\nS\t1\tACGT\n'
 check_case gfa2 fail $'H\tVN:Z:2.0\nS\t1\t4\tACGT\nS\t2\t2\tGG\nE\t*\t1+\t2+\t4$\t4$\t0\t0\t*\n'
 check_case no_segments fail "$H$L$P$W"
 check_case paths_only fail "$H$P$W"
@@ -176,7 +177,7 @@ for command in "index_paths $work_dir/gfa2.pdx --ndx $work_dir/valid/g.gz.ndx" \
     name=$1
     shift
     run "gfa2 $name" "$gfaidx" "$name" "$gfa2" "$@"
-    if [[ $status != 1 ]] || ! grep -q "GFA version 2 is not supported" "$work_dir/stderr"; then
+    if [[ $status != 1 ]] || ! grep -q -E "GFA version 2 is not supported|supports GFA 1.x only" "$work_dir/stderr"; then
         fail "$name did not reject GFA 2: $(tail -n 1 "$work_dir/stderr")"
     fi
 done

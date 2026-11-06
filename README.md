@@ -200,8 +200,8 @@ gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
 Arguments:
 
 - `in_gfa`
-  input GFA 1 graph (GFA 1.0, 1.1, or 1.2), plain or gzipped; a GFA 2 file
-  (`VN:Z:2.0` in its `H` line) is rejected
+  input GFA 1 graph (GFA 1.0, 1.1, or 1.2) with at least one `L` line, plain
+  or gzipped; GFA 2 input and graphs without links are rejected with an error
 - `out_gfa.gz`
   output multi-member gzip graph
 
@@ -1072,7 +1072,7 @@ Current query-time memory behavior:
 
 ### Repeated gfaidx thread-scaling and gbz-base interval benchmark
 
-`scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
+`benchmark/scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
 multiple genomic locations for configurable gfaidx thread counts and gbz-base,
 records GNU `time -v` measurements, and generates first-execution, warm-cache,
 thread-scaling, and regional-variation summaries and plots. See

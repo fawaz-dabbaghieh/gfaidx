@@ -183,13 +183,6 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 $<TARGET_FILE:gfaidx_cli>
                 ${CMAKE_SOURCE_DIR})
 
-    # A GFA without L lines skips Louvain instead of crashing in it.
-    add_test(
-        NAME no_links
-        COMMAND bash
-                ${CMAKE_SOURCE_DIR}/tests/test_no_links.sh
-                $<TARGET_FILE:gfaidx_cli>)
-
     # Malformed or unusual GFA input must index or be rejected with a message,
     # and queries on whatever was indexed must not crash. GFA 2 is rejected.
     add_test(
@@ -224,6 +217,15 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 $<TARGET_FILE:gfaidx_cli>
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_paths.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/repeated_anchor_coordinate_paths.tsv
+    )
+
+    # Graphs without links and GFA 2.0 input must stop with a clear error
+    # instead of crashing in community detection or being misread.
+    add_test(
+        NAME index_gfa_input_errors
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_index_gfa_input_errors.sh
+                $<TARGET_FILE:gfaidx_cli>
     )
 
     # Base-pair --context selection must follow gbz-base's distance rules:
