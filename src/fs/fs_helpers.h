@@ -22,7 +22,7 @@ void remove_path_if_exists(const std::string& path);
 std::string make_temp_output_path(const std::string& final_path,
                                   const std::string& work_dir = std::string());
 // Promote a fully written temp file into its final location, or throw on failure.
-// Falls back to a copy when the two paths are on different filesystems.
+// Across filesystems, copies to a temp file beside to_path and renames that.
 void rename_path_or_throw(const std::string& from_path, const std::string& to_path);
 
 std::string create_temp_dir(const std::string& base_dir,

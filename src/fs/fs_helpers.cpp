@@ -95,12 +95,15 @@ void rename_path_or_throw(const std::string& from_path, const std::string& to_pa
     fs::rename(from_path, to_path, ec);
     if (ec == std::errc::cross_device_link) {
         // The run directory (--tmp_dir, or the input's directory) can sit on a
-        // different filesystem than the output; copy there instead.
+        // different filesystem than the output. Copy to a temp file beside the
+        // output, then rename, so the final path never holds a partial file.
+        const std::string copy_path = make_temp_output_path(to_path);
         ec.clear();
-        fs::copy_file(from_path, to_path, fs::copy_options::overwrite_existing, ec);
+        fs::copy_file(from_path, copy_path, ec);
+        if (!ec) fs::rename(copy_path, to_path, ec);
         if (ec) {
             std::error_code ignored;
-            fs::remove(to_path, ignored);
+            fs::remove(copy_path, ignored);
             throw std::runtime_error("Failed to copy '" + from_path + "' to '" + to_path + "': " + ec.message());
         }
         fs::remove(from_path, ec);
