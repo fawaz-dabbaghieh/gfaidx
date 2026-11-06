@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "fs/fs_helpers.h"
+#include "fs/gfa_line_parsers.h"
 #include "indexer/node_hash_index.h"
 #include "paths/p_path_coordinates.h"
 #include "paths/path_index.h"
@@ -24,7 +25,9 @@ constexpr std::uint64_t kMissingLength = std::numeric_limits<std::uint64_t>::max
 struct CoordinateIndexHeaderDisk {
     char magic[8]{};
     std::uint32_t version{};
-    std::uint32_t reserved{};
+    // node_id_space_tag() of the .ndx numbering the node ranks use; files
+    // written before .ndx v2 have 0 here, matching legacy hash-rank ids.
+    std::uint32_t node_id_space_tag{};
     std::uint64_t node_count{};
     std::uint64_t track_count{};
     std::uint64_t entry_count{};
@@ -595,6 +598,12 @@ bool build_coordinate_index(const std::string& input_gfa,
     }
 
     indexer::NodeHashIndex node_index(node_index_path);
+    if (!path_index_path.empty()) {
+        // .cdx stores .pdx node ids, so both must use this .ndx numbering.
+        const paths::PathIndexReader path_index(path_index_path);
+        indexer::require_matching_node_ids(node_index, path_index.node_count(),
+                                           path_index.node_id_space(), ".pdx");
+    }
     std::vector<std::uint64_t> node_lengths(static_cast<std::size_t>(node_index.size()),
                                             kMissingLength);
     std::vector<std::string> reference_samples;
@@ -610,6 +619,7 @@ bool build_coordinate_index(const std::string& input_gfa,
     while (first_pass.read_line(line)) {
         if (line.empty()) continue;
         if (line[0] == 'H') {
+            reject_gfa2_header(line);
             const auto parsed = parse_reference_samples(line);
             reference_samples.insert(reference_samples.end(), parsed.begin(), parsed.end());
             continue;
@@ -862,6 +872,7 @@ bool build_coordinate_index(const std::string& input_gfa,
     CoordinateIndexHeaderDisk header{};
     std::memcpy(header.magic, kCoordinateIndexMagic, sizeof(header.magic));
     header.version = kCoordinateIndexVersion;
+    header.node_id_space_tag = indexer::node_id_space_tag(node_index.node_id_space());
     header.node_count = node_index.size();
     header.track_count = track_records.size();
     header.entry_count = entry_records.size();
@@ -939,6 +950,7 @@ CoordinateIndexReader::CoordinateIndexReader(const std::string& index_path)
     }
 
     node_count_ = header.node_count;
+    node_id_space_tag_ = header.node_id_space_tag;
     entry_count_ = header.entry_count;
     entry_table_offset_ = header.entry_table_offset;
 

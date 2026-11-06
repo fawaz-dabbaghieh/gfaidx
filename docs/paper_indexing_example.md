@@ -187,10 +187,10 @@ built as unrelated files. The top-level construction order is:
    `.ndx`; an `S`-line scan creates rank-aligned `.lnx`; two further GFA
    scans plus an external posting sort create `.pdx`; finally `.pdx` and
    `.lnx` are scanned to create `.pcx`.
-7. **Publish complete files.** gfaidx builds the graph and sidecars under
-   staged sibling names. It renames the sidecars first and the indexed
-   `.gfa.gz` last, so the visible graph path is the signal that the complete
-   bundle was successfully produced.
+7. **Publish complete files.** gfaidx builds the graph and sidecars inside
+   the run's temporary directory. It moves the sidecars to the output paths
+   first and the indexed `.gfa.gz` last, so the visible graph path is the
+   signal that the complete bundle was successfully produced.
 
 `index_coordinates` is separate because users may choose only particular
 reference samples or paths. For this command, it reads the selected REF walk
@@ -767,8 +767,8 @@ copy tmp_posting_blob.bin
 string blob
 ```
 
-It is first written to a staged sibling file. The completed file is atomically
-renamed to the requested `.pdx` path. Temporary runs and blobs are removed
+It is first written to a staged file in the temporary directory. The completed
+file is then moved to the requested `.pdx` path. Temporary runs and blobs are removed
 unless temporary-file retention was explicitly requested.
 
 For a large graph, the major disk-backed construction data are therefore:

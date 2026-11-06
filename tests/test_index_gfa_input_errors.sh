@@ -45,3 +45,17 @@ printf 'H\tVN:Z:1.0\nS\t1\tACGTA\nS\t2\tCCC\nL\t1\t+\t2\t+\t0M\n' >"$work_dir/on
     --progress_every 0 >/dev/null
 test -s "$work_dir/one_link.gfa.gz"
 test -s "$work_dir/one_link.gfa.gz.ndx"
+
+# The .params summary counts the graph and records the options used.
+params="$work_dir/one_link.gfa.gz.params"
+grep -q '"segments": 2,' "$params"
+grep -q '"links": 1,' "$params"
+grep -q '"total_sequence_bp": 8,' "$params"
+grep -q '"path_steps": 0' "$params"
+grep -q '"no_paths": false,' "$params"
+if command -v python3 >/dev/null; then
+    python3 -m json.tool "$params" >/dev/null
+fi
+"$gfaidx" index_gfa "$work_dir/one_link.gfa" "$work_dir/no_paths.gfa.gz" \
+    --progress_every 0 --no_paths >/dev/null
+grep -q '"path_steps": null' "$work_dir/no_paths.gfa.gz.params"

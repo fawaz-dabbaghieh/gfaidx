@@ -29,6 +29,26 @@ void configure_index_paths_parser(argparse::ArgumentParser& parser) {
     parser.add_argument("--progress_every").default_value(std::string("1000000"))
       .nargs(1)
       .help("print progress every N lines while reading (default: 1000000), give 0 to disable");
+
+    parser.add_argument("--step_encoding").default_value(std::string("delta"))
+      .nargs(1)
+      .choices("delta", "packed32")
+      .help("step table: delta (zigzag varint blocks) or packed32 (4 bytes per step); packed32 with a legacy .ndx writes a v4 .pdx");
+
+    parser.add_argument("--posting_encoding").default_value(std::string("slots"))
+      .nargs(1)
+      .choices("slots", "groups")
+      .help("postings: slots (predicted from neighbouring node ids) or groups (v4 per-path groups)");
+
+    parser.add_argument("--posting_block_nodes")
+      .default_value(std::to_string(kDefaultPostingBlockNodes))
+      .nargs(1)
+      .help("node ids per independently decodable posting block for --posting_encoding slots");
+
+    parser.add_argument("--threads")
+      .default_value(std::string("1"))
+      .nargs(1)
+      .help("threads for building the path index; the output is the same for every thread count");
 }
 
 int run_index_paths(const argparse::ArgumentParser& program) {
@@ -72,7 +92,18 @@ int run_index_paths(const argparse::ArgumentParser& program) {
     }
 
     try {
-        build_path_index(input_gfa, out_index, node_index, reader_options, tmp_dir, false);
+        PathIndexEncoding encoding;
+        if (program.get<std::string>("step_encoding") == "packed32") {
+            encoding.steps = StepEncoding::packed32;
+        }
+        if (program.get<std::string>("posting_encoding") == "groups") {
+            encoding.postings = PostingEncoding::path_groups;
+        }
+        encoding.posting_block_nodes = utils::parse_u32_strict(
+            program.get<std::string>("posting_block_nodes"), "--posting_block_nodes", 1, 1u << 16);
+        const unsigned threads =
+            utils::parse_u32_strict(program.get<std::string>("threads"), "--threads", 1, 1024);
+        build_path_index(input_gfa, out_index, node_index, reader_options, tmp_dir, false, encoding, threads);
     } catch (const std::exception& err) {
         std::cerr << err.what() << std::endl;
         return 1;

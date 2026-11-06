@@ -31,6 +31,8 @@ import matplotlib.pyplot as plt
 
 # The on-disk .ndx entry matches NodeHashEntry in src/indexer/node_hash_index.h.
 NODE_HASH_ENTRY_STRUCT = struct.Struct("<QII")
+NDX_V2_MAGIC = b"GFANDX02"
+NDX_V2_HEADER_STRUCT = struct.Struct("<8sIIQQQQQQ")
 
 
 def default_output_path(ndx_path: Path) -> Path:
@@ -48,21 +50,30 @@ def load_chunk_sizes(ndx_path: Path) -> Counter[int]:
     if file_size == 0:
         raise RuntimeError("The .ndx file is empty")
 
-    if file_size % NODE_HASH_ENTRY_STRUCT.size != 0:
-        raise RuntimeError(
-            "The .ndx file size is not a multiple of the NodeHashEntry size "
-            f"({file_size} bytes vs {NODE_HASH_ENTRY_STRUCT.size}-byte entries); "
-            "the file may be truncated or from an incompatible format"
-        )
-
     with ndx_path.open("rb") as handle:
         # Iterate over the file through an mmap so regular-file short reads cannot
         # masquerade as a truncated trailing entry.
         with mmap.mmap(handle.fileno(), length=0, access=mmap.ACCESS_READ) as mapped:
-            for offset in range(0, file_size, NODE_HASH_ENTRY_STRUCT.size):
-                # The first two fields are hashes; only the community id is needed here.
-                _, _, community_id = NODE_HASH_ENTRY_STRUCT.unpack_from(mapped, offset)
-                chunk_sizes[community_id] += 1
+            if file_size % 16 == 8 and mapped[:8] == NDX_V2_MAGIC:
+                # v2: node ids are grouped by community, so sizes come straight
+                # from the community start array.
+                _, _, _, _, community_count, _, starts_offset, _, _ = \
+                    NDX_V2_HEADER_STRUCT.unpack_from(mapped, 0)
+                starts = struct.unpack_from(f"<{community_count + 1}I", mapped, starts_offset)
+                for community_id in range(community_count):
+                    size = starts[community_id + 1] - starts[community_id]
+                    if size:
+                        chunk_sizes[community_id] = size
+            elif file_size % NODE_HASH_ENTRY_STRUCT.size == 0:
+                for offset in range(0, file_size, NODE_HASH_ENTRY_STRUCT.size):
+                    # The first two fields are hashes; legacy files store the community id.
+                    _, _, community_id = NODE_HASH_ENTRY_STRUCT.unpack_from(mapped, offset)
+                    chunk_sizes[community_id] += 1
+            else:
+                raise RuntimeError(
+                    f"The .ndx file size ({file_size} bytes) matches neither a legacy "
+                    "entry array nor a v2 index; the file may be truncated"
+                )
 
     if not chunk_sizes:
         raise RuntimeError("The .ndx file does not contain any node entries")

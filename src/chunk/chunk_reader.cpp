@@ -113,6 +113,12 @@ void stream_community_lines_from_gz_range(
 
     int ret = inflateInit2(&strm, 15 + 16);
     if (ret != Z_OK) throw_zlib("inflateInit2", ret);
+    // Free the inflate state on every exit, including an exception thrown by
+    // on_line; inflateEnd on an already ended stream does nothing.
+    struct InflateEndGuard {
+        z_stream& stream;
+        ~InflateEndGuard() { inflateEnd(&stream); }
+    } inflate_end_guard{strm};
 
     std::vector<unsigned char> inbuf(1 << 16);
     std::vector<unsigned char> outbuf(1 << 16);

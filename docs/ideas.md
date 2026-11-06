@@ -21,6 +21,9 @@ The names and file layout changed in a few places:
 - **Done:** `.lnx` stores rank-aligned node lengths
 - **Done:** `.pcx` stores sparse cumulative path-coordinate checkpoints
 - **Done:** `.ndx` supports direct rank-to-community lookup
+- **Done:** locality-ordered node ids (`.ndx` v2) with a delta-coded step
+  table and slot-coded postings (`.pdx` v5); see
+  `docs/pdx_compression_results.md`
 - **Done:** coordinate-bearing P/W subpaths can be emitted with `--with_coords`
 - **Proposed:** a reusable C++ library API and cross-language binding layer are
   described at the end of this file
@@ -84,14 +87,16 @@ At the time of writing, `gfaidx` has 4 main CLI subcommands:
 
 - indexes `P` and `W` lines into a `.pdx`
 - requires `--ndx`
-- uses the sorted rank of the matched `.ndx` entry as the canonical `node_id`
-  inside `.pdx`
+- uses the node id stored in the matched `.ndx` entry as the canonical
+  `node_id` inside `.pdx` (the sorted entry rank for legacy `.ndx` files)
 
 This matters because node-based path queries no longer need to build a giant
 global `node string -> int id` map in RAM. Instead:
 
 - input node names are resolved through `.ndx`
-- the `.ndx` rank becomes the `.pdx` node id
+- the `.ndx` node id becomes the `.pdx` node id; `index_gfa` assigns ids by
+  community and then by a locality key, so nodes adjacent on paths get close
+  ids
 
 `get_path` currently supports:
 
@@ -107,14 +112,16 @@ The current `.pdx` stores:
 
 - path metadata
 - node metadata
-- packed step table
+- step table
 - compressed per-node postings
 - string blob
 
 Important implementation notes:
 
-- step records are packed to 4 bytes
-- node postings are compressed per node using delta encoding plus varints
+- v5 steps are zigzag varint deltas of consecutive node ids in 128-step
+  blocks (v4: 4-byte packed records, still readable)
+- v5 postings are coded in blocks of 32 node ids and mostly predicted from the
+  previous node of the block on the same path (v4: per-node delta + varint)
 - path metadata is loaded eagerly
 - node metadata and node names are loaded lazily
 - node-based lookup uses `.ndx`, not an eagerly built node-name hash map

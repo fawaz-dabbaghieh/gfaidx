@@ -228,7 +228,8 @@ std::cout << index.index_paths().lnx << '\n';
 ```
 
 The graph and all supplied sidecars must originate from the same indexing
-bundle. gfaidx rejects detectable count or alignment mismatches.
+bundle. gfaidx rejects count mismatches, and a `.pdx` or `.cdx` built against
+a different `.ndx` node numbering.
 
 ## Look up nodes, links, and communities
 
@@ -258,6 +259,16 @@ if (index.node_exists(node_id)) {
     const std::uint32_t community = index.community_id(node_id);
     gfaidx::Graph member = index.get_community(community);
     std::cout << "community nodes: " << member.node_count() << '\n';
+
+    // get_community() keeps only links inside the community. The links
+    // between communities come from cross_community_edges(); the two
+    // together cover every link once.
+    std::cout << "cross-community links: "
+              << index.cross_community_edges().size() << '\n';
+
+    // Topology only: S records get the sequence "*" and an LN:i tag.
+    gfaidx::Graph topology = index.get_community(community, false);
+    std::cout << "community links: " << topology.edge_count() << '\n';
 }
 ```
 
@@ -585,7 +596,7 @@ application boundary and include `what()` in diagnostics.
 | Goal | API |
 | --- | --- |
 | Test or fetch one indexed node | `node_exists`, `get_node` |
-| Explore topology | `neighbors`, `incident_edges`, `get_community` |
+| Explore topology | `neighbors`, `incident_edges`, `get_community`, `cross_community_edges` |
 | Extract a mutable BFS result | `get_subgraph` |
 | List or slice paths | `paths`, `get_path`, `path_steps` |
 | Extract a path interval | `get_path_subgraph` |

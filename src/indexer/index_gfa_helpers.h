@@ -1,8 +1,10 @@
 #ifndef GFAIDX_INDEX_GFA_HELPERS_H
 #define GFAIDX_INDEX_GFA_HELPERS_H
 
+#include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <argparse/argparse.hpp>
 #include <graph_binary.h>
@@ -17,6 +19,9 @@ extern int display_level;
 extern int k1;
 extern unsigned int N_NODES;
 extern unsigned int N_EDGES;
+// P and W lines seen by generate_edgelist, for the .params summary.
+extern std::uint64_t N_PATHS;
+extern std::uint64_t N_WALKS;
 extern std::string in_gfa;
 extern std::string out_graph;
 
@@ -34,15 +39,28 @@ void generate_edgelist(const std::string& input_gfa,
                        std::unordered_map<std::string, unsigned int>& node_id_map,
                        const Reader::Options& reader_options);
 
+// Run Louvain levels until modularity stops improving. Each level merges
+// whole communities of the previous one, so communities only grow; with
+// max_piece_nodes > 0, a level that would create a community above that many
+// nodes is not taken and the previous level is kept (the first level is
+// always taken).
 void generate_communities(const std::string& binary_graph,
                           BGraph& g,
                           int display_level = -1,
-                          bool verbose = false);
+                          bool verbose = false,
+                          std::uint32_t max_piece_nodes = 0);
 
 void add_singleton_community(const std::string& input_gfa,
                              std::unordered_map<std::string, unsigned int>& node_id_map,
                              BGraph& g,
                              const Reader::Options& reader_options);
+
+// Estimate delta-varint bytes per step if paths walked every edge of the
+// sorted "u v" edge list once, for each candidate internal id -> node id map.
+// index_gfa uses this to choose between candidate node orders.
+std::vector<double> estimate_edge_step_bytes(
+    const std::string& sorted_edgelist,
+    const std::vector<const std::vector<std::uint32_t>*>& candidate_node_ids);
 
 void output_communities(const BGraph& g,
                         const std::string& out_file,

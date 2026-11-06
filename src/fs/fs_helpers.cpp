@@ -61,19 +61,22 @@ void remove_path_if_exists(const std::string& path) {
     fs::remove(path, ec);
 }
 
-std::string make_temp_output_path(const std::string& final_path) {
-    // Keep temp outputs beside the final file so a later rename is atomic on the same filesystem.
+std::string make_temp_output_path(const std::string& final_path, const std::string& work_dir) {
+    // Stage in the caller's run directory when it has one; otherwise keep the
+    // temp output beside the final file so the later rename stays on one filesystem.
     fs::path target(final_path);
-    fs::path parent = target.has_parent_path() ? target.parent_path() : fs::current_path();
+    fs::path parent = !work_dir.empty() ? fs::path(work_dir)
+        : target.has_parent_path() ? target.parent_path() : fs::current_path();
     // Reuse the final basename so staged files are still recognizable during debugging.
     const std::string base_name = target.filename().string();
     // Use a timestamp suffix to reduce collisions across concurrent or repeated runs.
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
 
     // Probe a bounded set of candidate names until we find one that does not already exist.
+    // The names stay visible so a file left by an interrupted run is easy to spot.
     for (int attempt = 0; attempt < 100; ++attempt) {
         std::ostringstream candidate_name;
-        candidate_name << "." << base_name << ".gfaidx_tmp_" << stamp << "_" << attempt;
+        candidate_name << base_name << ".gfaidx_tmp_" << stamp << "_" << attempt;
         fs::path candidate = parent / candidate_name.str();
         std::error_code ec;
         // Return the first unused sibling path.
@@ -90,6 +93,22 @@ void rename_path_or_throw(const std::string& from_path, const std::string& to_pa
     // Publish the staged file into place only after the full write has already succeeded.
     std::error_code ec;
     fs::rename(from_path, to_path, ec);
+    if (ec == std::errc::cross_device_link) {
+        // The run directory (--tmp_dir, or the input's directory) can sit on a
+        // different filesystem than the output. Copy to a temp file beside the
+        // output, then rename, so the final path never holds a partial file.
+        const std::string copy_path = make_temp_output_path(to_path);
+        ec.clear();
+        fs::copy_file(from_path, copy_path, ec);
+        if (!ec) fs::rename(copy_path, to_path, ec);
+        if (ec) {
+            std::error_code ignored;
+            fs::remove(copy_path, ignored);
+            throw std::runtime_error("Failed to copy '" + from_path + "' to '" + to_path + "': " + ec.message());
+        }
+        fs::remove(from_path, ec);
+        return;
+    }
     if (ec) {
         throw std::runtime_error("Failed to rename '" + from_path + "' to '" + to_path + "': " + ec.message());
     }

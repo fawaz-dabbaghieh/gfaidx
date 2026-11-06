@@ -414,12 +414,15 @@ int run_get_path(const argparse::ArgumentParser& program) {
         }
 
         indexer::NodeHashIndex node_index(node_index_path);
+        indexer::require_matching_node_ids(node_index, index.node_count(),
+                                           index.node_id_space(), ".pdx");
         const auto node_ids = resolve_node_names_with_index(node_index, node_names);
         const auto runs = find_subpaths_for_node_ids(index, node_ids);
         if (runs.empty()) {
             std::cerr << "No subpaths overlap the requested node set" << std::endl;
             return 1;
         }
+        index.prefetch_runs(runs);
 
         // W records have SeqStart/SeqEnd fields. P records can use an encoded
         // name interval, or local coordinates when no interval is present.

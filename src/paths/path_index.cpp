@@ -1,34 +1,49 @@
 #include "paths/path_index.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <charconv>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <queue>
 #include <stdexcept>
 #include <system_error>
-#include <unordered_set>
+#include <thread>
 #include <utility>
+
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "fs/fs_helpers.h"
 #include "fs/gfa_line_parsers.h"
 #include "indexer/node_hash_index.h"
+#include "paths/pdx_codec.h"
 #include "utils/Timer.h"
 
 namespace gfaidx::paths {
 namespace {
 
 // The path index is a single binary file with:
-// - a fixed header
+// - a fixed header (v5 appends PathIndexHeaderV5Disk)
 // - a path table
 // - a node table
-// - a flat step array
+// - the step table (v4: flat packed uint32 array; v5: packed32 or
+//   delta-varint blocks followed by their superblock index)
 // - a per-node compressed posting blob
 // - one shared string blob for names / overlap fields / tags
 constexpr char kPathIndexMagic[8] = {'G', 'F', 'P', 'A', 'T', 'H', '1', '\0'};
-constexpr std::uint32_t kPathIndexVersion = 4;
+constexpr std::uint32_t kPathIndexVersionLegacy = 4;
+constexpr std::uint32_t kPathIndexVersion = 5;
 
 // Each step is stored in one packed uint32:
 // - low 31 bits: node_id
@@ -51,6 +66,24 @@ struct PathIndexHeaderDisk {
     std::uint64_t posting_table_offset{};
     std::uint64_t strings_offset{};
     std::uint64_t strings_size{};
+};
+
+// v5 header extension, stored right after PathIndexHeaderDisk.
+struct PathIndexHeaderV5Disk {
+    // Fingerprint of the .ndx numbering used for node ids (0 = legacy ranks).
+    std::uint64_t node_id_space{};
+    std::uint32_t step_encoding{};
+    std::uint32_t posting_encoding{};
+    // Delta-varint only: encoded step bytes, then the superblock table.
+    std::uint64_t step_data_bytes{};
+    std::uint64_t step_index_offset{};
+    std::uint64_t step_superblock_count{};
+    std::uint32_t step_block_steps{};
+    std::uint32_t step_superblock_blocks{};
+    // path_slots only: nodes per independently decodable posting block.
+    std::uint32_t posting_block_nodes{};
+    std::uint32_t reserved32{};
+    std::uint64_t reserved{};
 };
 
 // Path metadata supporting both P-lines and W-lines.
@@ -125,6 +158,7 @@ struct PathBuildEntry {
 };
 
 static_assert(sizeof(PathIndexHeaderDisk) == 96, "Unexpected path index header size");
+static_assert(sizeof(PathIndexHeaderV5Disk) == 64, "Unexpected v5 path index header size");
 static_assert(sizeof(PathRecordDisk) == 128, "Unexpected path record size");
 static_assert(sizeof(NodeRecordDisk) == 32, "Unexpected node record size");
 static_assert(sizeof(StepRecordDisk) == 4, "Unexpected packed step record size");
@@ -145,6 +179,18 @@ constexpr std::uint64_t kPostingMergeProgressInterval = 100000000;
 // collapsing large run sets in multiple passes when needed.
 constexpr std::size_t kPostingMergeFanIn = 128;
 
+// File descriptors left for everything other than posting-run merges when the
+// merge width is fitted to the soft open-file limit.
+constexpr std::size_t kReservedFileDescriptors = 64;
+
+// With threads > 1, a P/W line with at least this much step text has its
+// steps resolved by several threads; shorter lines are not worth splitting.
+constexpr std::size_t kParallelParseMinBytes = 1ULL << 20;
+
+// At most this many full posting chunks are sorted and written in the
+// background at once (each holds kPostingChunkBytes).
+constexpr unsigned kMaxBackgroundSpills = 4;
+
 constexpr std::size_t kFileCopyBufferBytes = 1ULL << 20;
 
 // Hash lookup is cheaper for small node sets; rank-addressed lookup wins once
@@ -157,32 +203,67 @@ using detail::PostingRunBuilder;
 using detail::PostingRunCursor;
 using detail::TempPosting;
 
-void append_varint(std::string& out, std::uint64_t value) {
-    while (value >= 0x80) {
-        out.push_back(static_cast<char>((value & 0x7f) | 0x80));
-        value >>= 7;
+using codec::append_varint;
+
+// Build parameters that never change the output. The environment overrides
+// exist so tests can force many posting runs, deep merges and parallel line
+// parsing on small inputs.
+struct BuildTuning {
+    std::size_t posting_chunk_records{kPostingChunkRecords};
+    std::size_t merge_fan_in{kPostingMergeFanIn};
+    std::size_t parallel_parse_min_bytes{kParallelParseMinBytes};
+};
+
+std::size_t env_size_or(const char* name, std::size_t fallback, std::size_t minimum) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return fallback;
+    std::size_t parsed = 0;
+    const char* end = value + std::strlen(value);
+    const auto result = std::from_chars(value, end, parsed);
+    if (result.ec != std::errc() || result.ptr != end || parsed < minimum) {
+        throw std::runtime_error(std::string("Invalid value for ") + name + ": " + value);
     }
-    out.push_back(static_cast<char>(value));
+    return parsed;
 }
 
-std::uint64_t read_varint(const std::vector<unsigned char>& data, std::size_t& cursor) {
-    std::uint64_t value = 0;
-    unsigned shift = 0;
+BuildTuning build_tuning_from_env() {
+    BuildTuning tuning;
+    tuning.posting_chunk_records =
+        env_size_or("GFAIDX_TEST_POSTING_CHUNK_RECORDS", tuning.posting_chunk_records, 1);
+    tuning.merge_fan_in = env_size_or("GFAIDX_TEST_POSTING_MERGE_FAN_IN", tuning.merge_fan_in, 2);
+    tuning.parallel_parse_min_bytes =
+        env_size_or("GFAIDX_TEST_PARALLEL_PARSE_MIN_BYTES", tuning.parallel_parse_min_bytes, 1);
+    return tuning;
+}
 
-    while (cursor < data.size()) {
-        const auto byte = static_cast<std::uint64_t>(data[cursor++]);
-        value |= (byte & 0x7f) << shift;
-        if ((byte & 0x80) == 0) {
-            return value;
-        }
+// Soft open-file limit of this process, or 0 when it is unlimited or unknown.
+// The limit is only read, never raised.
+std::size_t soft_open_file_limit() {
+    struct rlimit limit {};
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) return 0;
+    return static_cast<std::size_t>(limit.rlim_cur);
+}
 
-        shift += 7;
-        if (shift >= 64) {
-            throw std::runtime_error("Malformed varint in compressed posting block");
-        }
+// Merge width that fits the soft open-file limit: a merge holds fan_in inputs
+// and one output, plus the reserve for everything else.
+std::size_t fitted_merge_fan_in(std::size_t fan_in) {
+    const std::size_t limit = soft_open_file_limit();
+    if (limit == 0) return fan_in;
+    const std::size_t available = limit > kReservedFileDescriptors + 3 ? limit - kReservedFileDescriptors - 1 : 2;
+    return std::max<std::size_t>(2, std::min(fan_in, available));
+}
+
+// Number of merge groups to run at once: at most one per thread, and only as
+// many as the soft open-file limit allows.
+std::size_t concurrent_merge_groups(std::size_t fan_in, unsigned threads, std::size_t groups) {
+    std::size_t workers = std::min<std::size_t>(threads, groups);
+    const std::size_t limit = soft_open_file_limit();
+    if (limit != 0) {
+        const std::size_t by_limit =
+            limit > kReservedFileDescriptors ? (limit - kReservedFileDescriptors) / (fan_in + 1) : 1;
+        workers = std::min(workers, by_limit);
     }
-
-    throw std::runtime_error("Unexpected end of compressed posting block");
+    return std::max<std::size_t>(1, workers);
 }
 
 bool test_seen_bit(const std::vector<std::uint64_t>& bits, std::uint32_t value) {
@@ -237,6 +318,66 @@ StepRecord unpack_step_record(const StepRecordDisk& rec) {
         (rec.packed & kStepPackedReverseBit) != 0
     };
 }
+
+// Streams path steps into the temporary step-table files in global step
+// order, in either the packed32 or the delta-varint layout.
+class StepTableWriter {
+public:
+    StepTableWriter(StepEncoding encoding,
+                    const std::string& data_path,
+                    const std::string& index_path)
+        : encoding_(encoding),
+          data_out_(data_path, std::ios::binary | std::ios::trunc) {
+        if (!data_out_) {
+            throw std::runtime_error("Failed to open temporary step file: " + data_path);
+        }
+        if (encoding_ == StepEncoding::delta_varint) {
+            index_out_.open(index_path, std::ios::binary | std::ios::trunc);
+            if (!index_out_) {
+                throw std::runtime_error("Failed to open temporary step index file: " + index_path);
+            }
+            delta_.emplace(data_out_, index_out_);
+        }
+    }
+
+    void add(std::uint32_t node_id, bool is_reverse) {
+        if (delta_) {
+            if (node_id > kStepPackedNodeMask) {
+                throw std::runtime_error("Node id too large for step encoding");
+            }
+            delta_->add(node_id, is_reverse);
+            return;
+        }
+        const auto step = pack_step_record(node_id, is_reverse);
+        write_binary_record(data_out_, step);
+        if (!data_out_.good()) {
+            throw std::runtime_error("Failed while writing temporary step file");
+        }
+    }
+
+    void finish() {
+        if (delta_) delta_->finish();
+        data_out_.close();
+        if (!data_out_) throw std::runtime_error("Failed while writing temporary step file");
+        if (index_out_.is_open()) {
+            index_out_.close();
+            if (!index_out_) throw std::runtime_error("Failed while writing temporary step index file");
+        }
+    }
+
+    [[nodiscard]] std::uint64_t data_bytes(std::uint64_t step_count) const {
+        return delta_ ? delta_->data_bytes() : step_count * sizeof(StepRecordDisk);
+    }
+    [[nodiscard]] std::uint64_t superblock_count() const {
+        return delta_ ? delta_->superblock_count() : 0;
+    }
+
+private:
+    StepEncoding encoding_;
+    std::ofstream data_out_;
+    std::ofstream index_out_;
+    std::optional<codec::DeltaStepWriter> delta_;
+};
 
 // Encode one node's postings as path-grouped varints:
 // - delta(path_id) from the previous path group
@@ -362,48 +503,79 @@ void merge_sorted_runs_to_run_file(const std::vector<std::string>& run_paths,
 }
 
 // Repeatedly merge posting runs in bounded groups until the final merge width
-// fits under the configured fan-in cap.
+// fits under the fan-in cap. The groups of one pass are independent, so with
+// threads > 1 several are merged at once, within the open-file limit; each
+// group still produces the same file as a serial pass.
 std::vector<std::string> collapse_posting_runs(std::vector<std::string> run_paths,
-                                               const std::string& temp_dir) {
-    if (run_paths.size() <= kPostingMergeFanIn) {
+                                               const std::string& temp_dir,
+                                               std::size_t fan_in,
+                                               unsigned threads) {
+    if (run_paths.size() <= fan_in) {
         return run_paths;
     }
 
     std::cout << get_time() << ": Collapsing " << run_paths.size()
-              << " posting runs with fan-in " << kPostingMergeFanIn << std::endl;
+              << " posting runs with fan-in " << fan_in << std::endl;
 
     std::size_t pass = 0;
-    while (run_paths.size() > kPostingMergeFanIn) {
-        std::vector<std::string> merged_paths;
-        merged_paths.reserve((run_paths.size() + kPostingMergeFanIn - 1) / kPostingMergeFanIn);
-        const std::size_t input_run_count = run_paths.size();
-        const std::size_t total_groups = merged_paths.capacity();
+    while (run_paths.size() > fan_in) {
+        const std::size_t total_groups = (run_paths.size() + fan_in - 1) / fan_in;
+        const std::size_t workers = concurrent_merge_groups(fan_in, threads, total_groups);
+        std::vector<std::string> merged_paths(total_groups);
+        for (std::size_t group = 0; group < total_groups; ++group) {
+            merged_paths[group] = temp_dir + "/posting_merge_pass_" + std::to_string(pass) + "_" +
+                                  std::to_string(group) + ".bin";
+        }
 
         std::cout << get_time() << ": Merge pass " << pass
-                  << ": " << input_run_count << " runs -> "
-                  << total_groups << " merged runs" << std::endl;
+                  << ": " << run_paths.size() << " runs -> "
+                  << total_groups << " merged runs";
+        if (workers > 1) std::cout << " (" << workers << " groups at a time)";
+        std::cout << std::endl;
 
-        for (std::size_t begin = 0; begin < run_paths.size(); begin += kPostingMergeFanIn) {
-            const std::size_t end = std::min(run_paths.size(), begin + kPostingMergeFanIn);
-            std::vector<std::string> group(run_paths.begin() + static_cast<std::ptrdiff_t>(begin),
-                                           run_paths.begin() + static_cast<std::ptrdiff_t>(end));
+        std::atomic<std::size_t> next_group{0};
+        std::size_t completed_groups = 0;
+        std::exception_ptr first_error;
+        std::mutex mutex;
+        auto merge_groups = [&]() {
+            while (true) {
+                const std::size_t group = next_group.fetch_add(1);
+                if (group >= total_groups) return;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (first_error) return;
+                }
+                try {
+                    const std::size_t begin = group * fan_in;
+                    const std::size_t end = std::min(run_paths.size(), begin + fan_in);
+                    const std::vector<std::string> inputs(
+                        run_paths.begin() + static_cast<std::ptrdiff_t>(begin),
+                        run_paths.begin() + static_cast<std::ptrdiff_t>(end));
+                    merge_sorted_runs_to_run_file(inputs, merged_paths[group]);
+                    // Once a bounded-fan-in merge group has been materialized, its input
+                    // runs are no longer needed for later passes or final assembly.
+                    remove_paths_if_present(inputs);
 
-            const std::string merged_path =
-                temp_dir + "/posting_merge_pass_" + std::to_string(pass) + "_" +
-                std::to_string(merged_paths.size()) + ".bin";
-            merge_sorted_runs_to_run_file(group, merged_path);
-            merged_paths.push_back(merged_path);
-
-            // Once a bounded-fan-in merge group has been materialized, its input
-            // runs are no longer needed for later passes or final assembly.
-            remove_paths_if_present(group);
-
-            if (merged_paths.size() % 10 == 0 || merged_paths.size() == total_groups) {
-                std::cout << get_time() << ": Merge pass " << pass
-                          << " completed " << merged_paths.size()
-                          << "/" << total_groups << " groups" << std::endl;
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ++completed_groups;
+                    if (completed_groups % 10 == 0 || completed_groups == total_groups) {
+                        std::cout << get_time() << ": Merge pass " << pass
+                                  << " completed " << completed_groups
+                                  << "/" << total_groups << " groups" << std::endl;
+                    }
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (!first_error) first_error = std::current_exception();
+                    return;
+                }
             }
-        }
+        };
+
+        std::vector<std::thread> pool;
+        for (std::size_t i = 1; i < workers; ++i) pool.emplace_back(merge_groups);
+        merge_groups();
+        for (auto& worker : pool) worker.join();
+        if (first_error) std::rethrow_exception(first_error);
 
         run_paths.swap(merged_paths);
         ++pass;
@@ -417,7 +589,8 @@ std::vector<std::string> collapse_posting_runs(std::vector<std::string> run_path
 std::uint64_t build_compressed_posting_blob_from_runs(
     const std::vector<std::string>& run_paths,
     std::vector<NodeRecordDisk>& node_records,
-    const std::string& output_path) {
+    const std::string& output_path,
+    const PathIndexEncoding& encoding) {
 
     std::ofstream out(output_path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -439,6 +612,12 @@ std::uint64_t build_compressed_posting_blob_from_runs(
               << run_paths.size() << " run files" << std::endl;
 
     std::vector<TempPosting> node_postings;
+    std::vector<codec::Posting> slot_postings;
+    std::optional<codec::PathSlotPostingEncoder> slot_encoder;
+    if (encoding.postings == PostingEncoding::path_slots) {
+        slot_encoder.emplace(encoding.posting_block_nodes);
+    }
+    std::string block;
     std::uint64_t current_offset = 0;
     std::size_t next_node_record = 0;
     std::uint32_t current_node_id = 0;
@@ -454,9 +633,19 @@ std::uint64_t build_compressed_posting_blob_from_runs(
             ++next_node_record;
         }
 
-        std::string block;
-        block.reserve(node_postings.size() * 2);
-        append_compressed_posting_block(block, node_postings, 0, node_postings.size());
+        block.clear();
+        if (slot_encoder) {
+            // The merge emits (node, path, rank) order, which is exactly the
+            // per-node (path, rank) order the slot coder expects.
+            slot_postings.clear();
+            for (const auto& posting : node_postings) {
+                slot_postings.push_back(codec::Posting{posting.path_id, posting.step_rank});
+            }
+            slot_encoder->encode_node(current_node_id, slot_postings.data(),
+                                      slot_postings.data() + slot_postings.size(), block);
+        } else {
+            append_compressed_posting_block(block, node_postings, 0, node_postings.size());
+        }
 
         node_records[current_node_id].posting_begin = current_offset;
         node_records[current_node_id].posting_count =
@@ -598,7 +787,7 @@ std::uint64_t parse_path_steps(
     std::string_view segments,
     const std::unordered_map<std::string, std::uint32_t>& node_to_id,
     std::uint32_t path_id,
-    std::ofstream& steps_out,
+    StepTableWriter& steps_out,
     PostingRunBuilder& posting_runs) {
 
     std::string node_name;
@@ -623,11 +812,7 @@ std::uint64_t parse_path_steps(
             throw std::runtime_error("Path references unknown node id: " + node_name);
         }
 
-        const auto step = pack_step_record(it->second, orient == '-');
-        write_binary_record(steps_out, step);
-        if (!steps_out.good()) {
-            throw std::runtime_error("Failed while writing temporary step file");
-        }
+        steps_out.add(it->second, orient == '-');
         posting_runs.add(it->second, path_id, step_rank);
         ++step_rank;
 
@@ -644,7 +829,7 @@ std::uint64_t parse_walk_steps(
     std::string_view walk,
     const std::unordered_map<std::string, std::uint32_t>& node_to_id,
     std::uint32_t path_id,
-    std::ofstream& steps_out,
+    StepTableWriter& steps_out,
     PostingRunBuilder& posting_runs) {
 
     std::string node_name;
@@ -668,16 +853,151 @@ std::uint64_t parse_walk_steps(
             throw std::runtime_error("Walk references unknown node id: " + node_name);
         }
 
-        const auto step = pack_step_record(it->second, orient == '<');
-        write_binary_record(steps_out, step);
-        if (!steps_out.good()) {
-            throw std::runtime_error("Failed while writing temporary step file");
-        }
+        steps_out.add(it->second, orient == '<');
         posting_runs.add(it->second, path_id, step_rank);
         ++step_rank;
         pos = end;
     }
 
+    return step_rank;
+}
+
+// Parallel step resolution for long P/W lines. The step text is cut into one
+// range of token starts per thread; tokens are always found over the whole
+// line, so a cut never splits a token and each range visits exactly the tokens
+// a serial pass would visit there. Ranges resolve names to packed
+// (node_id << 1 | reverse) values concurrently, then the steps are emitted in
+// order, and the error reported is the one a serial pass would hit first.
+struct StepRange {
+    std::size_t first{};
+    std::size_t last{};
+    std::vector<std::uint32_t> packed;
+    std::optional<std::string> error;
+};
+
+std::uint32_t pack_resolved_step(std::uint32_t node_id, bool is_reverse) {
+    return (node_id << 1) | (is_reverse ? 1u : 0u);
+}
+
+// P-line tokens starting in [range.first, range.last).
+void resolve_path_range(std::string_view segments,
+                        const std::unordered_map<std::string, std::uint32_t>& node_to_id,
+                        StepRange& range) {
+    std::string node_name;
+    for (size_t pos = range.first; pos < range.last;) {
+        const size_t comma = segments.find_first_of(",;", pos);
+        const size_t end = (comma == npos) ? segments.size() : comma;
+        const std::string_view token = segments.substr(pos, end - pos);
+        if (token.size() < 2) {
+            range.error = "Malformed path step token";
+            return;
+        }
+        const char orient = token.back();
+        if (orient != '+' && orient != '-') {
+            range.error = "Malformed path step orientation";
+            return;
+        }
+        node_name.assign(token.data(), token.size() - 1);
+        const auto it = node_to_id.find(node_name);
+        if (it == node_to_id.end()) {
+            range.error = "Path references unknown node id: " + node_name;
+            return;
+        }
+        range.packed.push_back(pack_resolved_step(it->second, orient == '-'));
+        if (comma == npos) break;
+        pos = comma + 1;
+    }
+}
+
+// W-line tokens starting in [range.first, range.last).
+void resolve_walk_range(std::string_view walk,
+                        const std::unordered_map<std::string, std::uint32_t>& node_to_id,
+                        StepRange& range) {
+    std::string node_name;
+    for (size_t pos = range.first; pos < range.last;) {
+        const char orient = walk[pos];
+        if (orient != '>' && orient != '<') {
+            range.error = "Malformed W walk orientation";
+            return;
+        }
+        const size_t next = walk.find_first_of("><", pos + 1);
+        const size_t end = (next == npos) ? walk.size() : next;
+        if (end <= pos + 1) {
+            range.error = "Malformed W walk token";
+            return;
+        }
+        node_name.assign(walk.data() + pos + 1, end - (pos + 1));
+        const auto it = node_to_id.find(node_name);
+        if (it == node_to_id.end()) {
+            range.error = "Walk references unknown node id: " + node_name;
+            return;
+        }
+        range.packed.push_back(pack_resolved_step(it->second, orient == '<'));
+        pos = end;
+    }
+}
+
+std::uint64_t parse_steps_parallel(
+    std::string_view text,
+    bool is_walk,
+    const std::unordered_map<std::string, std::uint32_t>& node_to_id,
+    std::uint32_t path_id,
+    unsigned threads,
+    StepTableWriter& steps_out,
+    PostingRunBuilder& posting_runs) {
+
+    // First token start at or after pos: just past a separator in a P line,
+    // at an orientation character in a W line.
+    auto token_start_at_or_after = [&](std::size_t pos) {
+        if (is_walk) {
+            const size_t next = text.find_first_of("><", pos);
+            return next == npos ? text.size() : next;
+        }
+        const size_t sep = text.find_first_of(",;", pos);
+        return sep == npos ? text.size() : sep + 1;
+    };
+
+    std::vector<StepRange> ranges(threads);
+    std::size_t first = 0;
+    for (unsigned i = 0; i < threads; ++i) {
+        const std::size_t last = (i + 1 == threads)
+            ? text.size()
+            : std::max(first, token_start_at_or_after(text.size() / threads * (i + 1)));
+        ranges[i].first = first;
+        ranges[i].last = last;
+        first = last;
+    }
+
+    auto resolve = [&](StepRange& range) {
+        try {
+            if (is_walk) {
+                resolve_walk_range(text, node_to_id, range);
+            } else {
+                resolve_path_range(text, node_to_id, range);
+            }
+        } catch (const std::exception& e) {
+            range.error = e.what();
+        }
+    };
+    std::vector<std::thread> pool;
+    pool.reserve(threads - 1);
+    for (unsigned i = 1; i < threads; ++i) {
+        pool.emplace_back(resolve, std::ref(ranges[i]));
+    }
+    resolve(ranges[0]);
+    for (auto& worker : pool) worker.join();
+
+    std::uint32_t step_rank = 0;
+    for (auto& range : ranges) {
+        for (const auto packed : range.packed) {
+            const std::uint32_t node_id = packed >> 1;
+            steps_out.add(node_id, (packed & 1u) != 0);
+            posting_runs.add(node_id, path_id, step_rank);
+            ++step_rank;
+        }
+        if (range.error) throw std::runtime_error(*range.error);
+        std::vector<std::uint32_t>().swap(range.packed);
+    }
     return step_rank;
 }
 
@@ -740,10 +1060,20 @@ void write_w_segments(std::ostream& out,
 
 namespace detail {
 
-PostingRunBuilder::PostingRunBuilder(std::string temp_dir, std::size_t max_records)
+PostingRunBuilder::PostingRunBuilder(std::string temp_dir,
+                                     std::size_t max_records,
+                                     unsigned background_spills)
     : temp_dir_(std::move(temp_dir)),
-      max_records_(std::max<std::size_t>(1, max_records)) {
+      max_records_(std::max<std::size_t>(1, max_records)),
+      background_spills_(background_spills) {
     chunk_.reserve(max_records_);
+}
+
+PostingRunBuilder::~PostingRunBuilder() {
+    // Never leave a worker writing into the temp directory after an error.
+    for (auto& spill : pending_spills_) {
+        if (spill.valid()) spill.wait();
+    }
 }
 
 void PostingRunBuilder::add(std::uint32_t node_id,
@@ -758,6 +1088,13 @@ void PostingRunBuilder::add(std::uint32_t node_id,
 
 void PostingRunBuilder::finish() {
     flush_run();
+    while (!pending_spills_.empty()) wait_for_oldest_spill();
+}
+
+void PostingRunBuilder::wait_for_oldest_spill() {
+    std::future<void> spill = std::move(pending_spills_.front());
+    pending_spills_.pop_front();
+    spill.get();
 }
 
 const std::vector<std::string>& PostingRunBuilder::run_paths() const {
@@ -775,21 +1112,34 @@ std::size_t PostingRunBuilder::run_count() const {
 void PostingRunBuilder::flush_run() {
     if (chunk_.empty()) return;
 
-    std::sort(chunk_.begin(), chunk_.end(), temp_posting_less);
-
     const std::string run_path =
         temp_dir_ + "/posting_run_" + std::to_string(run_paths_.size()) + ".bin";
-    std::ofstream out(run_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        throw std::runtime_error("Failed to open posting run file: " + run_path);
-    }
-    write_vector(out, chunk_);
-    if (!out.good()) {
-        throw std::runtime_error("Failed while writing posting run file: " + run_path);
-    }
+    auto sort_and_write = [](std::vector<TempPosting>& chunk, const std::string& path) {
+        std::sort(chunk.begin(), chunk.end(), temp_posting_less);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            throw std::runtime_error("Failed to open posting run file: " + path);
+        }
+        write_vector(out, chunk);
+        if (!out.good()) {
+            throw std::runtime_error("Failed while writing posting run file: " + path);
+        }
+    };
 
+    if (background_spills_ == 0) {
+        sort_and_write(chunk_, run_path);
+        chunk_.clear();
+    } else {
+        while (pending_spills_.size() >= background_spills_) wait_for_oldest_spill();
+        pending_spills_.push_back(std::async(
+            std::launch::async,
+            [sort_and_write, run_path, chunk = std::move(chunk_)]() mutable {
+                sort_and_write(chunk, run_path);
+            }));
+        chunk_ = std::vector<TempPosting>();
+        chunk_.reserve(max_records_);
+    }
     run_paths_.push_back(run_path);
-    chunk_.clear();
 
     if (run_paths_.size() % kPostingRunProgressInterval == 0) {
         std::cout << get_time() << ": Spilled "
@@ -831,15 +1181,23 @@ bool build_path_index(const std::string& input_gfa,
                       const std::string& node_index_path,
                       const Reader::Options& reader_options,
                       const std::string& tmp_base_dir,
-                      bool keep_tmp) {
+                      bool keep_tmp,
+                      const PathIndexEncoding& encoding,
+                      unsigned threads) {
     Timer timer;
-    // Stage the final .pdx beside its destination so failed builds never leave a truncated index behind.
-    const std::string temp_output_index = make_temp_output_path(output_index);
+    threads = std::max(1u, threads);
+    const BuildTuning tuning = build_tuning_from_env();
+    const std::size_t merge_fan_in = fitted_merge_fan_in(tuning.merge_fan_in);
 
     indexer::NodeHashIndex node_index(node_index_path);
     if (node_index.size() > kStepPackedNodeMask) {
         throw std::runtime_error("Node hash index is too large for packed step encoding");
     }
+    // Legacy ids with both legacy encodings reproduce the v4 file exactly so
+    // old binaries can still read it; anything else needs the v5 header.
+    const bool write_legacy_v4 = node_index.is_legacy() &&
+                                 encoding.steps == StepEncoding::packed32 &&
+                                 encoding.postings == PostingEncoding::path_groups;
 
     std::string tmp_base = tmp_base_dir;
     if (tmp_base.empty()) {
@@ -853,7 +1211,11 @@ bool build_path_index(const std::string& input_gfa,
                                                 "latest_paths",
                                                 false);
     const std::string tmp_steps_path = tmp_dir + "/tmp_steps.bin";
+    const std::string tmp_step_index_path = tmp_dir + "/tmp_step_index.bin";
     const std::string tmp_posting_blob_path = tmp_dir + "/tmp_posting_blob.bin";
+    // Stage the final .pdx in the work directory so failed or interrupted
+    // builds never leave a truncated index beside the output.
+    const std::string temp_output_index = make_temp_output_path(output_index, tmp_dir);
 
     if (keep_tmp) {
         std::cout << get_time() << ": Using path-index temp directory " << tmp_dir << std::endl;
@@ -891,6 +1253,7 @@ bool build_path_index(const std::string& input_gfa,
 
             std::cout << get_time() << ": Scanning S lines for node ids" << std::endl;
             while (reader.read_line(line)) {
+                if (!line.empty() && line[0] == 'H') reject_gfa2_header(line);
                 if (line.empty() || line[0] != 'S') continue;
                 auto node_id = extract_s_node_id(line);
 
@@ -920,11 +1283,10 @@ bool build_path_index(const std::string& input_gfa,
 
         std::vector<PathBuildEntry> paths;
         std::uint64_t total_steps = 0;
-        std::ofstream steps_out(tmp_steps_path, std::ios::binary | std::ios::trunc);
-        if (!steps_out) {
-            throw std::runtime_error("Failed to open temporary step file: " + tmp_steps_path);
-        }
-        PostingRunBuilder posting_runs(tmp_dir, kPostingChunkRecords);
+        StepTableWriter steps_out(encoding.steps, tmp_steps_path, tmp_step_index_path);
+        PostingRunBuilder posting_runs(tmp_dir,
+                                       tuning.posting_chunk_records,
+                                       threads > 1 ? std::min(threads - 1, kMaxBackgroundSpills) : 0);
 
         {
             // Pass 2: write packed steps straight to a temp file and spill
@@ -950,11 +1312,12 @@ bool build_path_index(const std::string& input_gfa,
                     entry.name = std::move(parsed.name);
                     entry.overlaps = std::string(parsed.overlaps);
                     entry.tags = std::string(parsed.tags);
-                    entry.step_count = parse_path_steps(parsed.segments,
-                                                        node_to_id,
-                                                        path_id,
-                                                        steps_out,
-                                                        posting_runs);
+                    entry.step_count =
+                        (threads > 1 && parsed.segments.size() >= tuning.parallel_parse_min_bytes)
+                            ? parse_steps_parallel(parsed.segments, false, node_to_id, path_id,
+                                                   threads, steps_out, posting_runs)
+                            : parse_path_steps(parsed.segments, node_to_id, path_id,
+                                               steps_out, posting_runs);
                 } else {
                     ParsedWalkFields parsed = parse_walk_fields(line);
                     entry.record_type = 'W';
@@ -969,11 +1332,12 @@ bool build_path_index(const std::string& input_gfa,
                                                entry.seq_start,
                                                entry.seq_end);
                     entry.tags = std::string(parsed.tags);
-                    entry.step_count = parse_walk_steps(parsed.walk,
-                                                        node_to_id,
-                                                        path_id,
-                                                        steps_out,
-                                                        posting_runs);
+                    entry.step_count =
+                        (threads > 1 && parsed.walk.size() >= tuning.parallel_parse_min_bytes)
+                            ? parse_steps_parallel(parsed.walk, true, node_to_id, path_id,
+                                                   threads, steps_out, posting_runs)
+                            : parse_walk_steps(parsed.walk, node_to_id, path_id,
+                                               steps_out, posting_runs);
                 }
 
                 total_steps += entry.step_count;
@@ -988,10 +1352,7 @@ bool build_path_index(const std::string& input_gfa,
             }
         }
 
-        if (!steps_out.good()) {
-            throw std::runtime_error("Failed while writing temporary step file");
-        }
-        steps_out.close();
+        steps_out.finish();
         posting_runs.finish();
 
         std::cout << get_time() << ": Finished scanning " << paths.size()
@@ -1028,26 +1389,49 @@ bool build_path_index(const std::string& input_gfa,
         std::cout << get_time() << ": Building per-node path postings" << std::endl;
         // Cap the final merge width so very large graphs do not require one
         // open file handle per spilled posting run.
-        auto final_run_paths = collapse_posting_runs(posting_runs.run_paths(), tmp_dir);
+        auto final_run_paths = collapse_posting_runs(posting_runs.run_paths(), tmp_dir,
+                                                     merge_fan_in, threads);
         const std::uint64_t posting_blob_bytes =
             build_compressed_posting_blob_from_runs(final_run_paths,
                                                     node_records,
-                                                    tmp_posting_blob_path);
+                                                    tmp_posting_blob_path,
+                                                    encoding);
         const std::uint64_t posting_count = posting_runs.total_postings();
         remove_paths_if_present(final_run_paths);
 
         PathIndexHeaderDisk header{};
         std::memcpy(header.magic, kPathIndexMagic, sizeof(kPathIndexMagic));
-        header.version = kPathIndexVersion;
+        header.version = write_legacy_v4 ? kPathIndexVersionLegacy : kPathIndexVersion;
         header.path_count = path_records.size();
         header.node_count = node_records.size();
         header.step_count = total_steps;
         header.posting_count = posting_count;
 
-        header.path_table_offset = sizeof(PathIndexHeaderDisk);
+        PathIndexHeaderV5Disk header_v5{};
+        header_v5.node_id_space = node_index.node_id_space();
+        header_v5.step_encoding = static_cast<std::uint32_t>(encoding.steps);
+        header_v5.posting_encoding = static_cast<std::uint32_t>(encoding.postings);
+        if (encoding.postings == PostingEncoding::path_slots) {
+            header_v5.posting_block_nodes = encoding.posting_block_nodes;
+        }
+        header_v5.step_data_bytes = steps_out.data_bytes(total_steps);
+        header_v5.step_superblock_count = steps_out.superblock_count();
+        if (encoding.steps == StepEncoding::delta_varint) {
+            header_v5.step_block_steps = static_cast<std::uint32_t>(codec::kStepBlockSteps);
+            header_v5.step_superblock_blocks = static_cast<std::uint32_t>(codec::kStepSuperblockBlocks);
+        }
+        // Keep the superblock table 8-byte aligned so readers can use it in place.
+        const std::uint64_t step_index_bytes =
+            header_v5.step_superblock_count * sizeof(codec::StepSuperblockDisk);
+        const std::uint64_t step_padding =
+            step_index_bytes == 0 ? 0 : (8 - header_v5.step_data_bytes % 8) % 8;
+
+        header.path_table_offset = sizeof(PathIndexHeaderDisk) +
+            (write_legacy_v4 ? 0 : sizeof(PathIndexHeaderV5Disk));
         header.node_table_offset = header.path_table_offset + path_records.size() * sizeof(PathRecordDisk);
         header.step_table_offset = header.node_table_offset + node_records.size() * sizeof(NodeRecordDisk);
-        header.posting_table_offset = header.step_table_offset + total_steps * sizeof(StepRecordDisk);
+        header_v5.step_index_offset = header.step_table_offset + header_v5.step_data_bytes + step_padding;
+        header.posting_table_offset = header_v5.step_index_offset + step_index_bytes;
         header.strings_offset = header.posting_table_offset + posting_blob_bytes;
         header.strings_size = strings_blob.size();
 
@@ -1058,9 +1442,17 @@ bool build_path_index(const std::string& input_gfa,
         }
 
         out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        if (!write_legacy_v4) {
+            out.write(reinterpret_cast<const char*>(&header_v5), sizeof(header_v5));
+        }
         write_vector(out, path_records);
         write_vector(out, node_records);
         append_file_to_stream(out, tmp_steps_path);
+        if (step_index_bytes > 0) {
+            const char zeros[8] = {};
+            out.write(zeros, static_cast<std::streamsize>(step_padding));
+            append_file_to_stream(out, tmp_step_index_path);
+        }
         append_file_to_stream(out, tmp_posting_blob_path);
         if (!strings_blob.empty()) {
             out.write(strings_blob.data(), static_cast<std::streamsize>(strings_blob.size()));
@@ -1092,25 +1484,74 @@ bool build_path_index(const std::string& input_gfa,
 }
 
 PathIndexReader::PathIndexReader(const std::string& index_path)
-    : index_path_(index_path), in_(index_path, std::ios::binary) {
-    if (!in_) {
+    : index_path_(index_path) {
+    // All reads use pread on one descriptor: no shared stream position, and
+    // unlike a mapping, page-cache pages never count toward process RSS.
+    fd_ = ::open(index_path.c_str(), O_RDONLY);
+    if (fd_ == -1) {
         throw std::runtime_error("Failed to open path index: " + index_path);
     }
-
-    PathIndexHeaderDisk header{};
-    in_.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!in_) {
-        throw std::runtime_error("Failed to read path index header: " + index_path);
+    struct stat st{};
+    if (fstat(fd_, &st) == -1) {
+        ::close(fd_);
+        fd_ = -1;
+        throw std::runtime_error("Failed to stat path index: " + index_path);
     }
+    file_size_ = static_cast<std::uint64_t>(st.st_size);
+    try {
+        load_header_and_paths();
+    } catch (...) {
+        ::close(fd_);
+        fd_ = -1;
+        throw;
+    }
+}
+
+PathIndexReader::~PathIndexReader() {
+    if (fd_ != -1) {
+        ::close(fd_);
+        fd_ = -1;
+    }
+}
+
+void PathIndexReader::load_header_and_paths() {
+    if (file_size_ < sizeof(PathIndexHeaderDisk)) {
+        throw std::runtime_error("Failed to read path index header: " + index_path_);
+    }
+    PathIndexHeaderDisk header{};
+    read_exact(0, &header, sizeof(header));
 
     if (std::memcmp(header.magic, kPathIndexMagic, sizeof(kPathIndexMagic)) != 0) {
-        throw std::runtime_error("Invalid path index magic: " + index_path);
+        throw std::runtime_error("Invalid path index magic: " + index_path_);
     }
-    if (header.version != kPathIndexVersion) {
+    if (header.version != kPathIndexVersion && header.version != kPathIndexVersionLegacy) {
         throw std::runtime_error("Unsupported path index version: " + std::to_string(header.version));
     }
     if (header.node_count > kStepPackedNodeMask) {
         throw std::runtime_error("Path index node count exceeds packed node id range");
+    }
+    format_version_ = header.version;
+
+    PathIndexHeaderV5Disk header_v5{};
+    if (header.version == kPathIndexVersion) {
+        read_exact(sizeof(header), &header_v5, sizeof(header_v5));
+        if (header_v5.step_encoding > static_cast<std::uint32_t>(StepEncoding::delta_varint)) {
+            throw std::runtime_error("Unsupported .pdx step encoding: " +
+                                     std::to_string(header_v5.step_encoding));
+        }
+        if (header_v5.posting_encoding > static_cast<std::uint32_t>(PostingEncoding::path_slots)) {
+            throw std::runtime_error("Unsupported .pdx posting encoding: " +
+                                     std::to_string(header_v5.posting_encoding));
+        }
+        step_encoding_ = static_cast<StepEncoding>(header_v5.step_encoding);
+        posting_encoding_ = static_cast<PostingEncoding>(header_v5.posting_encoding);
+        node_id_space_ = header_v5.node_id_space;
+        if (posting_encoding_ == PostingEncoding::path_slots) {
+            if (header_v5.posting_block_nodes == 0) {
+                throw std::runtime_error("Invalid .pdx posting block size: " + index_path_);
+            }
+            posting_block_nodes_ = header_v5.posting_block_nodes;
+        }
     }
 
     node_table_offset_ = header.node_table_offset;
@@ -1120,6 +1561,31 @@ PathIndexReader::PathIndexReader(const std::string& index_path)
     posting_table_bytes_ = header.strings_offset - header.posting_table_offset;
     total_step_count_ = header.step_count;
     node_count_ = static_cast<std::uint32_t>(header.node_count);
+
+    if (step_encoding_ == StepEncoding::delta_varint) {
+        const std::uint64_t expected_superblocks =
+            (total_step_count_ + codec::kStepSuperblockSteps - 1) / codec::kStepSuperblockSteps;
+        if (header_v5.step_block_steps != codec::kStepBlockSteps ||
+            header_v5.step_superblock_blocks != codec::kStepSuperblockBlocks ||
+            header_v5.step_superblock_count != expected_superblocks ||
+            header_v5.step_index_offset % 8 != 0) {
+            throw std::runtime_error("Unsupported .pdx step block layout: " + index_path_);
+        }
+        step_data_bytes_ = header_v5.step_data_bytes;
+        step_index_offset_ = header_v5.step_index_offset;
+        step_superblock_count_ = header_v5.step_superblock_count;
+        check_section(step_table_offset_, step_data_bytes_);
+        check_section(step_index_offset_, step_superblock_count_ * sizeof(codec::StepSuperblockDisk));
+    } else {
+        step_data_bytes_ = total_step_count_ * sizeof(StepRecordDisk);
+        check_section(step_table_offset_, step_data_bytes_);
+    }
+    check_section(node_table_offset_, static_cast<std::uint64_t>(node_count_) * sizeof(NodeRecordDisk));
+    if (header.strings_offset < header.posting_table_offset) {
+        throw std::runtime_error("Path index sections are out of order: " + index_path_);
+    }
+    check_section(posting_table_offset_, posting_table_bytes_);
+    check_section(strings_offset_, header.strings_size);
 
     // Load the small path metadata table eagerly. Node metadata and node names
     // stay on disk and are fetched lazily, which avoids a large fixed memory
@@ -1220,8 +1686,6 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
                     "Dense node-name cache exceeds uint32 range");
             }
             dense_id = static_cast<std::uint32_t>(dense_node_names_.size());
-            // Node names are consumed repeatedly but their node metadata is
-            // not, so bypass the separate metadata hash cache on this miss.
             dense_node_names_.push_back(copy_node_name(node_id));
         }
         return dense_node_names_[dense_id];
@@ -1232,8 +1696,8 @@ std::string_view PathIndexReader::get_node_name(std::uint32_t node_id) const {
         return it->second;
     }
 
-    // Name lookup does not need to retain NodeMeta: the owned name itself is
-    // sufficient for all later hits and avoids a second large hash table.
+    // Only the owned name is cached; later hits need nothing else from the
+    // node record.
     auto [inserted_it, inserted] =
         node_name_cache_.emplace(node_id, copy_node_name(node_id));
     (void)inserted;
@@ -1275,6 +1739,142 @@ std::string_view PathIndexReader::get_tags(std::uint32_t path_id) const {
     return rec.tags;
 }
 
+void PathIndexReader::check_section(std::uint64_t offset, std::uint64_t bytes) const {
+    if (offset > file_size_ || bytes > file_size_ - offset) {
+        throw std::runtime_error("Path index section lies outside the file: " + index_path_);
+    }
+}
+
+namespace detail {
+
+struct StepBlockCache {
+    static constexpr std::uint64_t kNone = std::numeric_limits<std::uint64_t>::max();
+    static constexpr std::size_t kBlocks = 8;
+
+    std::uint64_t superblock{kNone};
+    codec::StepSuperblockDisk record{};
+    // Direct-mapped by block id, so interleaved runs from a few paths stay hot.
+    std::uint64_t block_ids[kBlocks]{kNone, kNone, kNone, kNone, kNone, kNone, kNone, kNone};
+    std::vector<StepRecord> blocks[kBlocks];
+    std::vector<unsigned char> bytes;
+};
+
+}  // namespace detail
+
+std::uint64_t PathIndexReader::step_block_offset(std::uint64_t block) const {
+    const std::uint64_t superblock = block / codec::kStepSuperblockBlocks;
+    if (superblock >= step_superblock_count_) return step_data_bytes_;
+    if (!step_cache_) step_cache_ = std::make_unique<detail::StepBlockCache>();
+    auto& cache = *step_cache_;
+    if (cache.superblock != superblock) {
+        cache.superblock = detail::StepBlockCache::kNone;
+        read_exact(step_index_offset_ + superblock * sizeof(cache.record),
+                   &cache.record, sizeof(cache.record));
+        cache.superblock = superblock;
+    }
+    return cache.record.base_offset + cache.record.block_offsets[block % codec::kStepSuperblockBlocks];
+}
+
+const std::vector<StepRecord>& PathIndexReader::cached_step_block(std::uint64_t block) const {
+    if (!step_cache_) step_cache_ = std::make_unique<detail::StepBlockCache>();
+    const std::size_t slot = static_cast<std::size_t>(block % detail::StepBlockCache::kBlocks);
+    if (step_cache_->block_ids[slot] == block) return step_cache_->blocks[slot];
+
+    const std::uint64_t begin_byte = step_block_offset(block);
+    const std::uint64_t end_byte = step_block_offset(block + 1);
+    if (end_byte < begin_byte || end_byte > step_data_bytes_) {
+        throw std::runtime_error("Corrupt .pdx step block index");
+    }
+    auto& cache = *step_cache_;
+    cache.block_ids[slot] = detail::StepBlockCache::kNone;
+    cache.bytes.resize(static_cast<std::size_t>(end_byte - begin_byte));
+    read_exact(step_table_offset_ + begin_byte, cache.bytes.data(), cache.bytes.size());
+    auto& steps = cache.blocks[slot];
+    steps.clear();
+    const std::uint64_t first = block * codec::kStepBlockSteps;
+    const std::uint64_t count = std::min<std::uint64_t>(codec::kStepBlockSteps, total_step_count_ - first);
+    codec::decode_delta_steps(cache.bytes.data(), cache.bytes.data() + cache.bytes.size(), first, count,
+                              node_count_, [&](std::uint32_t node_id, bool is_reverse) {
+                                  steps.push_back(StepRecord{node_id, is_reverse});
+                              });
+    cache.block_ids[slot] = block;
+    return steps;
+}
+
+template <typename Fn>
+void PathIndexReader::visit_global_steps(std::uint64_t first, std::uint64_t count, Fn&& fn) const {
+    if (count == 0) return;
+    if (first > total_step_count_ || count > total_step_count_ - first) {
+        throw std::runtime_error("Requested steps lie outside the .pdx step table");
+    }
+
+    // Long ranges (chromosome-scale prefix scans) are read in bounded chunks
+    // so query memory stays independent of path length.
+    constexpr std::uint64_t kChunkSteps = 1ULL << 20;
+
+    if (step_encoding_ == StepEncoding::packed32) {
+        // Steps are stored in one flat array, so a path slice is contiguous.
+        std::vector<StepRecordDisk> raw(static_cast<std::size_t>(std::min(count, kChunkSteps)));
+        for (std::uint64_t done = 0; done < count;) {
+            const std::uint64_t take = std::min(count - done, kChunkSteps);
+            read_exact(step_table_offset_ + (first + done) * sizeof(StepRecordDisk),
+                       raw.data(), static_cast<std::size_t>(take * sizeof(StepRecordDisk)));
+            for (std::uint64_t i = 0; i < take; ++i) {
+                fn(unpack_step_record(raw[static_cast<std::size_t>(i)]));
+            }
+            done += take;
+        }
+        return;
+    }
+
+    // Delta-varint steps: locate the byte range of the covering 128-step
+    // blocks through the superblock table, read it, and decode it in order,
+    // skipping at most kStepBlockSteps - 1 values before `first`.
+    constexpr std::uint64_t kChunkBlocks = kChunkSteps / codec::kStepBlockSteps;
+    constexpr std::uint64_t kCachedRangeBlocks = 4;
+    const std::uint64_t first_block = first / codec::kStepBlockSteps;
+    const std::uint64_t end_block = (first + count - 1) / codec::kStepBlockSteps + 1;
+    const std::uint64_t stop = first + count;
+    if (end_block - first_block <= kCachedRangeBlocks) {
+        // Short ranges go through the decoded-block cache. The slice is copied
+        // out first so a callback may read steps again without invalidating it.
+        StepRecord slice[kCachedRangeBlocks * codec::kStepBlockSteps];
+        std::size_t taken = 0;
+        for (std::uint64_t block = first_block; block < end_block; ++block) {
+            const auto& steps = cached_step_block(block);
+            const std::uint64_t block_first = block * codec::kStepBlockSteps;
+            const std::uint64_t from = std::max(first, block_first) - block_first;
+            const std::uint64_t to = std::min(stop, block_first + steps.size()) - block_first;
+            for (std::uint64_t i = from; i < to; ++i) slice[taken++] = steps[static_cast<std::size_t>(i)];
+        }
+        for (std::size_t i = 0; i < taken; ++i) fn(slice[i]);
+        return;
+    }
+    std::vector<unsigned char> buffer;
+    std::uint64_t begin_byte = step_block_offset(first_block);
+    for (std::uint64_t block = first_block; block < end_block;) {
+        const std::uint64_t chunk_end = std::min(end_block, block + kChunkBlocks);
+        const std::uint64_t end_byte = step_block_offset(chunk_end);
+        if (end_byte < begin_byte || end_byte > step_data_bytes_) {
+            throw std::runtime_error("Corrupt .pdx step block index");
+        }
+        buffer.resize(static_cast<std::size_t>(end_byte - begin_byte));
+        read_exact(step_table_offset_ + begin_byte, buffer.data(), buffer.size());
+        const std::uint64_t chunk_first = std::max(first, block * codec::kStepBlockSteps);
+        const std::uint64_t chunk_stop = std::min(stop, chunk_end * codec::kStepBlockSteps);
+        codec::decode_delta_steps(buffer.data(),
+                                  buffer.data() + buffer.size(),
+                                  chunk_first,
+                                  chunk_stop - chunk_first,
+                                  node_count_,
+                                  [&](std::uint32_t node_id, bool is_reverse) {
+                                      fn(StepRecord{node_id, is_reverse});
+                                  });
+        begin_byte = end_byte;
+        block = chunk_end;
+    }
+}
+
 std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
                                                     std::uint64_t start_step,
                                                     std::uint64_t max_steps) const {
@@ -1287,18 +1887,8 @@ std::vector<StepRecord> PathIndexReader::read_steps(std::uint32_t path_id,
     const std::uint64_t take = std::min(available, max_steps);
     std::vector<StepRecord> out;
     out.reserve(static_cast<std::size_t>(take));
-    if (take == 0) return out;
-
-    // Steps are stored in one flat array, so reading a path slice is one seek
-    // and one contiguous read.
-    const std::uint64_t byte_offset = step_table_offset_ +
-        (info.step_begin + start_step) * sizeof(StepRecordDisk);
-
-    std::vector<StepRecordDisk> raw(static_cast<std::size_t>(take));
-    read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
-    for (const auto& rec : raw) {
-        out.push_back(unpack_step_record(rec));
-    }
+    visit_global_steps(info.step_begin + start_step, take,
+                       [&](const StepRecord& step) { out.push_back(step); });
     return out;
 }
 
@@ -1313,249 +1903,273 @@ void PathIndexReader::for_each_step(
     }
 
     const std::uint64_t available = info.step_count - start_step;
-    std::uint64_t remaining = std::min(available, max_steps);
-    if (remaining == 0) return;
+    const std::uint64_t take = std::min(available, max_steps);
+    std::uint64_t step_rank = start_step;
+    visit_global_steps(info.step_begin + start_step, take,
+                       [&](const StepRecord& step) { callback(step, step_rank++); });
+}
 
-    // Coordinate emission may need cumulative length up to a high step in a
-    // chromosome-scale path. Read the flat step table in bounded chunks so
-    // query memory is independent of full path length.
-    constexpr std::uint64_t kStepReadChunkRecords = 1ULL << 20;
-    std::vector<StepRecordDisk> raw;
-    raw.resize(static_cast<std::size_t>(std::min(remaining, kStepReadChunkRecords)));
+namespace {
 
-    std::uint64_t consumed = 0;
-    while (remaining > 0) {
-        const std::uint64_t take = std::min<std::uint64_t>(remaining, kStepReadChunkRecords);
-        if (raw.size() != static_cast<std::size_t>(take)) {
-            raw.resize(static_cast<std::size_t>(take));
+// Coalesce file ranges by page and pass them to posix_fadvise(WILLNEED).
+void advise_willneed(int fd, std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) {
+#ifdef POSIX_FADV_WILLNEED
+    constexpr std::uint64_t kPage = 4096;
+    std::sort(ranges.begin(), ranges.end());
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    bool open = false;
+    for (const auto& range : ranges) {
+        const std::uint64_t b = range.first - range.first % kPage;
+        const std::uint64_t e = range.second;
+        if (open && b <= end + kPage) {
+            end = std::max(end, e);
+            continue;
+        }
+        if (open) ::posix_fadvise(fd, static_cast<off_t>(begin), static_cast<off_t>(end - begin), POSIX_FADV_WILLNEED);
+        begin = b;
+        end = e;
+        open = true;
+    }
+    if (open) ::posix_fadvise(fd, static_cast<off_t>(begin), static_cast<off_t>(end - begin), POSIX_FADV_WILLNEED);
+#else
+    (void)fd;
+    (void)ranges;
+#endif
+}
+
+}  // namespace
+
+void PathIndexReader::prefetch_runs(const std::vector<SubpathRun>& runs) const {
+    constexpr std::size_t kMaxPrefetchRuns = 1u << 16;
+    if (runs.empty() || runs.size() > kMaxPrefetchRuns) return;
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    ranges.reserve(runs.size());
+    if (step_encoding_ == StepEncoding::packed32) {
+        for (const auto& run : runs) {
+            if (run.path_id >= paths_.size() || run.step_count == 0) continue;
+            const std::uint64_t first = paths_[run.path_id].step_begin + run.start_step;
+            const std::uint64_t offset = step_table_offset_ + first * sizeof(StepRecordDisk);
+            ranges.emplace_back(offset, offset + run.step_count * sizeof(StepRecordDisk));
+        }
+        advise_willneed(fd_, ranges);
+        return;
+    }
+
+    // Delta steps need the superblock records first: prefetch them all, then
+    // read them (the reads now overlap) and prefetch the step data.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> blocks;
+    blocks.reserve(runs.size());
+    for (const auto& run : runs) {
+        if (run.path_id >= paths_.size() || run.step_count == 0) continue;
+        const std::uint64_t first = paths_[run.path_id].step_begin + run.start_step;
+        if (first + run.step_count > total_step_count_) continue;
+        const std::uint64_t first_block = first / codec::kStepBlockSteps;
+        const std::uint64_t end_block = (first + run.step_count - 1) / codec::kStepBlockSteps + 1;
+        blocks.emplace_back(first_block, end_block);
+        for (const auto block : {first_block, end_block}) {
+            const std::uint64_t superblock = block / codec::kStepSuperblockBlocks;
+            if (superblock >= step_superblock_count_) continue;
+            const std::uint64_t offset = step_index_offset_ + superblock * sizeof(codec::StepSuperblockDisk);
+            ranges.emplace_back(offset, offset + sizeof(codec::StepSuperblockDisk));
+        }
+    }
+    advise_willneed(fd_, ranges);
+    ranges.clear();
+    std::sort(blocks.begin(), blocks.end());
+    for (const auto& [first_block, end_block] : blocks) {
+        const std::uint64_t begin = step_block_offset(first_block);
+        const std::uint64_t end = step_block_offset(end_block);
+        if (end < begin || end > step_data_bytes_) continue;
+        ranges.emplace_back(step_table_offset_ + begin, step_table_offset_ + end);
+    }
+    advise_willneed(fd_, ranges);
+}
+
+namespace detail {
+
+// Per-thread posting decode state. For path_slots postings it holds one
+// block: its node records, encoded bytes and the decoder state after the
+// last decoded node, from which that node's postings can be read again.
+// Callers visit node ids in ascending order, so later lookups in the block
+// resume decoding; earlier nodes' postings are not kept because repeat nodes
+// can have millions of them.
+struct PostingBlockCache {
+    static constexpr std::uint64_t kNoBlock = std::numeric_limits<std::uint64_t>::max();
+
+    std::uint64_t block{kNoBlock};
+    std::uint32_t first_node{};
+    std::vector<NodeRecordDisk> records;
+    std::vector<unsigned char> bytes;
+    std::size_t cursor{};
+    // Nodes [0, decoded) of the block have been decoded.
+    std::uint32_t decoded{};
+    codec::PathSlotPostingDecoder decoder;
+
+    void restart() {
+        cursor = 0;
+        decoded = 0;
+        decoder.reset();
+    }
+};
+
+}  // namespace detail
+
+namespace {
+
+// Decode one node's v4 path-group posting block from [cursor, end).
+void decode_path_group_postings(
+    const unsigned char* cursor,
+    const unsigned char* end,
+    std::uint64_t posting_count,
+    const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) {
+    std::uint32_t current_path_id = 0;
+    std::uint64_t emitted = 0;
+
+    while (emitted < posting_count) {
+        const auto path_delta = codec::read_varint(cursor, end);
+        if (path_delta > std::numeric_limits<std::uint32_t>::max() - current_path_id) {
+            throw std::runtime_error("Compressed posting block path id overflow");
+        }
+        current_path_id = static_cast<std::uint32_t>(current_path_id + path_delta);
+
+        const auto group_count = codec::read_varint(cursor, end);
+        if (group_count == 0) {
+            throw std::runtime_error("Compressed posting block has an empty path group");
+        }
+        if (group_count > posting_count - emitted) {
+            throw std::runtime_error("Compressed posting block overruns node posting count");
         }
 
-        const std::uint64_t byte_offset = step_table_offset_ +
-            (info.step_begin + start_step + consumed) * sizeof(StepRecordDisk);
-        read_exact(byte_offset, raw.data(), raw.size() * sizeof(StepRecordDisk));
-
-        for (std::uint64_t i = 0; i < take; ++i) {
-            const auto step = unpack_step_record(raw[static_cast<std::size_t>(i)]);
-            callback(step, start_step + consumed + i);
+        std::uint64_t current_step_rank = codec::read_varint(cursor, end);
+        if (current_step_rank > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::runtime_error("Compressed posting block step rank overflow");
         }
+        callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
+        ++emitted;
 
-        consumed += take;
-        remaining -= take;
+        for (std::uint64_t i = 1; i < group_count; ++i) {
+            const auto step_delta = codec::read_varint(cursor, end);
+            if (step_delta == 0) {
+                throw std::runtime_error("Compressed posting block step delta must be positive");
+            }
+            if (step_delta > std::numeric_limits<std::uint32_t>::max() - current_step_rank) {
+                throw std::runtime_error("Compressed posting block step rank overflow");
+            }
+            current_step_rank += step_delta;
+            callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
+            ++emitted;
+        }
+    }
+
+    if (cursor != end) {
+        throw std::runtime_error("Compressed posting block has trailing bytes");
     }
 }
 
-void PathIndexReader::for_each_node_posting(
+}  // namespace
+
+void PathIndexReader::decode_node_postings(
     std::uint32_t node_id,
+    detail::PostingBlockCache& cache,
     const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const {
     if (node_id >= node_count_) {
         throw std::runtime_error("Node id out of range");
     }
 
-    const auto node = read_node_meta(node_id);
-    if (node.posting_count == 0) return;
-
-    const std::uint64_t block_begin = node.posting_begin;
-    const std::uint64_t block_end = (node_id + 1 < node_count_)
-        ? read_node_meta(node_id + 1).posting_begin
-        : posting_table_bytes_;
-    if (block_end < block_begin) {
-        throw std::runtime_error("Compressed posting block offsets are out of order");
+    if (posting_encoding_ == PostingEncoding::path_groups) {
+        // One read covers this node's record and the next node's start.
+        NodeRecordDisk records[2]{};
+        const bool has_next = node_id + 1 < node_count_;
+        read_exact(node_table_offset_ + static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk),
+                   records, (has_next ? 2 : 1) * sizeof(NodeRecordDisk));
+        const auto& node = records[0];
+        if (node.posting_count == 0) return;
+        const std::uint64_t block_end = has_next ? records[1].posting_begin : posting_table_bytes_;
+        if (block_end < node.posting_begin || block_end > posting_table_bytes_) {
+            throw std::runtime_error("Compressed posting block offsets are out of order");
+        }
+        cache.bytes.resize(static_cast<std::size_t>(block_end - node.posting_begin));
+        read_exact(posting_table_offset_ + node.posting_begin, cache.bytes.data(), cache.bytes.size());
+        decode_path_group_postings(cache.bytes.data(), cache.bytes.data() + cache.bytes.size(),
+                                   node.posting_count, callback);
+        return;
     }
 
-    std::vector<unsigned char> block(static_cast<std::size_t>(block_end - block_begin));
-    read_exact(posting_table_offset_ + block_begin, block.data(), block.size());
-
-    std::size_t cursor = 0;
-    std::uint32_t current_path_id = 0;
-    std::uint64_t emitted = 0;
-
-    while (emitted < node.posting_count) {
-        const auto path_delta = read_varint(block, cursor);
-        if (path_delta > std::numeric_limits<std::uint32_t>::max() - current_path_id) {
-            throw std::runtime_error("Compressed posting block path id overflow");
+    const std::uint64_t block = node_id / posting_block_nodes_;
+    if (cache.block != block) {
+        // Load the block's node records (plus the next block's first record
+        // for the end offset) and its encoded bytes with two reads.
+        const auto first = static_cast<std::uint32_t>(block * posting_block_nodes_);
+        const auto last = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(static_cast<std::uint64_t>(first) + posting_block_nodes_, node_count_));
+        const std::size_t record_count = last - first + (last < node_count_ ? 1 : 0);
+        cache.block = detail::PostingBlockCache::kNoBlock;
+        cache.records.resize(record_count);
+        read_exact(node_table_offset_ + static_cast<std::uint64_t>(first) * sizeof(NodeRecordDisk),
+                   cache.records.data(), record_count * sizeof(NodeRecordDisk));
+        const std::uint64_t begin = cache.records.front().posting_begin;
+        const std::uint64_t end = last < node_count_ ? cache.records.back().posting_begin
+                                                     : posting_table_bytes_;
+        if (end < begin || end > posting_table_bytes_) {
+            throw std::runtime_error("Compressed posting block offsets are out of order");
         }
-        current_path_id = static_cast<std::uint32_t>(current_path_id + path_delta);
+        cache.bytes.resize(static_cast<std::size_t>(end - begin));
+        read_exact(posting_table_offset_ + begin, cache.bytes.data(), cache.bytes.size());
+        cache.restart();
+        cache.first_node = first;
+        cache.block = block;
+    }
 
-        const auto group_count = read_varint(block, cursor);
-        if (group_count == 0) {
-            throw std::runtime_error("Compressed posting block has an empty path group");
+    const std::uint32_t index = node_id - cache.first_node;
+    // Going back inside a block means decoding it again from its first node.
+    if (index + 1 < cache.decoded) cache.restart();
+    const std::uint64_t block_begin = cache.records.front().posting_begin;
+    while (cache.decoded <= index) {
+        const auto& record = cache.records[cache.decoded];
+        if (record.posting_begin - block_begin != cache.cursor) {
+            cache.block = detail::PostingBlockCache::kNoBlock;
+            throw std::runtime_error("Compressed posting block offsets do not match the node table");
         }
-        if (group_count > node.posting_count - emitted) {
-            throw std::runtime_error("Compressed posting block overruns node posting count");
-        }
-
-        std::uint64_t current_step_rank = read_varint(block, cursor);
-        if (current_step_rank > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::runtime_error("Compressed posting block step rank overflow");
-        }
-        callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
-        ++emitted;
-
-        for (std::uint64_t i = 1; i < group_count; ++i) {
-            const auto step_delta = read_varint(block, cursor);
-            if (step_delta == 0) {
-                throw std::runtime_error("Compressed posting block step delta must be positive");
+        if (record.posting_count > 0) {
+            const unsigned char* p = cache.bytes.data() + cache.cursor;
+            try {
+                cache.decoder.decode_node(p, cache.bytes.data() + cache.bytes.size(),
+                                          record.posting_count, path_count());
+            } catch (...) {
+                cache.block = detail::PostingBlockCache::kNoBlock;
+                throw;
             }
-            if (step_delta > std::numeric_limits<std::uint32_t>::max() - current_step_rank) {
-                throw std::runtime_error("Compressed posting block step rank overflow");
-            }
-            current_step_rank += step_delta;
-            callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
-            ++emitted;
+            cache.cursor = static_cast<std::size_t>(p - cache.bytes.data());
         }
+        ++cache.decoded;
     }
 
-    if (cursor != block.size()) {
-        throw std::runtime_error("Compressed posting block has trailing bytes");
-    }
+    // The decoder state now ends at this node; empty nodes left it untouched.
+    if (cache.records[index].posting_count == 0) return;
+    cache.decoder.for_each_node_posting(
+        [&](std::uint32_t path_id, std::uint32_t step_rank) { callback(path_id, step_rank); });
 }
 
-// PostingCursor duplicates PathIndexReader's node-metadata and posting-block
-// decoding (same NodeRecordDisk layout, same read_varint format) rather than
-// sharing it, because PathIndexReader's cache and file stream are private,
-// non-thread-safe state. Keeping this logic in the same translation unit as
-// PathIndexReader, right next to it, is intentional: any future change to the
-// on-disk node/posting layout must update both.
-PostingCursor::PostingCursor(std::string index_path,
-                             std::uint64_t node_table_offset,
-                             std::uint64_t posting_table_offset,
-                             std::uint64_t posting_table_bytes,
-                             std::uint32_t node_count)
-    : index_path_(std::move(index_path)),
-      in_(index_path_, std::ios::binary),
-      node_table_offset_(node_table_offset),
-      posting_table_offset_(posting_table_offset),
-      posting_table_bytes_(posting_table_bytes),
-      node_count_(node_count) {
-    if (!in_) {
-        throw std::runtime_error(
-            "Failed to open path index for posting reads: " + index_path_);
-    }
+void PathIndexReader::for_each_node_posting(
+    std::uint32_t node_id,
+    const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const {
+    if (!posting_cache_) posting_cache_ = std::make_unique<detail::PostingBlockCache>();
+    decode_node_postings(node_id, *posting_cache_, callback);
 }
 
-PostingCursor::NodeMeta PostingCursor::read_node_meta(std::uint32_t node_id) {
-    if (node_id >= node_count_) {
-        throw std::runtime_error("Node id out of range");
-    }
+PostingCursor::PostingCursor(const PathIndexReader& index)
+    : index_(&index), cache_(std::make_unique<detail::PostingBlockCache>()) {}
 
-    const auto it = node_meta_cache_.find(node_id);
-    if (it != node_meta_cache_.end()) {
-        return it->second;
-    }
-
-    NodeRecordDisk rec{};
-    const auto offset = node_table_offset_ +
-        static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
-    read_exact(offset, &rec, sizeof(rec));
-
-    NodeMeta meta{rec.posting_begin, rec.posting_count};
-    node_meta_cache_.emplace(node_id, meta);
-    return meta;
-}
-
-void PostingCursor::read_exact(std::uint64_t offset, void* dst, std::size_t bytes) {
-    if (bytes == 0) return;
-    in_.clear();
-    in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!in_) {
-        throw std::runtime_error(
-            "seekg failed while reading path index posting table");
-    }
-    in_.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
-    if (!in_) {
-        throw std::runtime_error(
-            "Failed to read bytes from path index posting table");
-    }
-}
+PostingCursor::~PostingCursor() = default;
+PostingCursor::PostingCursor(PostingCursor&&) noexcept = default;
+PostingCursor& PostingCursor::operator=(PostingCursor&&) noexcept = default;
 
 void PostingCursor::for_each_node_posting(
     std::uint32_t node_id,
     const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) {
-    if (node_id >= node_count_) {
-        throw std::runtime_error("Node id out of range");
-    }
-
-    const auto node = read_node_meta(node_id);
-    if (node.posting_count == 0) return;
-
-    const std::uint64_t block_begin = node.posting_begin;
-    const std::uint64_t block_end = (node_id + 1 < node_count_)
-        ? read_node_meta(node_id + 1).posting_begin
-        : posting_table_bytes_;
-    if (block_end < block_begin) {
-        throw std::runtime_error("Compressed posting block offsets are out of order");
-    }
-
-    std::vector<unsigned char> block(static_cast<std::size_t>(block_end - block_begin));
-    read_exact(posting_table_offset_ + block_begin, block.data(), block.size());
-
-    std::size_t cursor = 0;
-    std::uint32_t current_path_id = 0;
-    std::uint64_t emitted = 0;
-
-    while (emitted < node.posting_count) {
-        const auto path_delta = read_varint(block, cursor);
-        if (path_delta > std::numeric_limits<std::uint32_t>::max() - current_path_id) {
-            throw std::runtime_error("Compressed posting block path id overflow");
-        }
-        current_path_id = static_cast<std::uint32_t>(current_path_id + path_delta);
-
-        const auto group_count = read_varint(block, cursor);
-        if (group_count == 0) {
-            throw std::runtime_error("Compressed posting block has an empty path group");
-        }
-        if (group_count > node.posting_count - emitted) {
-            throw std::runtime_error("Compressed posting block overruns node posting count");
-        }
-
-        std::uint64_t current_step_rank = read_varint(block, cursor);
-        if (current_step_rank > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::runtime_error("Compressed posting block step rank overflow");
-        }
-        callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
-        ++emitted;
-
-        for (std::uint64_t i = 1; i < group_count; ++i) {
-            const auto step_delta = read_varint(block, cursor);
-            if (step_delta == 0) {
-                throw std::runtime_error("Compressed posting block step delta must be positive");
-            }
-            if (step_delta > std::numeric_limits<std::uint32_t>::max() - current_step_rank) {
-                throw std::runtime_error("Compressed posting block step rank overflow");
-            }
-            current_step_rank += step_delta;
-            callback(current_path_id, static_cast<std::uint32_t>(current_step_rank));
-            ++emitted;
-        }
-    }
-
-    if (cursor != block.size()) {
-        throw std::runtime_error("Compressed posting block has trailing bytes");
-    }
-}
-
-PathIndexReader::NodeMeta PathIndexReader::read_node_meta(std::uint32_t node_id) const {
-    if (node_id >= node_count_) {
-        throw std::runtime_error("Node id out of range");
-    }
-
-    const auto it = node_meta_cache_.find(node_id);
-    if (it != node_meta_cache_.end()) {
-        return it->second;
-    }
-
-    NodeRecordDisk rec{};
-    const auto offset = node_table_offset_ + static_cast<std::uint64_t>(node_id) * sizeof(NodeRecordDisk);
-    read_exact(offset, &rec, sizeof(rec));
-
-    NodeMeta meta{
-        rec.name_offset,
-        rec.name_len,
-        rec.posting_begin,
-        rec.posting_count
-    };
-    node_meta_cache_.emplace(node_id, meta);
-    return meta;
+    index_->decode_node_postings(node_id, *cache_, callback);
 }
 
 std::string PathIndexReader::read_string(std::uint64_t offset, std::uint64_t len) const {
@@ -1566,15 +2180,22 @@ std::string PathIndexReader::read_string(std::uint64_t offset, std::uint64_t len
 }
 
 void PathIndexReader::read_exact(std::uint64_t offset, void* dst, std::size_t bytes) const {
-    if (bytes == 0) return;
-    in_.clear();
-    in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-    if (!in_) {
-        throw std::runtime_error("seekg failed while reading path index");
+    if (offset > file_size_ || bytes > file_size_ - offset) {
+        throw std::runtime_error("Read beyond the end of path index: " + index_path_);
     }
-    in_.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(bytes));
-    if (!in_) {
-        throw std::runtime_error("Failed to read bytes from path index");
+    auto* out = static_cast<char*>(dst);
+    while (bytes > 0) {
+        const ssize_t got = ::pread(fd_, out, bytes, static_cast<off_t>(offset));
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            throw std::runtime_error("Failed to read bytes from path index: " + index_path_);
+        }
+        if (got == 0) {
+            throw std::runtime_error("Unexpected end of path index: " + index_path_);
+        }
+        out += got;
+        offset += static_cast<std::uint64_t>(got);
+        bytes -= static_cast<std::size_t>(got);
     }
 }
 
@@ -1630,12 +2251,11 @@ SelectedNodeNameLookup::SelectedNodeNameLookup(
 std::vector<SubpathRun> find_subpaths_for_node_ids(const PathIndexReader& index,
                                                    const std::vector<std::uint32_t>& node_ids,
                                                    const bool keep_single_steps) {
-    std::unordered_set<std::uint32_t> unique_nodes;
-    unique_nodes.reserve(node_ids.size());
-
-    for (const auto node_id : node_ids) {
-        unique_nodes.insert(node_id);
-    }
+    // Visit nodes in id order: neighbouring ids share posting blocks, so the
+    // reader's block cache decodes each block once.
+    std::vector<std::uint32_t> unique_nodes = node_ids;
+    std::sort(unique_nodes.begin(), unique_nodes.end());
+    unique_nodes.erase(std::unique(unique_nodes.begin(), unique_nodes.end()), unique_nodes.end());
 
     // Collect every step occurrence of every requested node, grouped by path.
     std::unordered_map<std::uint32_t, std::vector<std::uint32_t>> path_to_steps;

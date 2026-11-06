@@ -6,8 +6,10 @@
 #include <deque>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iosfwd>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -48,15 +50,44 @@ struct SubpathRun {
     std::uint64_t step_count{};
 };
 
+// Step table layouts. packed32 is the v4 layout (one uint32 per step);
+// delta_varint stores zigzag deltas in 128-step blocks (see pdx_codec.h).
+enum class StepEncoding : std::uint32_t {
+    packed32 = 0,
+    delta_varint = 1,
+};
+
+// Per-node posting blob layouts.
+enum class PostingEncoding : std::uint32_t {
+    // v4: per path group varint path_delta, count, first rank, rank deltas.
+    path_groups = 0,
+    // Occurrences predicted from the previous nodes of a block of consecutive
+    // node ids (see pdx_codec.h); needs locality-ordered node ids.
+    path_slots = 1,
+};
+
+inline constexpr std::uint32_t kDefaultPostingBlockNodes = 32;
+
+struct PathIndexEncoding {
+    StepEncoding steps{StepEncoding::delta_varint};
+    PostingEncoding postings{PostingEncoding::path_slots};
+    std::uint32_t posting_block_nodes{kDefaultPostingBlockNodes};
+};
+
 // Build the disk-backed .pdx path index for P/W records in a GFA file. Node
 // ids are aligned to the supplied .ndx file so path queries and graph queries
-// share the same integer node space.
+// share the same integer node space. A legacy .ndx with the v4 encodings
+// writes a v4 file byte for byte; everything else writes v5. threads > 1
+// resolves the steps of long path lines, sorts posting runs and merges run
+// groups in parallel; the output is the same for every thread count.
 bool build_path_index(const std::string& input_gfa,
                       const std::string& output_index,
                       const std::string& node_index_path,
                       const Reader::Options& reader_options = Reader::Options{},
                       const std::string& tmp_base_dir = std::string(""),
-                      bool keep_tmp = false);
+                      bool keep_tmp = false,
+                      const PathIndexEncoding& encoding = PathIndexEncoding{},
+                      unsigned threads = 1);
 
 namespace detail {
 
@@ -69,12 +100,20 @@ struct TempPosting {
 };
 
 // Bounded in-memory posting accumulator that spills sorted posting runs to disk
-// once the configured chunk size is reached.
+// once the configured chunk size is reached. With background_spills > 0 a full
+// chunk is sorted and written by a worker thread while new postings go into a
+// fresh chunk; at most background_spills chunks are in flight at once.
 class PostingRunBuilder {
 public:
-    explicit PostingRunBuilder(std::string temp_dir, std::size_t max_records);
+    PostingRunBuilder(std::string temp_dir, std::size_t max_records, unsigned background_spills = 0);
+    ~PostingRunBuilder();
+
+    PostingRunBuilder(const PostingRunBuilder&) = delete;
+    PostingRunBuilder& operator=(const PostingRunBuilder&) = delete;
 
     void add(std::uint32_t node_id, std::uint32_t path_id, std::uint32_t step_rank);
+    // Spill the last chunk and wait for every background spill; rethrows the
+    // first spill error.
     void finish();
 
     [[nodiscard]] const std::vector<std::string>& run_paths() const;
@@ -83,12 +122,15 @@ public:
 
 private:
     void flush_run();
+    void wait_for_oldest_spill();
 
     std::string temp_dir_;
     std::size_t max_records_{};
+    unsigned background_spills_{};
     std::uint64_t total_postings_{};
     std::vector<TempPosting> chunk_;
     std::vector<std::string> run_paths_;
+    std::deque<std::future<void>> pending_spills_;
 };
 
 // Sequential reader over one sorted posting run file used during k-way merge.
@@ -114,53 +156,48 @@ struct PostingHeapGreater {
 
 }  // namespace detail
 
-// Independently-seekable view over one .pdx file's node-first posting table
-// only. Unlike PathIndexReader, its constructor does not read or parse the
-// path metadata table (path names, samples, tags, ...), so many instances -
-// one per worker thread - can be created cheaply to read postings
-// concurrently from the same index file. Each instance owns its own file
-// handle and node-metadata cache, so it is safe to use from exactly one
-// thread at a time but must not be shared between threads.
+class PathIndexReader;
+
+namespace detail {
+// Decoded posting block plus the decoder state needed to continue it.
+struct PostingBlockCache;
+// Recently decoded 128-step blocks and the last step superblock record.
+struct StepBlockCache;
+}  // namespace detail
+
+// Posting-only view of one .pdx for one worker thread. Reads use pread on the
+// reader's file descriptor, so cursors never share stream state; each cursor
+// keeps its own decoded-block cache, which makes runs of consecutive node ids
+// decode each block once.
 //
-// Construct one via PathIndexReader::open_posting_cursor() rather than
-// directly: the offsets below come from that reader's already-parsed header
-// and are not meant to be recomputed by callers.
+// Construct one via PathIndexReader::open_posting_cursor(); the reader must
+// outlive every cursor it hands out.
 class PostingCursor {
 public:
-    PostingCursor(std::string index_path,
-                 std::uint64_t node_table_offset,
-                 std::uint64_t posting_table_offset,
-                 std::uint64_t posting_table_bytes,
-                 std::uint32_t node_count);
+    explicit PostingCursor(const PathIndexReader& index);
+    ~PostingCursor();
+    PostingCursor(PostingCursor&&) noexcept;
+    PostingCursor& operator=(PostingCursor&&) noexcept;
 
     void for_each_node_posting(
         std::uint32_t node_id,
         const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback);
 
 private:
-    struct NodeMeta {
-        std::uint64_t posting_begin{};
-        std::uint64_t posting_count{};
-    };
-
-    NodeMeta read_node_meta(std::uint32_t node_id);
-    void read_exact(std::uint64_t offset, void* dst, std::size_t bytes);
-
-    std::string index_path_;
-    std::ifstream in_;
-    std::uint64_t node_table_offset_{};
-    std::uint64_t posting_table_offset_{};
-    std::uint64_t posting_table_bytes_{};
-    std::uint32_t node_count_{};
-    // Not `mutable`/const-qualified like PathIndexReader's cache: a
-    // PostingCursor is only ever touched by the one thread that owns it, so
-    // there is no need to support calls through a const reference here.
-    std::unordered_map<std::uint32_t, NodeMeta> node_meta_cache_;
+    const PathIndexReader* index_;
+    std::unique_ptr<detail::PostingBlockCache> cache_;
 };
 
 class PathIndexReader {
 public:
     explicit PathIndexReader(const std::string& index_path);
+    ~PathIndexReader();
+
+    // The reader owns its file descriptor. Like the node-name caches, the
+    // step and posting caches make one reader unsafe to share between
+    // threads; workers open their own reader or PostingCursor.
+    PathIndexReader(const PathIndexReader&) = delete;
+    PathIndexReader& operator=(const PathIndexReader&) = delete;
 
     [[nodiscard]] std::uint32_t path_count() const {
         return static_cast<std::uint32_t>(paths_.size());
@@ -172,6 +209,20 @@ public:
 
     [[nodiscard]] std::uint64_t total_step_count() const {
         return total_step_count_;
+    }
+
+    // Fingerprint of the .ndx node numbering this index was built against
+    // (0 for legacy hash-rank ids). See indexer::require_matching_node_ids.
+    [[nodiscard]] std::uint64_t node_id_space() const {
+        return node_id_space_;
+    }
+
+    [[nodiscard]] std::uint32_t format_version() const {
+        return format_version_;
+    }
+
+    [[nodiscard]] PathIndexEncoding encoding() const {
+        return PathIndexEncoding{step_encoding_, posting_encoding_, posting_block_nodes_};
     }
 
     [[nodiscard]] bool lookup_path_id(const std::string& name, std::uint32_t& out_path_id) const;
@@ -196,24 +247,33 @@ public:
         std::uint64_t max_steps,
         const std::function<void(const StepRecord& step, std::uint64_t step_rank)>& callback) const;
 
+    // Ask the kernel to start reading the step data of these runs (and the
+    // block index entries that locate them) before they are read one by
+    // one. On a cold page cache this turns one dependent disk read per run
+    // into one batch of parallel reads; on a warm cache it costs a few
+    // syscalls. Very large batches are skipped because they are bandwidth
+    // bound anyway.
+    void prefetch_runs(const std::vector<SubpathRun>& runs) const;
+
+    // Uses a reader-owned block cache, so like the node-name caches it is not
+    // safe to call concurrently; worker threads use open_posting_cursor().
+    // Postings are delivered sorted by (path id, step rank).
     void for_each_node_posting(
         std::uint32_t node_id,
         const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const;
 
-    // Open an independent, posting-only view of the same .pdx file. See
-    // PostingCursor: this is the cheap alternative to constructing another
-    // full PathIndexReader when concurrent posting reads are needed (e.g. one
-    // per worker thread), since it skips the eager path-metadata load.
+    // Open a posting-only view for a worker thread. See PostingCursor.
     [[nodiscard]] PostingCursor open_posting_cursor() const {
-        return PostingCursor(
-            index_path_, node_table_offset_, posting_table_offset_,
-            posting_table_bytes_, node_count_);
+        return PostingCursor(*this);
     }
 
 private:
+    friend class PostingCursor;
+
     // Path metadata is loaded eagerly because the number of paths is small
-    // compared to the number of graph nodes. Node metadata stays on disk and is
-    // loaded lazily on demand to keep query-time memory bounded on large graphs.
+    // compared to the number of graph nodes. Node metadata, steps and
+    // postings stay in the mapped file and are only touched on demand, which
+    // keeps query-time memory bounded on large graphs.
     struct PathMeta {
         char record_type{};
         std::string name;
@@ -228,22 +288,37 @@ private:
         std::int64_t seq_end{-1};
     };
 
-    struct NodeMeta {
-        std::uint64_t name_offset{};
-        std::uint64_t name_len{};
-        std::uint64_t posting_begin{};
-        std::uint64_t posting_count{};
-    };
+    // Visit global steps [first, first + count) in order.
+    template <typename Fn>
+    void visit_global_steps(std::uint64_t first, std::uint64_t count, Fn&& fn) const;
+    [[nodiscard]] std::uint64_t step_block_offset(std::uint64_t block) const;
+    // Decoded steps of one 128-step block, served from the step cache.
+    [[nodiscard]] const std::vector<StepRecord>& cached_step_block(std::uint64_t block) const;
 
-    [[nodiscard]] NodeMeta read_node_meta(std::uint32_t node_id) const;
+    void decode_node_postings(
+        std::uint32_t node_id,
+        detail::PostingBlockCache& cache,
+        const std::function<void(std::uint32_t path_id, std::uint32_t step_rank)>& callback) const;
+
+    void load_header_and_paths();
     [[nodiscard]] std::string read_string(std::uint64_t offset, std::uint64_t len) const;
     void promote_node_name_cache() const;
     void read_exact(std::uint64_t offset, void* dst, std::size_t bytes) const;
+    void check_section(std::uint64_t offset, std::uint64_t bytes) const;
 
     std::string index_path_;
-    mutable std::ifstream in_;
+    int fd_{-1};
+    std::uint64_t file_size_{};
+    std::uint32_t format_version_{};
+    StepEncoding step_encoding_{StepEncoding::packed32};
+    PostingEncoding posting_encoding_{PostingEncoding::path_groups};
+    std::uint32_t posting_block_nodes_{};
+    std::uint64_t node_id_space_{};
     std::uint64_t node_table_offset_{};
     std::uint64_t step_table_offset_{};
+    std::uint64_t step_data_bytes_{};
+    std::uint64_t step_index_offset_{};
+    std::uint64_t step_superblock_count_{};
     std::uint64_t posting_table_offset_{};
     std::uint64_t strings_offset_{};
     std::uint64_t posting_table_bytes_{};
@@ -251,7 +326,6 @@ private:
     std::uint32_t node_count_{};
     std::vector<PathMeta> paths_;
     std::unordered_map<std::string, std::uint32_t> path_name_to_id_;
-    mutable std::unordered_map<std::uint32_t, NodeMeta> node_meta_cache_;
     mutable std::unordered_map<std::uint32_t, std::string> node_name_cache_;
     // Large scans promote the sparse hash cache into a rank-to-dense-name
     // lookup. The deque keeps returned string views stable as more names are
@@ -259,6 +333,10 @@ private:
     // node and is not allocated for ordinary small queries.
     mutable std::vector<std::uint32_t> node_name_rank_to_dense_;
     mutable std::deque<std::string> dense_node_names_;
+    mutable std::unique_ptr<detail::PostingBlockCache> posting_cache_;
+    // Short step reads (one subpath run each) often hit the same few blocks:
+    // node-set queries in repeats yield millions of runs a few steps apart.
+    mutable std::unique_ptr<detail::StepBlockCache> step_cache_;
 };
 
 // Immutable rank-to-name lookup over names already owned by extraction. Small

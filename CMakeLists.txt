@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(gfaidx VERSION 2.1.1 LANGUAGES C CXX)
+project(gfaidx VERSION 2.3.2 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -76,6 +76,7 @@ add_executable(gfaidx_cli
         src/indexer/direct_binary_writer.cpp
         src/indexer/index_gfa_main.cpp
         src/indexer/index_gfa_helpers.cpp
+        src/indexer/index_params.cpp
         src/paths/get_path_command.cpp
         src/paths/index_path_checkpoints_command.cpp
         src/paths/index_paths_command.cpp
@@ -101,6 +102,11 @@ if(GFAIDX_BUILD_PYTHON)
     install(TARGETS _pygfaidx
         LIBRARY DESTINATION pygfaidx
         RUNTIME DESTINATION pygfaidx)
+    # An importable package in the build tree for the python_api test.
+    set_target_properties(_pygfaidx PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/python/pygfaidx)
+    configure_file(python/pygfaidx/__init__.py
+        ${CMAKE_CURRENT_BINARY_DIR}/python/pygfaidx/__init__.py COPYONLY)
 endif()
 
 # Install the CLI into the standard binary directory so package managers can use
@@ -146,6 +152,45 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     add_executable(gfaidx_graph_api_test tests/test_graph_api.cpp)
     target_link_libraries(gfaidx_graph_api_test PRIVATE gfaidx_library)
     add_test(NAME graph_api COMMAND gfaidx_graph_api_test)
+
+    # Internal codec and .ndx format tests need the private src/ headers.
+    add_executable(gfaidx_pdx_codec_test tests/test_pdx_codec.cpp)
+    target_link_libraries(gfaidx_pdx_codec_test PRIVATE gfaidx_library)
+    target_include_directories(gfaidx_pdx_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME pdx_codec COMMAND gfaidx_pdx_codec_test)
+
+    # Locality node ids and the compressed .pdx must not change any query
+    # output relative to --node_order legacy_hash, and mixed index sets built
+    # against different node numberings must be rejected.
+    add_test(
+        NAME node_order_equivalence
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_node_order_equivalence.sh
+                $<TARGET_FILE:gfaidx_cli>
+                ${CMAKE_SOURCE_DIR})
+
+    # --threads must not change any index file, and errors must match serial parsing.
+    add_test(
+        NAME parallel_build
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_parallel_build.sh
+                $<TARGET_FILE:gfaidx_cli>)
+
+    # Refinement keeps the last Louvain level whose pieces fit --max_chunk_nodes.
+    add_test(
+        NAME refinement_limit
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_refinement_limit.sh
+                $<TARGET_FILE:gfaidx_cli>
+                ${CMAKE_SOURCE_DIR})
+
+    # Malformed or unusual GFA input must index or be rejected with a message,
+    # and queries on whatever was indexed must not crash. GFA 2 is rejected.
+    add_test(
+        NAME malformed_gfa
+        COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/test_malformed_gfa.sh
+                $<TARGET_FILE:gfaidx_cli>)
 
     add_executable(gfaidx_indexed_graph_api_test tests/test_indexed_graph_api.cpp)
     target_link_libraries(gfaidx_indexed_graph_api_test PRIVATE gfaidx_library)
@@ -279,4 +324,20 @@ if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
                 ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_overlapping_paths.gfa
                 ${CMAKE_SOURCE_DIR}/tests/data/p_coordinate_overlapping_path_names.tsv
     )
+
+    # pygfaidx tests, when the extension is built and its Python has pytest.
+    if(GFAIDX_BUILD_PYTHON)
+        execute_process(COMMAND ${Python_EXECUTABLE} -c "import pytest"
+                        RESULT_VARIABLE gfaidx_pytest_missing OUTPUT_QUIET ERROR_QUIET)
+        if(gfaidx_pytest_missing)
+            message(STATUS "pytest not found for ${Python_EXECUTABLE}; the python_api test is not registered")
+        else()
+            add_test(
+                NAME python_api
+                COMMAND ${Python_EXECUTABLE} -m pytest -q -p no:cacheprovider
+                        ${CMAKE_SOURCE_DIR}/python/tests)
+            set_tests_properties(python_api PROPERTIES ENVIRONMENT
+                "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python;GFAIDX_BIN=$<TARGET_FILE:gfaidx_cli>")
+        endif()
+    endif()
 endif()

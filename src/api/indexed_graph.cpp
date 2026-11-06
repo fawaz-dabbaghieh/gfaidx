@@ -96,6 +96,31 @@ Edge parse_edge_line(const std::string& line) {
     return edge;
 }
 
+// An S record as Graph::from_gfa stores it. Without its sequence, the record
+// keeps "*", GFA's marker for an omitted sequence, and records the length in
+// an LN:i tag unless it already carries one.
+Node parse_segment_line(std::string_view line, bool include_sequence) {
+    const auto f = fields(line);
+    if (f.size() < 3 || f[0] != "S") throw std::runtime_error("Malformed S record");
+    Node node;
+    node.id = std::string(f[1]);
+    bool has_length = false;
+    node.tags.reserve(f.size() - 3);
+    for (std::size_t i = 3; i < f.size(); ++i) {
+        node.tags.emplace_back(f[i]);
+        if (f[i].substr(0, 3) == "LN:") has_length = true;
+    }
+    if (include_sequence) {
+        node.sequence = std::string(f[2]);
+    } else {
+        node.sequence = "*";
+        if (!has_length && f[2] != "*") {
+            node.tags.push_back("LN:i:" + std::to_string(f[2].size()));
+        }
+    }
+    return node;
+}
+
 std::string tags_string_to_field(std::string_view tags) {
     return std::string(tags);
 }
@@ -230,15 +255,13 @@ public:
         capabilities.coordinates = exists(paths.cdx);
         if (capabilities.paths) {
             path_index = std::make_unique<paths::PathIndexReader>(paths.pdx);
-            if (path_index->node_count() != node_index->size()) {
-                throw std::runtime_error(".pdx and .ndx node counts differ");
-            }
+            indexer::require_matching_node_ids(*node_index, path_index->node_count(),
+                                               path_index->node_id_space(), ".pdx");
         }
         if (capabilities.coordinates) {
             coordinate_index = std::make_unique<coordinates::CoordinateIndexReader>(paths.cdx);
-            if (coordinate_index->node_count() != node_index->size()) {
-                throw std::runtime_error(".cdx and .ndx node counts differ");
-            }
+            indexer::require_matching_node_id_tag(*node_index, coordinate_index->node_count(),
+                                                  coordinate_index->node_id_space_tag(), ".cdx");
         }
     }
 
@@ -653,6 +676,7 @@ public:
                                                            selection.keep_single_step_runs);
             runs = &discovered;
         }
+        path_index->prefetch_runs(*runs);
         paths::SelectedNodeNameLookup names(path_index->node_count(), selection.ranks,
                                             selection.names);
         paths::WalkCoordState coordinates;
@@ -664,8 +688,8 @@ public:
                 [&](const std::string& message) { warn(callbacks, message); });
         }
         // Format one interval with an explicitly supplied reader. Parallel
-        // workers each own a reader because seek/read mutate std::ifstream
-        // state even though the high-level query is logically const.
+        // workers each own a reader because its step and name caches are
+        // mutable state even though the high-level query is logically const.
         const auto format_run = [&](paths::PathIndexReader& reader,
                                     const paths::SubpathRun& run,
                                     const std::function<void(const std::string&)>&
@@ -928,16 +952,51 @@ std::vector<std::string> IndexedGraph::neighbors(std::string_view node_id) const
     return result;
 }
 
-Graph IndexedGraph::get_community(std::uint32_t id) const {
+Graph IndexedGraph::get_community(std::uint32_t id, bool include_sequences) const {
     if (id >= community_count()) throw std::out_of_range("Community id is out of range");
-    std::vector<std::string> names;
-    impl_->stream_member(id, [&](const std::string& line) {
-        if (!line.empty() && line[0] == 'S') names.push_back(segment_name(line));
+    Graph graph;
+    // Headers open the first member, as in every other extraction.
+    impl_->stream_member(0, [&](const std::string& line) {
+        if (line.empty()) return true;
+        if (line[0] != 'H') return false;
+        graph.add_header(line);
         return true;
     });
-    ExtractionOptions options;
-    options.include_paths = false;
-    return impl_->materialize(impl_->selection_from_names(std::move(names)), options, {});
+    // One pass over the community's member, building the Graph directly. The
+    // shared member is not read: it holds only links between communities, so
+    // none of its links can have both endpoints here. Links wait until every
+    // S record is known, as in Graph::from_gfa.
+    std::vector<Edge> links;
+    impl_->stream_member(id, [&](const std::string& line) {
+        if (line.empty()) return true;
+        if (line[0] == 'S') {
+            graph.add_node(parse_segment_line(line, include_sequences));
+        } else if (line[0] == 'L') {
+            links.push_back(parse_edge_line(line));
+        }
+        return true;
+    });
+    for (auto& edge : links) {
+        if (graph.node_exists(edge.from.node_id) && graph.node_exists(edge.to.node_id)) {
+            (void)graph.add_edge(std::move(edge));
+        }
+    }
+    return graph;
+}
+
+std::vector<Edge> IndexedGraph::cross_community_edges() const {
+    std::vector<Edge> result;
+    const auto shared = impl_->shared_community();
+    if (shared >= impl_->spans.size()) return result;
+    impl_->stream_member(shared, [&](const std::string& line) {
+        if (!line.empty() && line[0] == 'L') {
+            auto edge = parse_edge_line(line);
+            edge.id = result.size() + 1;
+            result.push_back(std::move(edge));
+        }
+        return true;
+    });
+    return result;
 }
 
 std::vector<PathDescriptor> IndexedGraph::paths() const {
@@ -1113,8 +1172,7 @@ void IndexedGraph::stream_region(std::string reference, std::string sequence,
     if (options.mode == RegionMode::all_haplotypes) {
         coordinates::PathHaplotypeQueryOptions query_options;
         // Reuses the same threads value as P/W formatting for the
-        // postings-reduction phase; see PathHaplotypeQueryOptions::threads
-        // for the gap-mode caveat (local gap clustering always runs serially).
+        // postings-reduction phase.
         query_options.threads = options.threads;
         std::unique_ptr<indexer::NodeLengthIndexReader> lengths;
         if (options.haplotype_gap) {

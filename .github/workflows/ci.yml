@@ -83,3 +83,13 @@ jobs:
 
           ./install/bin/gfaidx get_path smoke.indexed.gfa.gz --print_path_names > smoke.paths.txt
           grep -q $'^W\tSAMPLE\t0\tchrT\t100\t109' smoke.paths.txt
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python package tests
+        run: |
+          python -m pip install . pytest
+          GFAIDX_BIN="$PWD/install/bin/gfaidx" python -m pytest python/tests -v -p no:cacheprovider

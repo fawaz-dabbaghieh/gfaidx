@@ -69,6 +69,17 @@ The build uses scikit-build-core and pybind11. It requires Python 3.9 or newer,
 a C++17 compiler, CMake, zlib, and pthread support. Linux and macOS are
 supported.
 
+To run the tests, install pytest and point `GFAIDX_BIN` at the gfaidx CLI,
+which builds the test indexes:
+
+```bash
+python -m pip install . pytest
+GFAIDX_BIN=/path/to/gfaidx python -m pytest python/tests
+```
+
+A CMake build configured with `-DGFAIDX_BUILD_PYTHON=ON` runs the same tests
+as the `python_api` ctest when its Python has pytest.
+
 ## Five-minute example
 
 This complete script extracts a neighborhood from an indexed graph:
@@ -193,7 +204,8 @@ print(index.index_paths.lnx)
 ```
 
 The graph and all supplied sidecars must come from the same indexing bundle.
-gfaidx rejects detectable node-count or rank-alignment mismatches.
+gfaidx rejects node-count mismatches, and a `.pdx` or `.cdx` built against a
+different `.ndx` node numbering.
 
 ## Look up nodes, links, and communities
 
@@ -228,6 +240,35 @@ if index.node_exists(node_id):
 Use `incident_edges()` for orientation-aware algorithms or when distinct
 parallel links matter. Use `node_exists()` before `get_node()` when a
 missing id is an expected condition.
+
+### Traverse the whole graph community by community
+
+`incident_edges()` decompresses the node's community on every call, so it
+suits occasional lookups rather than a pass over every node. To visit the
+whole graph, iterate over the communities instead. `get_community()` returns
+only the links inside one community; the links between communities are
+returned once by `cross_community_edges()`. Together they cover every link
+exactly once:
+
+```python
+# Usually a small fraction of all links: community detection keeps most
+# links inside a community.
+cross = index.cross_community_edges()
+
+for community_id in range(index.community_count):
+    # Topology only: each S record gets the sequence "*" and an LN:i tag.
+    community = index.get_community(community_id, include_sequences=False)
+    for edge in community.edges:
+        ...  # both endpoints are in this community
+```
+
+`include_sequences=False` matters for graphs with long nodes. One PGGB
+community can hold hundreds of megabases, and the default copies all of it
+into the returned `Graph`.
+
+[`python/examples/bubblegun`](python/examples/bubblegun) uses this pattern to
+run BubbleGun's bubble detection on an indexed graph with a bounded cache of
+communities, instead of loading the whole graph.
 
 ## Extract a mutable neighborhood
 
@@ -596,7 +637,7 @@ reporting their message gives users the native gfaidx diagnostic.
 | --- | --- |
 | Open an index | `IndexedGraph(graph_path, index_paths=...)` |
 | Test or fetch one indexed node | `node_exists`, `get_node` |
-| Explore topology | `neighbors`, `incident_edges`, `get_community` |
+| Explore topology | `neighbors`, `incident_edges`, `get_community`, `cross_community_edges` |
 | Extract a mutable BFS result | `get_subgraph` |
 | List or slice paths | `paths`, `get_path`, `path_steps` |
 | Extract a path interval | `get_path_subgraph` |

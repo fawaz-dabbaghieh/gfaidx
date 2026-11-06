@@ -88,11 +88,6 @@ struct PostingsReduction {
 // tables afterward is a simple per-path min/max/seen combine,
 // O(path_count * worker_count), which is negligible next to the postings
 // volume being reduced.
-//
-// Not used in local gap mode: gap clustering marks an absolute anchor-step
-// bitset while reading postings (see mark_anchor_step below), and splitting
-// that bitset per thread is not implemented, so callers keep using the
-// serial loop whenever max_gap_bases is set.
 PostingsReduction reduce_postings_in_parallel(
     const paths::PathIndexReader& path_index,
     const std::vector<std::uint32_t>& unique_reference_nodes,
@@ -237,60 +232,21 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
         select_node_rank(node_rank);
     }
 
-    // Local mode marks anchor occurrences by absolute packed-step rank. This
-    // avoids retaining and sorting one uint32 posting for every anchor hit.
-    std::vector<std::uint64_t> anchor_step_bits;
-    std::vector<std::uint64_t> path_step_begins;
-    std::vector<std::uint64_t> path_step_counts;
-    if (local_gap_mode) {
-        const auto total_steps = path_index.total_step_count();
-        const auto anchor_word_count =
-            total_steps / 64 + (total_steps % 64 != 0 ? 1 : 0);
-        if (anchor_word_count > anchor_step_bits.max_size()) {
+    // A path step is a local-mode anchor exactly when its node is a reference
+    // node, since a node's postings list every step that visits it. Until the
+    // selected runs are appended below, selected_node_bits holds exactly the
+    // reference nodes, so the gap scans test anchors there.
+    const auto is_reference_node = [&](const std::uint32_t node_rank) {
+        if (node_rank >= path_index.node_count()) {
             throw std::runtime_error(
-                "Path step table is too large for local anchor selection");
+                "Selected path step has a node rank outside the .pdx node table");
         }
-        anchor_step_bits.assign(
-            static_cast<std::size_t>(anchor_word_count), 0);
-        path_step_begins.resize(path_index.path_count());
-        path_step_counts.resize(path_index.path_count());
-        for (std::uint32_t path_id = 0;
-             path_id < path_index.path_count();
-             ++path_id) {
-            const auto info = path_index.get_path_info(path_id);
-            if (info.step_begin > total_steps ||
-                info.step_count > total_steps - info.step_begin) {
-                throw std::runtime_error(
-                    "Path metadata is outside the packed .pdx step table");
-            }
-            path_step_begins[path_id] = info.step_begin;
-            path_step_counts[path_id] = info.step_count;
-        }
-    }
-
-    const auto mark_anchor_step = [&](const std::uint32_t path_id,
-                                      const std::uint32_t step_rank) {
-        if (!local_gap_mode) return;
-        if (step_rank >= path_step_counts[path_id]) {
-            throw std::runtime_error(
-                "Path posting step rank is outside its .pdx path step range");
-        }
-        const auto absolute_step = path_step_begins[path_id] + step_rank;
-        anchor_step_bits[static_cast<std::size_t>(absolute_step / 64)] |=
-            1ULL << (absolute_step % 64);
-    };
-    const auto is_anchor_step = [&](const std::uint32_t path_id,
-                                    const std::uint64_t step_rank) {
-        const auto absolute_step = path_step_begins[path_id] + step_rank;
-        return (anchor_step_bits[static_cast<std::size_t>(absolute_step / 64)] &
-                (1ULL << (absolute_step % 64))) != 0;
+        return (selected_node_bits[node_rank / 64] & (1ULL << (node_rank % 64))) != 0;
     };
 
-    // The default path still aggregates only min/max bounds. Local mode adds
-    // the absolute anchor marker used later to split distant repeat hits, so
-    // it always uses the serial loop below (see reduce_postings_in_parallel).
+    // Both modes only need each path's outermost reference-node steps here.
     Timer phase_timer;
-    if (!local_gap_mode && options.threads > 1 && unique_reference_nodes.size() > 1) {
+    if (options.threads > 1 && unique_reference_nodes.size() > 1) {
         auto reduction = reduce_postings_in_parallel(
             path_index, unique_reference_nodes, options.threads);
         path_bounds = std::move(reduction.bounds);
@@ -321,7 +277,6 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
                         bounds.min_step = std::min(bounds.min_step, step_rank);
                         bounds.max_step = std::max(bounds.max_step, step_rank);
                     }
-                    mark_anchor_step(path_id, step_rank);
                     ++result.posting_count;
                 });
         }
@@ -347,6 +302,28 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
             });
     };
 
+    {
+        // Start reading every selected span's steps at once before they are
+        // walked one path at a time below.
+        std::vector<paths::SubpathRun> selected_spans;
+        for (std::uint32_t path_id = 0; path_id < path_bounds.size(); ++path_id) {
+            const auto& bounds = path_bounds[path_id];
+            if (!bounds.seen) continue;
+            if (!exact_runs[path_id].empty()) {
+                selected_spans.insert(selected_spans.end(), exact_runs[path_id].begin(),
+                                      exact_runs[path_id].end());
+            } else if (bounds.max_step >= bounds.min_step) {
+                selected_spans.push_back(paths::SubpathRun{
+                    path_id, bounds.min_step,
+                    static_cast<std::uint64_t>(bounds.max_step) - bounds.min_step + 1});
+            }
+        }
+        path_index.prefetch_runs(selected_spans);
+    }
+
+    // Runs are appended only after every path is scanned: appending selects
+    // more nodes, which the gap scans would otherwise take for anchors.
+    std::vector<paths::SubpathRun> selected_runs;
     for (std::uint32_t path_id = 0; path_id < path_bounds.size(); ++path_id) {
         const auto& bounds = path_bounds[path_id];
         if (!bounds.seen) continue;
@@ -361,16 +338,15 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
         // so repeat hits elsewhere on that path cannot widen or split it.
         if (!exact_runs[path_id].empty()) {
             ++result.exact_reference_path_count;
-            for (const auto& run : exact_runs[path_id]) {
-                append_selected_run(run);
-            }
+            selected_runs.insert(selected_runs.end(), exact_runs[path_id].begin(),
+                                 exact_runs[path_id].end());
             continue;
         }
 
         if (!local_gap_mode) {
             // Omitting --haplotype_gap preserves the original conservative
             // outermost-anchor behavior and its one-run-per-path output.
-            append_selected_run(paths::SubpathRun{
+            selected_runs.push_back(paths::SubpathRun{
                 path_id,
                 bounds.min_step,
                 static_cast<std::uint64_t>(bounds.max_step) -
@@ -397,7 +373,7 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
                 bounds.min_step + 1,
             [&](const paths::StepRecord& step,
                 const std::uint64_t step_rank) {
-                if (is_anchor_step(path_id, step_rank)) {
+                if (is_reference_node(step.node_id)) {
                     if (!have_anchor) {
                         have_anchor = true;
                         run_start = step_rank;
@@ -445,9 +421,10 @@ PathHaplotypeQueryResult query_path_haplotype_nodes(
         if (local_runs.size() > 1) {
             ++result.local_split_path_count;
         }
-        for (const auto& run : local_runs) {
-            append_selected_run(run);
-        }
+        selected_runs.insert(selected_runs.end(), local_runs.begin(), local_runs.end());
+    }
+    for (const auto& run : selected_runs) {
+        append_selected_run(run);
     }
     result.selected_step_seconds = phase_timer.elapsed();
 

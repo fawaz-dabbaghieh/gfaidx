@@ -1,6 +1,7 @@
 #include "indexer/index_gfa_main.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -12,6 +13,7 @@
 #include "indexer/community_refinement.h"
 #include "indexer/direct_binary_writer.h"
 #include "indexer/index_gfa_helpers.h"
+#include "indexer/index_params.h"
 #include "indexer/node_hash_index.h"
 #include "indexer/node_length_index.h"
 #include "chunk/split_gfa_to_comms.h"
@@ -79,6 +81,12 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                   << path_checkpoint_index_path << std::endl;
         return 1;
     }
+    // A JSON summary of the options and the graph, written with every index.
+    const std::string params_path = utils::companion_path(out_gzip, ".params");
+    if (file_exists(params_path.c_str())) {
+        std::cerr << "Index parameters file already exists: " << params_path << std::endl;
+        return 1;
+    }
 
     // Parse the checkpoint spacing before allocating any indexing work files.
     // Zero is not meaningful because it would make the checkpoint boundary
@@ -99,6 +107,24 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     }
 
     bool keep_tmp = program.get<bool>("keep_tmp");
+    const bool legacy_node_order = program.get<std::string>("node_order") == "legacy_hash";
+    // legacy_hash reproduces the previous release's .ndx and v4 .pdx exactly.
+    gfaidx::paths::PathIndexEncoding path_encoding;
+    if (legacy_node_order || program.get<std::string>("step_encoding") == "packed32") {
+        path_encoding.steps = gfaidx::paths::StepEncoding::packed32;
+    }
+    if (legacy_node_order || program.get<std::string>("posting_encoding") == "groups") {
+        path_encoding.postings = gfaidx::paths::PostingEncoding::path_groups;
+    }
+    unsigned threads = 1;
+    try {
+        path_encoding.posting_block_nodes = utils::parse_u32_strict(
+            program.get<std::string>("posting_block_nodes"), "--posting_block_nodes", 1, 1u << 16);
+        threads = utils::parse_u32_strict(program.get<std::string>("threads"), "--threads", 1, 1024);
+    } catch (const std::exception& err) {
+        std::cerr << err.what() << std::endl;
+        return 1;
+    }
 
     // check progress_every user input
     std::uint64_t progress_every;
@@ -173,24 +199,6 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         return 1;
     }
 
-    // Stage every final artifact on hidden sibling paths so validation and failures stay side-effect free.
-    const std::string staged_out_gzip = make_temp_output_path(out_gzip);
-    const std::string staged_chunk_index_path = utils::companion_path(staged_out_gzip, ".idx");
-    const std::string staged_node_index_path = utils::companion_path(staged_out_gzip, ".ndx");
-    const std::string staged_node_length_index_path = utils::companion_path(staged_out_gzip, ".lnx");
-    const std::string staged_path_index_path = utils::companion_path(staged_out_gzip, ".pdx");
-    const std::string staged_path_checkpoint_index_path =
-        utils::companion_path(staged_out_gzip, ".pcx");
-    auto cleanup_staged_outputs = [&]() {
-        // Remove any staged final artifacts that were not successfully published.
-        remove_path_if_exists(staged_out_gzip);
-        remove_path_if_exists(staged_chunk_index_path);
-        remove_path_if_exists(staged_node_index_path);
-        remove_path_if_exists(staged_node_length_index_path);
-        remove_path_if_exists(staged_path_index_path);
-        remove_path_if_exists(staged_path_checkpoint_index_path);
-    };
-
     Timer timer;
 
     /*
@@ -216,6 +224,27 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
     std::string tmp_edgelist = tmp_dir + sep + "tmp_edgelist.txt";
     std::string sorted_tmp_edgelist = tmp_dir + sep + "tmp_edgelist_sorted.txt";
     std::string tmp_binary = tmp_dir + sep + "tmp_binary.bin";
+
+    // Stage every final artifact in the run directory too, so failures and
+    // interruptions leave nothing beside the output; publish renames them out.
+    const std::string staged_out_gzip = make_temp_output_path(out_gzip, tmp_dir);
+    const std::string staged_chunk_index_path = utils::companion_path(staged_out_gzip, ".idx");
+    const std::string staged_node_index_path = utils::companion_path(staged_out_gzip, ".ndx");
+    const std::string staged_node_length_index_path = utils::companion_path(staged_out_gzip, ".lnx");
+    const std::string staged_path_index_path = utils::companion_path(staged_out_gzip, ".pdx");
+    const std::string staged_path_checkpoint_index_path =
+        utils::companion_path(staged_out_gzip, ".pcx");
+    const std::string staged_params_path = utils::companion_path(staged_out_gzip, ".params");
+    auto cleanup_staged_outputs = [&]() {
+        // Remove any staged final artifacts that were not successfully published.
+        remove_path_if_exists(staged_out_gzip);
+        remove_path_if_exists(staged_chunk_index_path);
+        remove_path_if_exists(staged_node_index_path);
+        remove_path_if_exists(staged_node_length_index_path);
+        remove_path_if_exists(staged_path_index_path);
+        remove_path_if_exists(staged_path_checkpoint_index_path);
+        remove_path_if_exists(staged_params_path);
+    };
     auto cleanup_work_dir = [&]() {
         if (!keep_tmp) {
             // Remove the major intermediate files first so a partially removed temp dir is still small.
@@ -239,7 +268,8 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         timer.reset();
         generate_edgelist(input_gfa, tmp_edgelist, node_id_map, reader_options);
         std::cout << get_time() << ": Finished generating the edges list in " << timer.elapsed() << " seconds" << std::endl;
-        std::cout << get_time() << ": The GFA has " << N_NODES << " S lines, and " << N_EDGES << " L lines" << std::endl;
+        // N_NODES counts only nodes seen in L lines; unlinked S nodes are added later.
+        std::cout << get_time() << ": The GFA has " << N_EDGES << " L lines connecting " << N_NODES << " nodes" << std::endl;
         log_map_stats("Node id map stats", node_id_map);
         log_memory("After edge list generation");
 
@@ -337,6 +367,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                              refinement_work_items,
                                              id_to_comm,
                                              ncom,
+                                             max_chunk_nodes,
                                              keep_tmp);
             ncom = refinement_summary.final_community_count;
             std::cout << get_time() << ": Finished community refinement; refined "
@@ -365,7 +396,43 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
         timer.reset();
         std::cout << get_time() << ": Writing node hash index to " << node_index_path << std::endl;
         // Stage the node hash index too so a later failure cannot leave a partial .ndx behind.
-        write_node_hash_index(node_id_map, id_to_comm, staged_node_index_path);
+        // The id order actually used, for .params.
+        std::string node_order_used = "legacy_hash";
+        if (legacy_node_order) {
+            write_node_hash_index(node_id_map, id_to_comm, staged_node_index_path);
+        } else {
+            // Number nodes by community and locality key so path steps and
+            // postings of neighboring nodes get close ids (see .ndx v2).
+            NodeIdAssignment assignment = assign_node_ids(node_id_map, id_to_comm, ncom);
+            if (assignment.key != NodeOrderKey::first_appearance) {
+                // Integer names only help when the builder numbered nodes
+                // along the paths. Score both candidate orders on the edge
+                // list and keep the name order only if it is not worse.
+                NodeIdAssignment fallback = assign_node_ids(node_id_map, id_to_comm, ncom, false);
+                const auto costs = estimate_edge_step_bytes(
+                    sorted_tmp_edgelist, {&assignment.node_ids, &fallback.node_ids});
+                std::cout << get_time() << ": Estimated step bytes per edge: name order "
+                          << costs[0] << ", first-appearance order " << costs[1] << std::endl;
+                if (costs[1] < costs[0]) {
+                    assignment = std::move(fallback);
+                }
+            }
+            std::vector<std::uint32_t>().swap(id_to_comm);
+            std::cout << get_time() << ": Node ids ordered by community, then "
+                      << (assignment.key == NodeOrderKey::integer_name ? "integer segment name"
+                          : assignment.key == NodeOrderKey::prefixed_integer ? "prefixed integer segment name"
+                          : "first appearance") << std::endl;
+            node_order_used = assignment.key == NodeOrderKey::integer_name ? "integer_name"
+                : assignment.key == NodeOrderKey::prefixed_integer ? "prefixed_integer"
+                : "first_appearance";
+            write_node_hash_index(node_id_map, assignment, staged_node_index_path);
+        }
+        const std::uint64_t segment_count = node_id_map.size();
+        // Everything after this point resolves names through the .ndx. The
+        // path index builds its own name table, so drop this one first rather
+        // than holding two copies of every node name during path indexing.
+        std::unordered_map<std::string, unsigned int>().swap(node_id_map);
+        std::vector<std::uint32_t>().swap(id_to_comm);
         std::cout << get_time() << ": Finished node hash index in " << timer.elapsed() << " seconds" << std::endl;
         log_memory("After node hash index");
 
@@ -394,7 +461,9 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
                                             staged_node_index_path,
                                             reader_options,
                                             tmp_dir,
-                                            keep_tmp);
+                                            keep_tmp,
+                                            path_encoding,
+                                            threads);
             std::cout << get_time() << ": Finished path index in " << timer.elapsed() << " seconds" << std::endl;
             log_memory("After path index");
 
@@ -415,6 +484,62 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
             log_memory("After path coordinate checkpoint index");
         }
 
+        // Summarize the options and the graph in <out>.params, published with
+        // the other outputs.
+        IndexParams params;
+        params.input_gfa = input_gfa;
+        params.input_bytes = std::filesystem::file_size(input_gfa);
+        params.output_gz = out_gzip;
+        const auto json_bool = [](bool value) { return std::string(value ? "true" : "false"); };
+        params.parameters = {
+            {"threads", std::to_string(threads)},
+            {"tmp_dir", json_string(tmp_base.empty() ? "." : tmp_base)},
+            {"keep_tmp", json_bool(keep_tmp)},
+            {"progress_every", std::to_string(progress_every)},
+            {"gzip_level", std::to_string(gzip_level)},
+            {"gzip_mem_level", std::to_string(gzip_mem_level)},
+            {"no_paths", json_bool(no_paths)},
+            {"checkpoint_steps", std::to_string(checkpoint_steps)},
+            {"max_chunk_nodes", std::to_string(max_chunk_nodes)},
+            {"min_chunk_nodes", std::to_string(min_chunk_nodes)},
+            {"node_order", json_string(program.get<std::string>("node_order"))},
+            {"step_encoding", json_string(
+                path_encoding.steps == gfaidx::paths::StepEncoding::packed32 ? "packed32" : "delta")},
+            {"posting_encoding", json_string(
+                path_encoding.postings == gfaidx::paths::PostingEncoding::path_groups ? "groups" : "slots")},
+            {"posting_block_nodes", std::to_string(path_encoding.posting_block_nodes)},
+        };
+        params.segments = segment_count;
+        params.links = N_EDGES;
+        {
+            NodeLengthIndexReader lengths(staged_node_length_index_path);
+            for (std::uint64_t rank = 0; rank < lengths.node_count(); ++rank) {
+                params.total_sequence_bp += lengths.length(static_cast<std::uint32_t>(rank));
+            }
+        }
+        params.paths = N_PATHS;
+        params.walks = N_WALKS;
+        if (!no_paths) {
+            params.path_steps =
+                gfaidx::paths::PathIndexReader(staged_path_index_path).total_step_count();
+        }
+        params.communities = ncom;
+        params.node_order = node_order_used;
+        params.elapsed_seconds = total_time.elapsed();
+        const std::vector<std::pair<std::string, std::string>> staged_files = {
+            {"gz", staged_out_gzip},
+            {"idx", staged_chunk_index_path},
+            {"ndx", staged_node_index_path},
+            {"lnx", staged_node_length_index_path},
+            {"pdx", staged_path_index_path},
+            {"pcx", staged_path_checkpoint_index_path},
+        };
+        for (const auto& [suffix, path] : staged_files) {
+            if (no_paths && (suffix == "pdx" || suffix == "pcx")) continue;
+            params.files.emplace_back(suffix, std::filesystem::file_size(path));
+        }
+        write_index_params(staged_params_path, params);
+
         std::cout << get_time() << ": Publishing final output files" << std::endl;
         // Publish the companion indexes first so the final .gz only appears once its sidecars are ready too.
         rename_path_or_throw(staged_chunk_index_path, chunk_index_path);
@@ -425,6 +550,7 @@ int run_index_gfa(const argparse::ArgumentParser& program) {
             rename_path_or_throw(staged_path_checkpoint_index_path,
                                  path_checkpoint_index_path);
         }
+        rename_path_or_throw(staged_params_path, params_path);
         // Publish the graph itself last as the visible signal that the full output set is ready.
         rename_path_or_throw(staged_out_gzip, out_gzip);
 

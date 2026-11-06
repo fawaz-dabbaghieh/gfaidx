@@ -8,6 +8,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "fs/gfa_line_parsers.h"
+
 namespace gfaidx {
 namespace {
 
@@ -443,6 +445,7 @@ Graph Graph::from_gfa(std::istream& in) {
         const auto fields = split_tabs(line);
         if (fields.empty()) continue;
         if (fields[0] == "H") {
+            reject_gfa2_header(line);
             graph.add_header(line);
         } else if (fields[0] == "S") {
             if (fields.size() < 3) throw std::runtime_error("Malformed S record: " + line);

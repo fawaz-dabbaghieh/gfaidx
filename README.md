@@ -56,13 +56,19 @@ Main tasks:
 - `<graph>.gz.idx`
   a community-to-gzip-offset index
 - `<graph>.gz.ndx`
-  a sorted binary hash table mapping node string IDs to community IDs
+  a sorted binary hash table mapping node string IDs to integer node IDs and
+  community IDs
 - `<graph>.gz.lnx`
-  a rank-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
+  a node-ID-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
 - `<graph>.gz.pdx`
   a binary path index for `P` and `W` lines
 - `<graph>.gz.pcx`
   a small path-coordinate checkpoint index used to avoid long `.pdx` prefix scans
+- `<graph>.gz.params`
+  a JSON summary of the run: the gfaidx version, the options used, graph
+  counts (segments, links, total sequence length in bp, paths, walks, path
+  steps), the number of communities, the node id order, and the output file
+  sizes. Queries do not read it
 - `<graph>.gz.cdx`
   an optional standalone reference-coordinate index built by `index_coordinates`
 
@@ -70,7 +76,7 @@ Main tasks:
 neighborhood across communities.
 
 `get_region` additionally uses `.cdx` to resolve a 0-based reference interval
-to `.ndx`/`.pdx` node ranks before running the same graph extraction pipeline.
+to `.ndx`/`.pdx` node IDs before running the same graph extraction pipeline.
 When `--with_coords` is requested, `.lnx` supplies node lengths without
 re-scanning all `S` lines and `.pcx` supplies cumulative path-length
 checkpoints. The `.cdx`, `.lnx`, and `.pcx` files are separate sidecars, so
@@ -90,11 +96,17 @@ The `.pdx` stores:
 
 - path metadata
 - node metadata
-- a packed step table
+- a delta-coded step table
 - compressed per-node postings
 - a shared string blob
 
-Important: `.pdx` node IDs are aligned to the sorted entry rank in the `.ndx` file used during `index_paths`. That lets `get_path` resolve node names through `.ndx` without loading a giant global node-name map into memory.
+Important: `.pdx`, `.lnx` and `.cdx` all use the integer node IDs assigned in
+the `.ndx` file. That lets `get_path` resolve node names through `.ndx` without
+loading a giant global node-name map into memory. `index_gfa` numbers nodes so
+that nodes adjacent on paths get close IDs (see
+[How the path index works](#how-the-path-index-works)), which is what makes the
+step table and postings compress well. The sidecars must therefore be built
+from the same `.ndx`; every query checks this and refuses mixed index sets.
 
 ## Build and install
 
@@ -183,8 +195,8 @@ engine rather than using the former pure-Python prototype. See
 
 ### `gfaidx index_gfa`
 
-Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, and by default `.pdx`
-and `.pcx`.
+Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, `.params`, and by
+default `.pdx` and `.pcx`.
 
 ```bash
 gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
@@ -193,8 +205,8 @@ gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
 Arguments:
 
 - `in_gfa`
-  input GFA 1.x graph with at least one `L` line; GFA 2.0 input and graphs
-  without links are rejected with an error
+  input GFA 1 graph (GFA 1.0, 1.1, or 1.2) with at least one `L` line, plain
+  or gzipped; GFA 2 input and graphs without links are rejected with an error
 - `out_gfa.gz`
   output multi-member gzip graph
 
@@ -203,7 +215,10 @@ Options:
 - `--keep_tmp`
   keep temporary files instead of deleting them at the end
 - `--tmp_dir <dir>`
-  base directory for temporary files
+  base directory for the run's `gfaidx_tmp_*` directory (default: the input
+  GFA's directory). All intermediate files, and the outputs until they are
+  complete, are written there; the outputs are then moved to their final
+  paths (copied if `--tmp_dir` is on a different filesystem)
 - `--progress_every <N>`
   progress logging interval while reading the GFA
 - `--gzip_level <1..9>`
@@ -216,13 +231,47 @@ Options:
 - `--max_chunk_nodes <N>`
   re-run Louvain inside communities containing at least `N` nodes and prevent
   small-community merges from producing a chunk larger than `N`; `0` disables
-  refinement and leaves merging without an upper bound
+  refinement and leaves merging without an upper bound. Louvain levels only
+  merge communities, so refinement stops before a level that would create a
+  piece larger than `N` and keeps the previous level
 - `--min_chunk_nodes <N>`
   merge communities smaller than `N` nodes into the neighboring community with
   the most connecting edges; `0` disables small-community merging
 - `--no_paths`
   skip building `<out_gfa.gz>.pdx` and `.pcx`; still write `.gz`, `.idx`,
   `.ndx`, and `.lnx`
+- `--node_order <auto|legacy_hash>`
+  `auto` (default) numbers nodes by community, then by integer segment name
+  (or one shared prefix plus digits, such as `s123`) or by first appearance in
+  `L` lines, whichever gives smaller estimated path-step deltas on the edge
+  list. `legacy_hash` keeps the earlier hash-rank IDs and writes the previous
+  `.ndx` and v4 `.pdx` byte for byte, which older gfaidx releases can read
+- `--step_encoding <delta|packed32>`
+  `.pdx` step table layout; defaults to `delta` (`legacy_hash` forces `packed32`)
+- `--posting_encoding <slots|groups>`
+  `.pdx` posting layout; defaults to `slots` (`legacy_hash` forces `groups`)
+- `--posting_block_nodes <N>`
+  node IDs per independently decodable posting block for `slots`; defaults
+  to `32`. Larger blocks compress better but make an isolated single-node
+  lookup decode more of its block
+- `--threads <N>`
+  threads for building the path index; defaults to `1`. Long `P`/`W` lines
+  have their node names resolved in parallel, posting runs are sorted in the
+  background (up to 4 runs of 64 MB in flight), and posting-run merge groups
+  run in parallel as far as the soft open-file limit allows. Every thread
+  count writes the same files.
+
+  More threads need more temporary disk space. Path indexing writes 12 bytes
+  per path step to `--tmp_dir` as sorted 64 MB runs (about 12 GB per billion
+  steps). Above 128 runs (about 716 million steps), groups of 128 runs are
+  merged into one file of about 8.6 GB each. A group's input runs are deleted
+  only once its merged file is complete, so every group being merged needs
+  about 8.6 GB on top of the runs. With `--threads N`, up to N groups are
+  merged at once, which needs up to (N - 1) x 8.6 GB more than one thread:
+  about 26 GB more with 4 threads and 60 GB more with 8, however large the
+  graph. For example, on a PGGB chr1 graph with 4.5 billion path steps, the
+  runs took 54 GB. With 8 threads, path indexing needed about 45 GB more
+  temporary space and took 7.4 minutes instead of 27
 
 Outputs:
 
@@ -232,6 +281,8 @@ Outputs:
 - `<out_gfa.gz>.lnx`
 - `<out_gfa.gz>.pdx` unless `--no_paths` is used
 - `<out_gfa.gz>.pcx` unless `--no_paths` is used
+- `<out_gfa.gz>.params`, a JSON summary of the options and the graph;
+  `path_steps` is `null` with `--no_paths`
 
 Example:
 
@@ -584,11 +635,17 @@ Options:
   base directory for temporary files used by the external posting sort; defaults to the output directory
 - `--progress_every <N>`
   progress logging interval while reading
+- `--step_encoding <delta|packed32>`, `--posting_encoding <slots|groups>`,
+  `--posting_block_nodes <N>`, `--threads <N>`
+  as for `index_gfa`. With a legacy `.ndx`, `packed32` plus `groups` writes a
+  v4 `.pdx`; any other combination writes v5
 
 Notes:
 
 - `index_gfa` already builds `<out_gfa.gz>.pdx` by default
 - `index_paths` is mainly useful when you want to rebuild only the path index after path-index code changes
+- the `.pdx` must be rebuilt whenever its `.ndx` is rebuilt; a `.pdx` built
+  against a different node numbering is rejected at query time
 
 What gets indexed:
 
@@ -599,8 +656,9 @@ What gets indexed:
 Current behavior:
 
 - `P` and `W` are both stored as ordered walks
-- steps are stored in a packed 4-byte format
-- per-node postings are compressed with delta + varint encoding
+- steps are stored as zigzag deltas of consecutive node IDs in 128-step blocks
+- per-node postings are predicted from the neighbouring node IDs of the same
+  posting block where possible (see below)
 - large posting tables are built through disk-backed sorted runs to reduce peak RAM
 
 Example:
@@ -775,7 +833,7 @@ Coordinate rules:
 
 - only applies to node-set queries
 - affects `W` output coordinates and `P` output names
-- `.lnx` stores rank-aligned `uint32` segment lengths; fallback scanning takes
+- `.lnx` stores node-ID-aligned `uint32` segment lengths; fallback scanning takes
   length from the sequence field first, then `LN:i:`
 - if anything is missing or inconsistent, `get_path` falls back to ordinary
   subpath output and logs a warning
@@ -978,6 +1036,39 @@ This makes two workloads fast:
 - full path reconstruction
 - finding all subpaths that overlap a node set or extracted subgraph
 
+Node IDs (`.ndx` v2). `index_gfa` sorts nodes by Louvain community and, inside
+a community, by a locality key: the integer segment name when the graph
+builder numbered nodes along the paths (PGGB after `odgi sort`,
+Minigraph-Cactus), otherwise first appearance in the `L` lines. The node ID is
+the position in that order. Segment names stay the identity (they are what
+`.ndx` hashes); the integer is only a sort key. Each community owns a
+contiguous ID range, stored as a small start array in `.ndx`.
+
+Step table (`.pdx` v5, `delta`). Each step is stored as the LEB128 varint of
+`(zigzag(node_id - previous_node_id) << 1) | reverse`. Every 128 global steps
+the previous ID resets to 0, so each 128-step block decodes on its own; a
+superblock table (one 8-byte offset plus 32 two-byte offsets per 4096 steps)
+locates any block. Reading steps `[a, b)` of a path reads the covering blocks
+once and skips at most 127 values.
+
+Postings (`.pdx` v5, `slots`). Postings are coded in blocks of 32 consecutive
+node IDs. Inside a block, each path keeps the step ranks at the last node of
+the block it visited. Because neighbouring IDs are mostly consecutive steps of
+the same paths, an occurrence `(path, rank)` is usually predicted by
+`(path, rank - 1)` at an earlier node of the block, and only the subset of
+predicted occurrences (a bitmap or index list) is stored. Other occurrences
+are stored explicitly, relative to the path's last rank when it has one.
+Loops predict too, because every occurrence has its own slot. Readers keep the
+last decoded block, so runs of nearby node IDs (regions, BFS neighbourhoods)
+decode each block once.
+
+Compatibility. New binaries read v4 `.pdx` and headerless (legacy) `.ndx`
+files. Older binaries reject `.ndx` v2 and `.pdx` v5. `.pdx`, `.lnx` and
+`.cdx` contents depend on the node numbering and must be built from the same
+`.ndx`: `.pdx` stores a fingerprint of the numbering and `.cdx` a 32-bit tag
+of it, and queries refuse mismatched sets. `.pcx` stores cumulative sequence
+lengths, which do not depend on node IDs.
+
 Current query-time memory behavior:
 
 - path metadata is loaded eagerly
@@ -994,6 +1085,21 @@ records GNU `time -v` measurements, and generates first-execution, warm-cache,
 thread-scaling, and regional-variation summaries and plots. See
 [the repeated interval benchmark guide](docs/gfaidx_gbz_interval_benchmark.md)
 for the TSV schema and server command.
+
+### `.pdx` compression tooling
+
+- `scripts/pdx_size_breakdown.py` prints the section sizes of v4 and v5
+  `.pdx` files, with bytes per step and per posting (`--tsv` for tables).
+- `scripts/pdx_step_delta_estimate.py` estimates the delta step-table size of
+  a packed32 `.pdx` under alternative node orders (needs numpy).
+- `scripts/pdx_ab_benchmark.py` runs one query file against two binary/index
+  pairs, checks byte-identical outputs and reports warm and cold latency.
+- `scripts/sim_pangenome.py` simulates a Minigraph-Cactus-like GFA and
+  `scripts/rename_gfa_nodes.py` makes shuffled-integer and non-numeric
+  renamings for node-order tests.
+
+See [`docs/pdx_compression_results.md`](docs/pdx_compression_results.md) for
+the measurements behind the current formats.
 
 ### `scripts/pdx_size_breakdown.py`
 
