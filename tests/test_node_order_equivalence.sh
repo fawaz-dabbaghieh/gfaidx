@@ -35,8 +35,8 @@ run_queries() {
 
     # Node sets: a prefix of the S lines, every third node, and single nodes.
     awk -F'\t' '$1 == "S" {print $2}' "$input" > "$out/nodes.txt"
-    head -n 60 "$out/nodes.txt" | paste -sd, > "$out/set_a.txt"
-    awk 'NR % 3 == 0 && ++n <= 400' "$out/nodes.txt" | paste -sd, > "$out/set_b.txt"
+    head -n 60 "$out/nodes.txt" | paste -sd, - > "$out/set_a.txt"
+    awk 'NR % 3 == 0 && ++n <= 400' "$out/nodes.txt" | paste -sd, - > "$out/set_b.txt"
     for set in set_a set_b; do
         "$gfaidx" get_path "$graph" --nodes "$(cat "$out/$set.txt")" > "$out/$set.gfa" 2>/dev/null || true
         "$gfaidx" get_path "$graph" --nodes "$(cat "$out/$set.txt")" --with_walk_coords \
