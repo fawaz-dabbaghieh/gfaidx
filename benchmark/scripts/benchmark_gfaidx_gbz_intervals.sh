@@ -29,6 +29,9 @@
 #                    and gives it coordinates. It is run with its defaults and
 #                    may fail on large outputs; such executions are recorded
 #                    with their exit status and the benchmark continues.
+#                    With --allow-failures (for example together with
+#                    --timeout on very large graphs) the same applies to every
+#                    tool.
 #   haplotype_span   optional gfaidx --mode all --with_coords, gfaidx's own
 #                    haplotype-span selection; it has no gbz-base counterpart
 #                    and runs once per location without a context.
@@ -58,9 +61,14 @@ GFAIDX_GRAPH=""
 GBZ_DB=""
 GBZ_QUERY_BIN=""
 HAPLOTYPE_INDEX=""
+GBZ_RUNS_FROM=""
 QUERY_TSV=""
 OUT_DIR="gfaidx_gbz_interval_benchmark"
 TIME_BIN="/usr/bin/time"
+GFAIDX_REGION_FORMAT="split"
+TIMEOUT_BIN="timeout"
+TIMEOUT_SECONDS=""
+ALLOW_FAILURES=0
 PYTHON_BIN="python3"
 REPEATS=5
 GFAIDX_THREADS="1,8"
@@ -96,12 +104,28 @@ Options:
   --contexts LIST         Comma-separated context lengths in bases passed to
                           --context of both tools (default: 100)
   --gfaidx-threads LIST   Comma-separated gfaidx thread counts (default: 1,8)
+  --gfaidx-region-format FORMAT
+                          How gfaidx addresses the reference (default: split):
+                            split - "<contig>:<start>-<end>" with --reference,
+                                    for W-line graphs
+                            pansn - "<reference>#0#<contig>:<start>-<end>"
+                                    without --reference, for PanSN P-line
+                                    graphs such as pggb
   --gbz-query-bin PATH    gbz-base-query executable (@gmod/gbz-base); with
                           --haplotype-index adds the resolved all-haplotypes
                           variant. Its failures are recorded, not fatal.
   --haplotype-index PATH  gbz-haplotype-index database for --gbz-db
-  --include-all-mode      Also time gfaidx --mode all --with_coords once per
+  --gbz-runs-from PATH    Reuse the gbz-base rows of an earlier raw_runs.tsv for
+                          the same queries and contexts instead of running
+                          gbz-base again (for example after changing only
+                          gfaidx); --gbz-base-bin and --gbz-db become optional
+  --include-all-mode     Also time gfaidx --mode all --with_coords once per
                           interval; gfaidx-only, not paired with gbz-base
+  --timeout SECONDS       Stop any execution after this wall time (GNU
+                          timeout, exit status 124); default: no limit
+  --allow-failures        Record a failed execution of any tool (time limit,
+                          out of memory, crash) as NA and continue; by default
+                          only gbz-base-query failures are tolerated
   --out-dir PATH          Output directory (default: gfaidx_gbz_interval_benchmark)
   --time-bin PATH         GNU time executable (default: /usr/bin/time)
   --python PATH           Python executable used for summaries (default: python3)
@@ -182,8 +206,16 @@ while [[ $# -gt 0 ]]; do
             GBZ_QUERY_BIN=${2:-}
             shift 2
             ;;
+        --gfaidx-region-format)
+            GFAIDX_REGION_FORMAT=${2:-}
+            shift 2
+            ;;
         --haplotype-index)
             HAPLOTYPE_INDEX=${2:-}
+            shift 2
+            ;;
+        --gbz-runs-from)
+            GBZ_RUNS_FROM=${2:-}
             shift 2
             ;;
         --repeats)
@@ -200,6 +232,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --include-all-mode)
             INCLUDE_ALL_MODE=1
+            shift
+            ;;
+        --timeout)
+            TIMEOUT_SECONDS=${2:-}
+            shift 2
+            ;;
+        --allow-failures)
+            ALLOW_FAILURES=1
             shift
             ;;
         --out-dir)
@@ -245,22 +285,32 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$GFAIDX_BIN" ]] || die "--gfaidx-bin is required"
-[[ -n "$GBZ_BASE_BIN" ]] || die "--gbz-base-bin is required"
 [[ -n "$GFAIDX_GRAPH" ]] || die "--gfaidx-graph is required"
-[[ -n "$GBZ_DB" ]] || die "--gbz-db is required"
 [[ -n "$QUERY_TSV" ]] || die "--queries is required"
 require_executable "$GFAIDX_BIN"
-require_executable "$GBZ_BASE_BIN"
 require_executable "$TIME_BIN"
 require_file "$GFAIDX_GRAPH"
-require_file "$GBZ_DB"
 require_file "$QUERY_TSV"
+if [[ -n "$GBZ_RUNS_FROM" ]]; then
+    require_file "$GBZ_RUNS_FROM"
+else
+    [[ -n "$GBZ_BASE_BIN" ]] || die "--gbz-base-bin is required"
+    [[ -n "$GBZ_DB" ]] || die "--gbz-db is required"
+fi
+[[ -z "$GBZ_BASE_BIN" ]] || require_executable "$GBZ_BASE_BIN"
+[[ -z "$GBZ_DB" ]] || require_file "$GBZ_DB"
 if [[ -n "$GBZ_QUERY_BIN" || -n "$HAPLOTYPE_INDEX" ]]; then
     [[ -n "$GBZ_QUERY_BIN" && -n "$HAPLOTYPE_INDEX" ]] || \
         die "--gbz-query-bin and --haplotype-index must be given together"
     require_executable "$GBZ_QUERY_BIN"
     require_file "$HAPLOTYPE_INDEX"
 fi
+if [[ -n "$TIMEOUT_SECONDS" ]]; then
+    require_positive_integer "--timeout" "$TIMEOUT_SECONDS"
+    require_executable "$TIMEOUT_BIN"
+fi
+[[ "$GFAIDX_REGION_FORMAT" == "split" || "$GFAIDX_REGION_FORMAT" == "pansn" ]] || \
+    die "--gfaidx-region-format must be 'split' or 'pansn': $GFAIDX_REGION_FORMAT"
 require_positive_integer "--repeats" "$REPEATS"
 require_positive_integer "--bootstrap-samples" "$BOOTSTRAP_SAMPLES"
 [[ "$SHUFFLE_SEED" =~ ^[0-9]+$ ]] || die "--shuffle-seed must be a non-negative integer"
@@ -313,11 +363,12 @@ add_variant() {
     VARIANT_THREADS+=("$6")
 }
 
-add_variant gbz-base-ref gbz-base reference_only reference-only NA NA
+# With --gbz-runs-from the gbz-base variants are imported after the run instead.
+[[ -n "$GBZ_RUNS_FROM" ]] || add_variant gbz-base-ref gbz-base reference_only reference-only NA NA
 for threads in "${GFAIDX_THREAD_VALUES[@]}"; do
     add_variant "gfaidx-ref-coords-${threads}t" gfaidx reference_only reference 1 "$threads"
 done
-add_variant gbz-base-all gbz-base all_haplotypes all NA NA
+[[ -n "$GBZ_RUNS_FROM" ]] || add_variant gbz-base-all gbz-base all_haplotypes all NA NA
 if [[ -n "$GBZ_QUERY_BIN" ]]; then
     add_variant gbz-base-query-resolved gbz-base-query all_haplotypes all 1 NA
 fi
@@ -449,11 +500,17 @@ printf '%s\n' \
     printf 'contexts\t%s\n' "$CONTEXTS"
     printf 'gfaidx_threads\t%s\n' "$GFAIDX_THREADS"
     printf 'include_all_mode\t%s\n' "$INCLUDE_ALL_MODE"
+    printf 'gfaidx_region_format\t%s\n' "$GFAIDX_REGION_FORMAT"
+    printf 'timeout_seconds\t%s\n' "${TIMEOUT_SECONDS:-none}"
+    printf 'allow_failures\t%s\n' "$ALLOW_FAILURES"
     printf 'variants\t%s\n' "$(IFS=','; printf '%s' "${VARIANT_LABELS[*]}")"
     printf 'parity_hash\t%s\n' "sha1 ($PARITY_SCRIPT)"
     printf 'shuffle_seed\t%s\n' "$SHUFFLE_SEED"
     printf 'gfaidx_version\t%s\n' "$("$GFAIDX_BIN" --version 2>&1 | tr '\n' ' ')"
-    printf 'gbz_base_version\t%s\n' "$("$GBZ_BASE_BIN" --version 2>&1 | tr '\n' ' ' || true)"
+    if [[ -n "$GBZ_BASE_BIN" ]]; then
+        printf 'gbz_base_version\t%s\n' "$("$GBZ_BASE_BIN" --version 2>&1 | tr '\n' ' ' || true)"
+    fi
+    printf 'gbz_runs_from\t%s\n' "${GBZ_RUNS_FROM:-none}"
     if [[ -n "$GBZ_QUERY_BIN" ]]; then
         # gbz-base-query has no --version; read it from the package it belongs to.
         gbz_query_package="$(dirname "$(readlink -f "$(command -v "$GBZ_QUERY_BIN")")")/../package.json"
@@ -571,12 +628,20 @@ run_one_variant() {
     local -a command
 
     if [[ "$tool" == "gfaidx" ]]; then
-        command=(
-            "$GFAIDX_BIN" get_region "$GFAIDX_GRAPH"
-            "${contig}:${start}-${end}" "$output_gfa"
-            --reference "$reference"
-            --mode "$mode"
-        )
+        if [[ "$GFAIDX_REGION_FORMAT" == "pansn" ]]; then
+            command=(
+                "$GFAIDX_BIN" get_region "$GFAIDX_GRAPH"
+                "${reference}#0#${contig}:${start}-${end}" "$output_gfa"
+                --mode "$mode"
+            )
+        else
+            command=(
+                "$GFAIDX_BIN" get_region "$GFAIDX_GRAPH"
+                "${contig}:${start}-${end}" "$output_gfa"
+                --reference "$reference"
+                --mode "$mode"
+            )
+        fi
         [[ "$context" == "NA" ]] || command+=(--context "$context")
         [[ "$with_coords" != "1" ]] || command+=(--with_coords)
         command+=(--threads "$gfaidx_threads")
@@ -608,12 +673,17 @@ run_one_variant() {
         "$query_order" "${#UNIT_QUERIES[@]}" "$run_index" "$REPEATS" \
         "$order_in_block" "$variant" "$context" "$query_id" "$contig" "$start" "$end"
 
+    # GNU timeout runs under GNU time, so a stopped execution still leaves a
+    # time log; time reports the command's peak RSS because timeout waits for it.
+    local -a limit=()
+    [[ -z "$TIMEOUT_SECONDS" ]] || limit=("$TIMEOUT_BIN" --kill-after=60 "$TIMEOUT_SECONDS")
+
     local exit_status=0
     if [[ "$tool" == "gfaidx" ]]; then
-        "$TIME_BIN" -v -o "$time_log" "${command[@]}" \
+        "$TIME_BIN" -v -o "$time_log" ${limit[@]+"${limit[@]}"} "${command[@]}" \
             > "$stdout_file" 2> "$stderr_file" || exit_status=$?
     else
-        "$TIME_BIN" -v -o "$time_log" "${command[@]}" \
+        "$TIME_BIN" -v -o "$time_log" ${limit[@]+"${limit[@]}"} "${command[@]}" \
             > "$output_gfa" 2> "$stderr_file" || exit_status=$?
         # gbz-base and gbz-base-query write the GFA to stdout, so no separate
         # stdout log exists.
@@ -638,10 +708,7 @@ run_one_variant() {
     output_bytes=$(file_size_bytes "$output_gfa")
     # Counts and parity values are computed after GNU time has finished, so
     # they never contribute to the measured wall time or memory.
-<<<<<<< HEAD
     # A failed command keeps NA values, so its row is still recorded below.
-=======
->>>>>>> 69320343d3288b40e384af23de49677717a7cff4
     local output_nodes=NA output_edges=NA output_paths=NA node_hash=NA
     local reference_walks=NA reference_walk_steps=NA reference_walk_hash=NA
     local summary_cache="$SUMMARY_SCRATCH/${query_id}.${variant}.ctx${context}.tsv"
@@ -675,8 +742,8 @@ run_one_variant() {
         # gbz-base-query is benchmarked as shipped; a failure (for example a
         # JavaScript heap or string-length limit on a large output) is a result
         # and is reported as NA by the summarizer. Any other tool failing is a
-        # benchmark error.
-        [[ "$tool" == "gbz-base-query" ]] || \
+        # benchmark error unless --allow-failures was given.
+        [[ "$tool" == "gbz-base-query" ]] || (( ALLOW_FAILURES )) || \
             die "$variant failed for $query_id (context $context) run $run_index; see $stderr_file"
         printf '  %s failed with exit status %d; recorded as NA (see %s)\n' \
             "$variant" "$exit_status" "$stderr_file"
@@ -715,6 +782,35 @@ for unit_index in "${UNIT_ORDER[@]}"; do
     done
     unset block
 done
+
+# Imported gbz-base rows keep their original timestamps, order, and log paths.
+# Every query and context must have both gbz-base variants, or the summaries
+# would silently report the missing pairs as NA.
+if [[ -n "$GBZ_RUNS_FROM" ]]; then
+    [[ "$(head -n 1 "$GBZ_RUNS_FROM")" == "$(head -n 1 "$RAW_TABLE")" ]] || \
+        die "--gbz-runs-from has a different raw_runs.tsv header: $GBZ_RUNS_FROM"
+    read -r imported_rows imported_pairs < <(awk -F '\t' \
+        -v queries="$(IFS=','; printf '%s' "${QUERY_IDS[*]}")" \
+        -v contexts="$(IFS=','; printf '%s' "${CONTEXT_VALUES[*]}")" \
+        -v out="$RAW_TABLE" '
+        BEGIN {
+            split(queries, q, ","); for (i in q) keep_query[q[i]] = 1
+            split(contexts, c, ","); for (i in c) keep_context[c[i]] = 1
+        }
+        NR == 1 { for (i = 1; i <= NF; ++i) column[$i] = i; next }
+        $column["tool"] == "gbz-base" && ($column["query_id"] in keep_query) &&
+                ($column["context_bp"] in keep_context) {
+            print >> out
+            ++rows
+            key = $column["query_id"] SUBSEP $column["context_bp"] SUBSEP $column["variant"]
+            if (!(key in seen)) { seen[key] = 1; ++pairs }
+        }
+        END { print rows + 0, pairs + 0 }' "$GBZ_RUNS_FROM")
+    expected_pairs=$(( ${#QUERY_IDS[@]} * ${#CONTEXT_VALUES[@]} * 2 ))
+    (( imported_pairs == expected_pairs )) || \
+        die "--gbz-runs-from covers $imported_pairs of $expected_pairs gbz-base query/context/variant combinations"
+    printf 'Imported %d gbz-base rows from %s\n' "$imported_rows" "$GBZ_RUNS_FROM"
+fi
 
 if (( MAKE_PLOTS )); then
     "$PYTHON_BIN" "$SUMMARY_SCRIPT" \

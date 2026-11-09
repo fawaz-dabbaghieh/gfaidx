@@ -37,7 +37,7 @@ normally sit beside the indexed graph and use its full name as their prefix,
 for example `graph.indexed.gfa.gz.pdx`. `IndexedGraph` discovers these names
 automatically.
 
-See [README.md](README.md) for all indexing options and for building a
+See the [command reference](docs/cli_reference.md) for all indexing options and [coordinates.md](docs/coordinates.md) for building a
 standalone coordinate index.
 
 ## Build and install the library

@@ -10,7 +10,9 @@ output order. The reference walk is the W record whose sample is the queried
 reference, whose sequence (ignoring a #subpath suffix) is the queried contig,
 and which overlaps the query when it carries coordinates. gbz-base names
 non-reference walks `unknown`, while gfaidx names every walk, so these filters
-pick the same record in both tools. A lone P/W record is used when nothing
+pick the same record in both tools. On PanSN P-path graphs a P record named
+`<reference>#<hap>#<contig>`, with a `:start-end` or `#subpath_...` suffix,
+qualifies the same way. A lone P/W record is used when nothing
 matched, which covers reference-only output on P-path graphs. Its hash is the
 smaller of the forward and reversed walk hashes, so the same walk written in
 either direction matches. Walk hashes are NA unless exactly one record
@@ -65,6 +67,19 @@ def overlaps(seq_start, seq_end, start, end):
     return int(seq_start) < end and int(seq_end) > start
 
 
+def pansn_reference_overlaps(name, reference, contig, start, end):
+    """Match a PanSN P path, `sample#hap#contig` plus `:start-end` or a
+    `#subpath_...` suffix, against the queried reference interval."""
+    parts = name.split(b"#")
+    if len(parts) < 3 or parts[0] != reference:
+        return False
+    sequence, _, span = parts[2].partition(b":")
+    if sequence != contig:
+        return False
+    seq_start, _, seq_end = span.partition(b"-")
+    return overlaps(seq_start, seq_end, start, end)
+
+
 def main():
     args = parse_args()
     reference = args.reference.encode()
@@ -95,6 +110,9 @@ def main():
                 if (record_type == b"W" and fields[1] == reference and
                         fields[3].split(b"#", 1)[0] == contig and
                         overlaps(fields[4], fields[5], args.start, args.end)):
+                    candidates.append((record_type, steps))
+                elif record_type == b"P" and pansn_reference_overlaps(
+                        fields[1], reference, contig, args.start, args.end):
                     candidates.append((record_type, steps))
 
     nodes.sort()

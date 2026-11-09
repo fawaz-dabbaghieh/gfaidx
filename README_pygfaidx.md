@@ -42,8 +42,8 @@ graph.indexed.gfa.gz.pdx
 graph.indexed.gfa.gz.pcx
 ```
 
-A `.cdx` coordinate index is optional. See [README.md](README.md) for
-coordinate indexing and all CLI options.
+A `.cdx` coordinate index is optional. See [coordinates.md](docs/coordinates.md) for
+coordinate indexing and the [command reference](docs/cli_reference.md) for all CLI options.
 
 ## Install
 

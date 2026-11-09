@@ -367,6 +367,10 @@ def failure_reason(row: dict[str, object]) -> str:
         return "JavaScript heap out of memory"
     if "Invalid string length" in text:
         return "JavaScript string length limit"
+    # The runner's --timeout wraps commands in GNU timeout, which exits 124
+    # when the limit stops the command.
+    if status == 124:
+        return "time limit exceeded"
     if status > 128:
         return f"killed by signal {status - 128}"
     return f"exit status {status}"
@@ -1214,7 +1218,7 @@ def overview_style(variant: str, thread_counts: list[int]) -> tuple[str, str, st
     )
 
 
-def plot_overview(
+def plot_overview_by_context(
     size_rows: list[dict[str, object]],
     output: Path,
     title: str,
@@ -1936,19 +1940,17 @@ def main() -> int:
             comparison, plot_locations, plot_sizes, plot_repetitions, cache_rows,
             plot_dir, formats, styles,
         )
-<<<<<<< HEAD
     # One overview per context with every comparison that ran at it.
     for context in sorted({str(row["context_bp"]) for row in size_rows}, key=context_sort_key):
         if context == "NA":
             continue
-        plot_overview(
+        plot_overview_by_context(
             [row for row in size_rows if str(row["context_bp"]) == context],
             plot_dir / f"overview_{context_slug(context)}",
             f"gfaidx and gbz-base, {context_label(context)}", formats,
         )
-=======
+    # The paper figure: first and warm time and memory, failures marked.
     plot_overview(size_rows, plot_dir, formats)
->>>>>>> 69320343d3288b40e384af23de49677717a7cff4
 
     print(f"Wrote summary tables to {table_dir}")
     print(f"Wrote plots to {plot_dir}")

@@ -1,1175 +1,287 @@
 # gfaidx
 
-`gfaidx` is a command-line tool for indexing genome graphs stored in GFA.
-It writes a multi-member gzip version of the graph and several sidecar indexes.
-The goal is to give random and fast access to GFA graphs, including large
-graphs, without keeping the full graph in RAM. The main indexes live on disk and
-are read only for the part of the graph or path being queried.
+gfaidx indexes genome graphs in [GFA](https://github.com/GFA-spec/GFA-spec)
+format so that any part of a graph can be read quickly, without loading the
+whole graph into memory. It splits the graph into communities of densely
+connected nodes, writes each community as its own block of a gzip file, and
+builds small index files to find nodes, paths and genomic coordinates. A query
+then decompresses only the blocks it needs.
 
-Main tasks:
+gfaidx works with pangenome graphs that have `P` or `W` lines (for example
+from PGGB or Minigraph-Cactus), with rGFA (minigraph), and with graphs without
+paths, such as assembly graphs.
 
-- split a graph into community-based gzip chunks
-- look up a node's community and stream one chunk
-- extract a BFS subgraph around a node or coordinate interval
-- index `P` and `W` lines for full-path and subpath queries
-- index reference coordinates, or derive coordinates from indexed paths when possible
+![gfaidx indexing and region query](figures/algorithm_drawing.png)
+
+**(a)** Indexing. gfaidx finds communities in the graph with Louvain community
+detection (colors) and rewrites the GFA so that each community's segments and
+links form one gzip block. Links between communities go into a final shared
+block. Small sidecar files map every node to its block (`.ndx`, `.idx`) and
+store node lengths (`.lnx`) and, optionally, reference coordinates (`.cdx`).
+If the graph has `P` or `W` lines, they are stored in a separate path index
+(`.pdx`, with coordinate checkpoints in `.pcx`).
+**(b)** A region query. gfaidx finds the nodes of `reference:start-end` through
+the path index, decompresses only the blocks that hold them, and writes the
+subgraph with the haplotypes that pass through it.
 
 ## Contents
 
-- [What the indexes are](#what-the-indexes-are)
-  - [Chunk index](#chunk-index)
-  - [Path index](#path-index)
-- [Build and install](#build-and-install)
-  - [Supported platforms](#supported-platforms)
-  - [Prebuilt binaries](#prebuilt-binaries)
-  - [C++ CLI](#c-cli)
-  - [Bioconda](#bioconda)
-  - [Python library install](#python-library-install)
-- [CLI](#cli)
-  - [`gfaidx index_gfa`](#gfaidx-index_gfa)
-  - [`gfaidx get_subgraph`](#gfaidx-get_subgraph)
-  - [`gfaidx index_coordinates`](#gfaidx-index_coordinates)
-  - [`gfaidx get_region`](#gfaidx-get_region)
-  - [`gfaidx get_chunk`](#gfaidx-get_chunk)
-  - [`gfaidx index_paths`](#gfaidx-index_paths)
-  - [`gfaidx index_path_checkpoints`](#gfaidx-index_path_checkpoints)
-  - [`gfaidx get_path`](#gfaidx-get_path)
-  - [Build `.lnx` for existing indexes](#build-lnx-for-existing-indexes)
-- [Coordinate indexing examples](#coordinate-indexing-examples)
-  - [rGFA with `SN`, `SO`, and `SR` tags](#rgfa-with-sn-so-and-sr-tags)
-  - [GFA with `P` lines](#gfa-with-p-lines)
-  - [GFA with `W` lines](#gfa-with-w-lines)
-- [How the path index works](#how-the-path-index-works)
-- [Utility scripts](#utility-scripts)
-- [Python library](#python-library)
-- [Notes](#notes)
-- [TODO](#todo)
+- [Installation](#installation)
+- [Index a graph](#index-a-graph)
+- [Query a region](#query-a-region)
+- [Extract a neighborhood](#extract-a-neighborhood)
+- [Other commands](#other-commands)
+- [C++ and Python libraries](#c-and-python-libraries)
+- [Documentation](#documentation)
+- [Citation](#citation)
+- [License](#license)
 
-## What the indexes are
+## Installation
 
-### Chunk index
-
-`index_gfa` writes the query-ready graph plus sidecar indexes by default:
-
-- `<graph>.gz`
-  the multi-member gzip file containing one member per community plus a final shared-edge member
-- `<graph>.gz.idx`
-  a community-to-gzip-offset index
-- `<graph>.gz.ndx`
-  a sorted binary hash table mapping node string IDs to integer node IDs and
-  community IDs
-- `<graph>.gz.lnx`
-  a node-ID-aligned `uint32` node-length table used for coordinate-bearing W subwalk output
-- `<graph>.gz.pdx`
-  a binary path index for `P` and `W` lines
-- `<graph>.gz.pcx`
-  a small path-coordinate checkpoint index used to avoid long `.pdx` prefix scans
-- `<graph>.gz.params`
-  a JSON summary of the run: the gfaidx version, the options used, graph
-  counts (segments, links, total sequence length in bp, paths, walks, path
-  steps), the number of communities, the node id order, and the output file
-  sizes. Queries do not read it
-- `<graph>.gz.cdx`
-  an optional standalone reference-coordinate index built by `index_coordinates`
-
-`get_subgraph` uses `.idx`, `.ndx`, and optionally `.pdx` to extract a BFS
-neighborhood across communities.
-
-`get_region` additionally uses `.cdx` to resolve a 0-based reference interval
-to `.ndx`/`.pdx` node IDs before running the same graph extraction pipeline.
-When `--with_coords` is requested, `.lnx` supplies node lengths without
-re-scanning all `S` lines and `.pcx` supplies cumulative path-length
-checkpoints. The `.cdx`, `.lnx`, and `.pcx` files are separate sidecars, so
-existing graph and path indexes remain compatible.
-
-`get_chunk` remains available as the compatibility command for streaming a
-single community member back out without graph expansion.
-
-### Path index
-
-`index_paths` writes:
-
-- `<paths>.pdx`
-  a binary index for `P` and `W` lines
-
-The `.pdx` stores:
-
-- path metadata
-- node metadata
-- a delta-coded step table
-- compressed per-node postings
-- a shared string blob
-
-Important: `.pdx`, `.lnx` and `.cdx` all use the integer node IDs assigned in
-the `.ndx` file. That lets `get_path` resolve node names through `.ndx` without
-loading a giant global node-name map into memory. `index_gfa` numbers nodes so
-that nodes adjacent on paths get close IDs (see
-[How the path index works](#how-the-path-index-works)), which is what makes the
-step table and postings compress well. The sidecars must therefore be built
-from the same `.ndx`; every query checks this and refuses mixed index sets.
-
-## Build and install
-
-### Supported platforms
-
-`gfaidx` targets Unix-like systems only:
-
-- Linux
-- macOS
-
-It is not supported on Windows. Parts of the index I/O layer use Unix system
-calls such as `open`, `fstat`, `mmap`, and `close`.
-
-### Prebuilt binaries
-
-Each version tag publishes tested command-line packages for Linux and macOS on
-the corresponding [GitHub release](https://github.com/fawaz-dabbaghieh/gfaidx/releases):
-
-- Linux x86-64 and ARM64 binaries are statically linked against musl.
-- macOS Intel and ARM64 binaries link only to libraries supplied by macOS.
-
-Static linking removes shared-library requirements. The `index_gfa` command
-still launches the system `sort`; Linux installations therefore need GNU
-coreutils, which is normally installed by default. On Alpine Linux, install it
-with `apk add coreutils`. Graph query commands do not invoke this external sort.
-
-Download the archive matching the operating system and CPU architecture,
-extract it, and place `gfaidx` in a directory on `PATH`, for example
-`$HOME/.local/bin`.
-
-To create a release, first update the version compiled into `src/gfaidx.cpp`,
-commit the change, and push a matching `v` tag:
-
-```bash
-git tag v1.9.8
-git push origin v1.9.8
-```
-
-The release workflow builds and tests all four packages, writes a
-`SHA256SUMS` file, and then creates or updates the release for that tag. A tag
-whose version does not match the executable version fails before publication.
-If release automation is corrected after a tag has already been pushed, run
-the `Release binaries` workflow manually from GitHub Actions and supply that
-existing tag as `release_tag`.
-
-### C++ CLI
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j 4
-```
-
-To install the executable into a prefix:
-
-```bash
-cmake --install build --prefix /usr/local
-```
-
-The same installation also provides the `gfaidx::gfaidx` C++ query target and
-public headers. See [`README_library.md`](README_library.md) for downstream
-`find_package(gfaidx)` setup and API examples.
-
-For a user-writable install, replace `/usr/local` with another prefix, for
-example `$HOME/.local`.
+gfaidx runs on Linux and macOS.
 
 ### Bioconda
 
-A Bioconda package is planned. Once the recipe is merged, installation will be:
+```bash
+conda install -c conda-forge -c bioconda gfaidx
+```
+
+### Prebuilt binaries
+
+Every [release](https://github.com/fawaz-dabbaghieh/gfaidx/releases) has
+ready-to-run binaries:
+
+| System | Archive |
+|---|---|
+| Linux x86-64 | `gfaidx-<version>-linux-x86_64.tar.gz` |
+| Linux ARM64 | `gfaidx-<version>-linux-aarch64.tar.gz` |
+| macOS Intel | `gfaidx-<version>-macos-x86_64.tar.gz` |
+| macOS Apple silicon | `gfaidx-<version>-macos-arm64.tar.gz` |
 
 ```bash
-conda install -c bioconda gfaidx
+tar -xzf gfaidx-v2.3.2-linux-x86_64.tar.gz
+mv gfaidx-v2.3.2-linux-x86_64/gfaidx ~/.local/bin/
+gfaidx --version
 ```
 
-### Python library install
+The Linux binaries are statically linked and run on any distribution.
+`index_gfa` uses the system `sort` command, which is part of GNU coreutils on
+Linux; on Alpine Linux, install it with `apk add coreutils`.
+
+### From source
+
+Building needs a C++17 compiler, CMake 3.20 or newer, and zlib.
 
 ```bash
-pip install -e .
+git clone https://github.com/fawaz-dabbaghieh/gfaidx.git
+cd gfaidx
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 4
+cmake --install build --prefix ~/.local    # optional
 ```
 
-The Python package is named `pygfaidx`, but it now binds the native query
-engine rather than using the former pure-Python prototype. See
-[`README_pygfaidx.md`](README_pygfaidx.md) for its complete API and
-[`README_library.md`](README_library.md) for C++ integration.
+## Index a graph
 
-## CLI
-
-### `gfaidx index_gfa`
-
-Build the chunked gzip graph plus `.idx`, `.ndx`, `.lnx`, `.params`, and by
-default `.pdx` and `.pcx`.
+The same command indexes every kind of GFA 1 graph, plain or gzipped:
 
 ```bash
-gfaidx index_gfa <in_gfa> <out_gfa.gz> [options]
+gfaidx index_gfa graph.gfa graph.gfa.gz
 ```
 
-Arguments:
+This writes the indexed graph `graph.gfa.gz` and its sidecar files beside it:
+`.idx`, `.ndx`, `.lnx`, `.pdx`, `.pcx` and a `.params` summary of the run.
+Keep them together; the query commands find them by name.
 
-- `in_gfa`
-  input GFA 1 graph (GFA 1.0, 1.1, or 1.2) with at least one `L` line, plain
-  or gzipped; GFA 2 input and graphs without links are rejected with an error
-- `out_gfa.gz`
-  output multi-member gzip graph
+Useful options:
 
-Options:
+- `--threads N` builds the path index with `N` threads.
+- `--tmp_dir DIR` puts temporary files in `DIR` instead of beside the input.
+  Path indexing needs about 12 bytes of temporary space per path step, for
+  example 54 GB for the 4.5 billion steps of the HPRC PGGB chromosome 1 graph.
+- `--max_chunk_nodes N` splits communities larger than `N` nodes, so queries
+  decompress smaller blocks.
 
-- `--keep_tmp`
-  keep temporary files instead of deleting them at the end
-- `--tmp_dir <dir>`
-  base directory for the run's `gfaidx_tmp_*` directory (default: the input
-  GFA's directory). All intermediate files, and the outputs until they are
-  complete, are written there; the outputs are then moved to their final
-  paths (copied if `--tmp_dir` is on a different filesystem)
-- `--progress_every <N>`
-  progress logging interval while reading the GFA
-- `--gzip_level <1..9>`
-  gzip compression level for the final chunked output
-- `--gzip_mem_level <1..9>`
-  zlib memory level for gzip compression
-- `--checkpoint_steps <N>`
-  store one cumulative path-coordinate checkpoint every `N` path steps in
-  `.pcx`; defaults to `4096`
-- `--max_chunk_nodes <N>`
-  re-run Louvain inside communities containing at least `N` nodes and prevent
-  small-community merges from producing a chunk larger than `N`; `0` disables
-  refinement and leaves merging without an upper bound. Louvain levels only
-  merge communities, so refinement stops before a level that would create a
-  piece larger than `N` and keeps the previous level
-- `--min_chunk_nodes <N>`
-  merge communities smaller than `N` nodes into the neighboring community with
-  the most connecting edges; `0` disables small-community merging
-- `--no_paths`
-  skip building `<out_gfa.gz>.pdx` and `.pcx`; still write `.gz`, `.idx`,
-  `.ndx`, and `.lnx`
-- `--node_order <auto|legacy_hash>`
-  `auto` (default) numbers nodes by community, then by integer segment name
-  (or one shared prefix plus digits, such as `s123`) or by first appearance in
-  `L` lines, whichever gives smaller estimated path-step deltas on the edge
-  list. `legacy_hash` keeps the earlier hash-rank IDs and writes the previous
-  `.ndx` and v4 `.pdx` byte for byte, which older gfaidx releases can read
-- `--step_encoding <delta|packed32>`
-  `.pdx` step table layout; defaults to `delta` (`legacy_hash` forces `packed32`)
-- `--posting_encoding <slots|groups>`
-  `.pdx` posting layout; defaults to `slots` (`legacy_hash` forces `groups`)
-- `--posting_block_nodes <N>`
-  node IDs per independently decodable posting block for `slots`; defaults
-  to `32`. Larger blocks compress better but make an isolated single-node
-  lookup decode more of its block
-- `--threads <N>`
-  threads for building the path index; defaults to `1`. Long `P`/`W` lines
-  have their node names resolved in parallel, posting runs are sorted in the
-  background (up to 4 runs of 64 MB in flight), and posting-run merge groups
-  run in parallel as far as the soft open-file limit allows. Every thread
-  count writes the same files.
+What else is needed depends on the kind of graph:
 
-  More threads need more temporary disk space. Path indexing writes 12 bytes
-  per path step to `--tmp_dir` as sorted 64 MB runs (about 12 GB per billion
-  steps). Above 128 runs (about 716 million steps), groups of 128 runs are
-  merged into one file of about 8.6 GB each. A group's input runs are deleted
-  only once its merged file is complete, so every group being merged needs
-  about 8.6 GB on top of the runs. With `--threads N`, up to N groups are
-  merged at once, which needs up to (N - 1) x 8.6 GB more than one thread:
-  about 26 GB more with 4 threads and 60 GB more with 8, however large the
-  graph. For example, on a PGGB chr1 graph with 4.5 billion path steps, the
-  runs took 54 GB. With 8 threads, path indexing needed about 45 GB more
-  temporary space and took 7.4 minutes instead of 27
+### A graph without paths
 
-Outputs:
-
-- `<out_gfa.gz>`
-- `<out_gfa.gz>.idx`
-- `<out_gfa.gz>.ndx`
-- `<out_gfa.gz>.lnx`
-- `<out_gfa.gz>.pdx` unless `--no_paths` is used
-- `<out_gfa.gz>.pcx` unless `--no_paths` is used
-- `<out_gfa.gz>.params`, a JSON summary of the options and the graph;
-  `path_steps` is `null` with `--no_paths`
-
-Example:
+An assembly graph, for example, has only `S` and `L` lines. Index it and query
+it from a node with [`get_subgraph`](#extract-a-neighborhood):
 
 ```bash
-gfaidx index_gfa graph.gfa graph.indexed.gfa.gz --tmp_dir /scratch/tmp
+gfaidx index_gfa assembly.gfa assembly.gfa.gz
+gfaidx get_subgraph assembly.gfa.gz utg000123 neighborhood.gfa --max_nodes 500
 ```
 
-### `gfaidx get_subgraph`
+### A pangenome with `W` lines (Minigraph-Cactus)
 
-Extract a BFS neighborhood subgraph from the indexed graph, optionally followed
-by the matching `P/W` subpaths if a companion `.pdx` is available.
+`W` lines carry their own coordinates, so region queries work right after
+indexing. A coordinate index (`.cdx`) for the reference makes them faster:
 
 ```bash
-gfaidx get_subgraph <in_indexed_gz> <start_node> <out_gfa> [options]
+gfaidx index_gfa hprc.gfa.gz hprc.indexed.gfa.gz --threads 8 --tmp_dir /scratch
+gfaidx index_coordinates hprc.indexed.gfa.gz hprc.indexed.gfa.gz.cdx --reference CHM13
 ```
 
-Arguments:
+`--reference` selects one of the reference samples listed in the GFA header's
+`RS:Z` tag; without it, all of them are indexed. `index_gfa` never overwrites
+an existing file, so give the indexed graph a different name from a gzipped
+input.
 
-- `in_gz`
-  input indexed gzip graph produced by `index_gfa`
-- `start_node`
-  node ID to start the BFS neighborhood from
-- `out_gfa`
-  output file for the extracted GFA subgraph
+### A pangenome with `P` lines (PGGB)
 
-Index options:
-
-- `--idx <path>`
-  override the companion `.idx`; defaults to `<in_gz>.idx`
-- `--ndx <path>`
-  override the companion `.ndx`; defaults to `<in_gz>.ndx`
-- `--pdx <path>`
-  override the companion `.pdx`; defaults to `<in_gz>.pdx`
-- `--lnx <path>`
-  override the optional node-length index used by `--with_coords`; defaults to
-  `<in_gz>.lnx`
-- `--pcx <path>`
-  override the optional path-coordinate checkpoints used by `--with_coords`;
-  defaults to `<in_gz>.pcx`
-
-- `--max_nodes <N>`
-  BFS node cap; defaults to `100`
-- `--with_coords`
-  emit coordinate-bearing `W` subwalks and coordinate-named `P` subpaths
-- `--no_paths`
-  omit all `P/W` subpaths; this cannot be combined with `--with_coords`
-
-Behavior:
-
-- explicit `--idx`, `--ndx`, and `--pdx` take priority over inferred companion files
-- if `.pdx` is present, `get_subgraph` appends the matching `P/W` subpaths for the extracted node set
-- if `.pdx` is missing and was not explicitly requested, `get_subgraph` warns and continues with `S/L` output only
-- `--with_coords` requires `.pdx`; `.lnx` and `.pcx` accelerate coordinate
-  calculation but remain optional for compatibility with older indexes
-- coordinate output preserves the original coordinate namespace and emits one
-  record for each contiguous selected run along a path
-- BFS discovery uses a simple node-level adjacency, but final output re-streams the original chunk lines so emitted `S/L` records preserve the original GFA edge orientations
-
-Examples:
+`P` line names such as `CHM13#0#chr1` are queried directly, and a name ending
+in `:start-end` gives that path's position. To store coordinates for the
+reference paths, list the paths, keep the ones you need, and index those:
 
 ```bash
-gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa
-gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa --max_nodes 2000
-gfaidx get_subgraph graph.indexed.gfa.gz s12345 neighborhood.gfa --max_nodes 2000 --with_coords
+gfaidx index_gfa pggb.gfa pggb.gfa.gz --threads 8
+gfaidx get_path pggb.gfa.gz --print_path_names > paths.tsv
+awk -F '\t' '$1 == "P" && $2 ~ /^CHM13#/' paths.tsv > reference_paths.tsv
+gfaidx index_coordinates pggb.gfa.gz pggb.gfa.gz.cdx --path_names_file reference_paths.tsv
 ```
 
-### `gfaidx index_coordinates`
+### An rGFA (minigraph)
 
-Build a standalone `.cdx` aligned to an existing `.ndx`. Reference W records
-are selected from the header `RS:Z` sample list. If the supplied GFA is an
-indexed gzip that no longer contains W records, `index_coordinates` can read the
-reference W metadata and steps from a companion `.pdx`. If no eligible reference
-W record exists, `SR:i:0` segments with `SN` and `SO` tags are indexed instead.
-Alternatively, provide a filtered `get_path --print_path_names` output file to
-index explicit P paths and W walks from the `.pdx`.
+An rGFA stores reference positions in the `SN`, `SO` and `SR` tags of its `S`
+lines. Region queries on an rGFA need the coordinate index, which picks up the
+`SR:i:0` segments automatically:
 
 ```bash
-gfaidx index_coordinates <in_gfa> <out.cdx> [options]
+gfaidx index_gfa minigraph.gfa minigraph.gfa.gz
+gfaidx index_coordinates minigraph.gfa.gz minigraph.gfa.gz.cdx
 ```
 
-Options:
+See [coordinates.md](docs/coordinates.md) for how coordinates work in each
+kind of graph.
 
-- `--ndx <path>`
-  node hash index; defaults to `<in_gfa>.ndx` when present
-- `--pdx <path>`
-  optional path index used as the source of reference W records when they are
-  absent from the supplied GFA; defaults to `<in_gfa>.pdx` when present
-- `--reference <sample>`
-  index only this sample from the header `RS:Z` list; by default all listed
-  reference samples are indexed
-- `--path_names_file <path>`
-  tab-separated file in the same format emitted by
-  `gfaidx get_path graph.gfa.gz --print_path_names`; selected `W` rows keep their
-  W coordinates. A selected `P` name ending in `:start-end` uses that 0-based,
-  half-open interval; other P paths start at 0. P paths with non-`*` overlaps
-  are rejected because their coordinate lengths would be ambiguous.
-- `--progress_every <N>`
-  report input progress every `N` lines; `0` disables progress logging
-
-Example:
+## Query a region
 
 ```bash
-gfaidx index_coordinates chr22.gfa chr22.gfa.gz.cdx \
-  --ndx chr22.gfa.gz.ndx --reference CHM13
-
-gfaidx index_coordinates chr22.indexed.gfa.gz chr22.gfa.gz.cdx --reference CHM13
-
-# print_path_names prints all available paths in the indexed graph
-gfaidx get_path graph.indexed.gfa.gz --print_path_names > path_names.tsv
-# edit or filter path_names.tsv, then index exactly those P/W records
-gfaidx index_coordinates graph.indexed.gfa.gz graph.gfa.gz.cdx --path_names_file path_names.tsv
+gfaidx get_region <graph.gfa.gz> <sequence:start-end> <out.gfa> [options]
 ```
 
-### `gfaidx get_region`
+`get_region` writes the part of the graph that covers a genomic interval as an
+ordinary GFA: the `S` and `L` lines of the selected nodes, followed by the
+pieces of every `P` or `W` path inside them. Coordinates are 0-based and
+half-open, as in BED files. The sequence is the `W` lines' sequence name (with
+`--reference` for the sample), the `P` path name without any `:start-end`
+suffix, or the rGFA `SN` name.
 
-Resolve a 0-based, half-open reference interval through `.cdx`, translate its
-node ranks through `.pdx`, and either expand a graph neighborhood around the
-interval (`--mode bfs` or `--mode reference`) or select the P/W path spans
-supported by its nodes (`--mode all`). If `.cdx` is absent
-or does not contain the requested coordinate track, `get_region` can fall back
-to the resolved `.pdx` and `.lnx` to compute coordinates on the fly for any
-indexed `P` path or concrete-coordinate `W` walk.
+`--mode` chooses which part of the graph is returned:
+
+- `all` (default) returns every haplotype through the interval. gfaidx takes
+  the reference nodes inside the interval, finds every path that passes
+  through them, and keeps each path from its first to its last of those nodes,
+  including insertions and other sequence that is not in the reference. In
+  repeats, a path can pass through those nodes at distant places;
+  `--haplotype_gap 10kb` then splits it wherever more than 10 kb of the path
+  lies between two of them, and leaves out the sequence in between.
+- `reference` returns the nodes within `--context` bases of the interval
+  (default 100) and only the reference path, like `gbz-base query
+  --reference-only`.
+- `bfs` returns the graph around the interval, up to `--max_nodes` nodes or
+  within `--context` bases, with every path piece inside it.
+
+`--with_coords` gives each returned path piece its own coordinates: start and
+end on `W` lines, and a `:start-end` suffix on `P` names.
 
 ```bash
-gfaidx get_region <in_gz> <sequence:start-end> <out_gfa> [options]
+# Every haplotype through 100 kb of CHM13 chr22, with coordinates
+gfaidx get_region hprc.indexed.gfa.gz chr22:20000000-20100000 region.gfa \
+  --reference CHM13 --with_coords
+
+# The same, but split a haplotype where more than 10 kb separates two reference nodes
+gfaidx get_region hprc.indexed.gfa.gz chr22:20000000-20100000 region.gfa \
+  --reference CHM13 --with_coords --haplotype_gap 10kb
+
+# Only the reference path, with 1 kb of graph context on each side
+gfaidx get_region hprc.indexed.gfa.gz chr22:20000000-20100000 reference.gfa \
+  --reference CHM13 --mode reference --context 1kb
+
+# A PGGB graph: the P path name is the sequence
+gfaidx get_region pggb.gfa.gz CHM13#0#chr1:1000000-1100000 region.gfa --with_coords
+
+# An rGFA: the graph around the interval, up to 5,000 nodes
+gfaidx get_region minigraph.gfa.gz chr1:1000000-1100000 region.gfa \
+  --mode bfs --max_nodes 5000
+
+# List every sequence that can be queried, and its range
+gfaidx get_region hprc.indexed.gfa.gz --list_coordinates
 ```
 
-Important options:
-
-- `--reference <sample>`
-  select the coordinate namespace when multiple reference samples contain the
-  requested sequence
-- `--cdx`, `--idx`, `--ndx`, `--pdx`, `--lnx`, `--pcx`
-  override companion indexes; each defaults to `<in_gz>.<suffix>`
-- `--max_nodes <N>`
-  cap the total seed plus BFS node count; it must be at least the seed count.
-  Only used with `--mode bfs` without `--context`
-- `--context <LIMIT>`
-  base-pair context around the interval, with the same rules as gbz-base's
-  `query --context`: starting from both sides of every node on the reference
-  interval, crossing a node costs its length minus one and following a link
-  costs one, and every node with a side reached within `LIMIT` bases joins the
-  subgraph. A partially covered first or last node starts its outer side at
-  the bases outside the interval. The node set depends only on graph topology,
-  so a long variant split across many nodes keeps only the nodes within
-  `LIMIT` of either end; its haplotypes are then emitted as separate
-  fragments. Used by `--mode reference` (default `100`, gbz-base's default)
-  and optionally by `--mode bfs`, where it replaces `--max_nodes`; rejected by
-  `--mode all`. `LIMIT` accepts the same suffixes as `--haplotype_gap`.
-  `--context 0` keeps only the interval's own nodes
-- `--mode {bfs,all,reference}`
-  select the extraction strategy. Default is `all`
-  - `bfs`: explore a graph neighborhood around the interval, either by BFS up
-    to `--max_nodes` or, with `--context`, by base-pair distance. Every
-    indexed P/W run inside the resulting node set is emitted; haplotype spans
-    are not resolved exactly. With `--context`, single-step runs are kept so
-    the walks match gbz-base's subgraph output one for one
-  - `all`: avoid BFS and use the `.pdx` posting table to find every indexed
-    P/W record containing a reference interval node. For a coordinate-indexed
-    P/W source, the exact path-step range returned by the coordinate binary
-    search is kept; repeated occurrences of one of its node ids elsewhere on
-    that same path do not widen the reference interval. Every other path uses
-    the minimum and maximum step containing any reference anchor. All steps
-    between those endpoints are retained, including insertions, duplications,
-    and inverted sequence. The exact node union and edges whose endpoints are
-    both in the union are then materialized. This conservative behavior can
-    produce a broad interval when one anchor occurs at distant positions on
-    the same haplotype; use `--mode bfs` when path support is ambiguous. This
-    mode assumes the graph nodes of interest are covered by indexed P/W
-    records; graph-only nodes are not discovered
-  - `reference`: extract the `--context` subgraph and emit only the queried
-    reference path, matching gbz-base's `query --reference-only`. The node and
-    link set is the same one `--mode bfs --context` returns; only the other
-    haplotypes' P/W records are skipped, along with their formatting and
-    coordinate work. The reference record covers the exact interval extended
-    through every adjacent reference step that stays inside the subgraph, as
-    gbz-base reports it. Not compatible with `--haplotype_gap`, which only
-    affects non-reference paths
-- `--all_haplotypes`
-  deprecated alias for `--mode all`, kept for compatibility with existing
-  scripts. Prints a deprecation warning to stderr; rejected if combined with
-  an explicit `--mode` that names a different mode
-- `--haplotype_gap <LIMIT>`
-  requires `--mode all`. Optionally replace the non-reference minimum/maximum
-  span with ODGI-style local anchor clustering. Consecutive anchor occurrences
-  stay in one path run while the intervening non-anchor sequence is at most
-  `LIMIT` bases; the next anchor starts a new run after the limit is exceeded.
-  This can prevent distant repeat hits from pulling most of a PGGB haplotype
-  into a small query. The coordinate-selected reference run always remains
-  exact. Omitting the option preserves the established conservative behavior
-  and its lower overhead. `LIMIT` accepts a bare base count or a
-  case-insensitive `bp`, `kb`, `mb`, or `gb` suffix using decimal units; for
-  example, `10kb` is 10,000 bases and `0`
-  joins only directly adjacent anchors. The option requires
-  `--mode all` and a matching `.lnx` node-length index
-- `--no_paths`
-  omit P/W output; `.pdx` remains required for rank-to-node-name conversion
-- `--with_coords`
-  emit returned `W` subwalks with concrete `SeqStart`/`SeqEnd` coordinates and
-  returned no-overlap `P` subpaths with coordinate names such as
-  `CHM13#0#chr1:1830045-1840123`. An existing terminal interval supplies the
-  source coordinate base and is replaced by the extracted interval; otherwise
-  P coordinates are path-local from 0. The command uses the resolved `.pdx` for
-  path metadata, `.lnx` for node lengths, and `.pcx` to start near the requested
-  path step instead of scanning from step zero. If `.pcx` is absent, it uses the
-  previous bounded path-prefix scan. If `.lnx` is absent, it falls back to
-  scanning indexed GFA `S` lines; if validation fails, it falls back to ordinary
-  subpath output and logs a warning.
-- On-the-fly `.pdx` coordinate lookup
-  recognizes a terminal `:start-end` interval on a P name and otherwise starts
-  that P path at 0. It handles `W` walks from their stored `SeqStart`. This
-  fallback requires `.lnx`, because the path steps in `.pdx` need rank-aligned
-  node lengths to derive cumulative coordinates.
-- `--list_coordinates`, `--print_path_names`
-  print every P/W record available through `.pdx`, plus any `.cdx`-only rGFA
-  tracks, then exit. `--print_path_names` is retained as a compatibility alias;
-  `--list_coordinates` is clearer when the index contains rGFA segment tracks.
-  The output is TSV with columns `source`, `reference`, `haplotype`, `sequence`,
-  `start`, `end`, `entries`, and `coordinate_access`. The final column is `cdx`
-  for accelerated tracks, `on_the_fly` for paths calculated from `.pdx` and
-  `.lnx`, or `unavailable` when the required lengths or W coordinates are
-  absent. A missing `.cdx` is not an error when usable P/W records remain.
-- `--no_header`
-  omit the TSV header when listing coordinate tracks
-
-Example:
+## Extract a neighborhood
 
 ```bash
-gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 region.gfa \
-  --reference CHM13 --mode bfs --max_nodes 100000
-
-gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 haplotypes.gfa \
-  --reference CHM13 --mode all
-
-gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 local_haplotypes.gfa \
-  --reference CHM13 --mode all --haplotype_gap 10kb
-
-gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 reference_only.gfa \
-  --reference CHM13 --mode reference --context 100 --with_coords
-
-gfaidx get_region chr22.gfa.gz chr22:1500000-2000000 context.gfa \
-  --reference CHM13 --mode bfs --context 1kb
-
-gfaidx get_region chr22.gfa.gz --list_coordinates
+gfaidx get_subgraph <graph.gfa.gz> <node> <out.gfa> [options]
 ```
 
-Note that `--mode all` is the default, so the second example above also works
-with just `--reference CHM13` and no `--mode` at all.
-
-#### How `--mode all` preserves paths
-
-Node ids alone do not identify where a node occurs on a path. The coordinate
-query therefore keeps the exact source-path steps in addition to the node ids.
-For other haplotypes, consider this small example where the requested reference
-interval contains `B,C`:
-
-```text
-reference:  A B C D E F G H
-haplotype:    B G H C
-```
-
-The reference contributes the interval `B,C`. The anchor nodes `B,C` select
-the complete haplotype interval `B,G,H,C`, so the materialized graph contains
-the node union `B,C,G,H`.
-
-Searching that union against the complete reference again would incorrectly
-find two reference runs, `B,C` and `G,H`. The second run is only present because
-`G,H` were selected through the haplotype. `--mode all` therefore keeps
-the path-specific intervals found during anchor matching and emits:
-
-```text
-reference:  B C
-haplotype:  B G H C
-```
-
-The node union is still used to write the graph's `S` and `L` records. The
-preserved path intervals are used only for `P` and `W` output. By default, each
-matched P/W record produces one output interval, including paths whose selected
-interval is reversed relative to the reference. With `--haplotype_gap`, one
-matched P/W record can instead produce several coordinate-labelled local runs.
-
-If `B` also occurs later on the reference path, the `.cdx` step range identifies
-which occurrence overlaps the requested coordinates. On another haplotype,
-all sequence between the outermost matching anchors is retained. For example,
-`B Q B X C D E` remains complete when `B` and `E` anchor the interval; gfaidx
-does not discard `Q B X` by choosing the shorter of several possible matches.
-If `--haplotype_gap 1kb` is supplied and more than 1,000 non-anchor bases lie
-between the first and second `B`, the two anchor clusters are emitted as
-separate runs. This rule depends only on distance along that haplotype; it does
-not attempt to infer a unique collinear alignment through a repeat.
-
-### `gfaidx get_chunk`
-
-Stream one community member from the indexed gzip graph.
+`get_subgraph` starts from one node and adds its neighbors, then theirs, in
+both directions along the links, until it has `--max_nodes` nodes (default
+100). It writes those nodes, the links between them, and the pieces of every
+`P` or `W` path inside them.
 
 ```bash
-gfaidx get_chunk <in_gz> [--community_id <id> | --node_id <node>] [options]
+# 2,000 nodes around node 12345
+gfaidx get_subgraph graph.gfa.gz 12345 neighborhood.gfa --max_nodes 2000
+
+# The same, with coordinates on the path pieces
+gfaidx get_subgraph graph.gfa.gz 12345 neighborhood.gfa --max_nodes 2000 --with_coords
+
+# Nodes and links only, without paths
+gfaidx get_subgraph graph.gfa.gz 12345 neighborhood.gfa --max_nodes 2000 --no_paths
 ```
 
-Arguments:
-
-- `in_gz`
-  input indexed gzip graph produced by `index_gfa`
-
-Options:
-
-- `--idx <path>`
-  path to the `.idx` file; defaults to `<in_gz>.idx`
-- `--ndx <path>`
-  path to the `.ndx` file; defaults to `<in_gz>.ndx`
-- `--community_id <id>`
-  stream this community directly
-- `--node_id <node>`
-  resolve the node through `.ndx` and stream its community
-
-Notes:
-
-- if `--node_id` is provided, it takes precedence over `--community_id`
-- the legacy `--index` and `--node_index` spellings are still accepted
-- shared edges are stored in a final extra member so streamed communities remain self-contained
-
-Example:
-
-```bash
-gfaidx get_chunk graph.gfa.gz --node_id s12345
-```
-
-### `gfaidx index_paths`
-
-Build or rebuild a standalone `.pdx` index for `P` and `W` lines.
-
-```bash
-gfaidx index_paths <in_gfa> <out_index.pdx> [options]
-```
-
-Arguments:
-
-- `in_gfa`
-  input GFA graph
-- `out_index.pdx`
-  output binary path index
-
-Options:
-
-- `--ndx <path>`
-  node hash index produced by `index_gfa`; defaults to `<in_gfa>.ndx` when
-  present. Provide this explicitly when the node index was renamed or stored
-  elsewhere.
-- `--tmp_dir <dir>`
-  base directory for temporary files used by the external posting sort; defaults to the output directory
-- `--progress_every <N>`
-  progress logging interval while reading
-- `--step_encoding <delta|packed32>`, `--posting_encoding <slots|groups>`,
-  `--posting_block_nodes <N>`, `--threads <N>`
-  as for `index_gfa`. With a legacy `.ndx`, `packed32` plus `groups` writes a
-  v4 `.pdx`; any other combination writes v5
-
-Notes:
-
-- `index_gfa` already builds `<out_gfa.gz>.pdx` by default
-- `index_paths` is mainly useful when you want to rebuild only the path index after path-index code changes
-- the `.pdx` must be rebuilt whenever its `.ndx` is rebuilt; a `.pdx` built
-  against a different node numbering is rejected at query time
-
-What gets indexed:
-
-- `P` lines
-- `W` lines
-- node names from `S` lines
-
-Current behavior:
-
-- `P` and `W` are both stored as ordered walks
-- steps are stored as zigzag deltas of consecutive node IDs in 128-step blocks
-- per-node postings are predicted from the neighbouring node IDs of the same
-  posting block where possible (see below)
-- large posting tables are built through disk-backed sorted runs to reduce peak RAM
-
-Example:
-
-```bash
-gfaidx index_paths graph.indexed.gfa.gz graph.indexed.gfa.gz.pdx
-```
-
-### `gfaidx index_path_checkpoints`
-
-Build the small `.pcx` acceleration sidecar for an existing `.pdx` and `.lnx`
-without rebuilding the graph or path index.
-
-```bash
-gfaidx index_path_checkpoints <indexed_gfa> [out_index.pcx] [options]
-```
-
-The command infers `<indexed_gfa>.pdx`, `<indexed_gfa>.lnx`, and by default
-writes `<indexed_gfa>.pcx`. Use `--pdx`, `--lnx`, or an explicit output path
-when the files were renamed.
-
-`--checkpoint_steps <N>` controls the checkpoint interval and defaults to
-4096. Each checkpoint is one `uint64` cumulative path length, so the default
-sidecar is normally much smaller than `.pdx`. Queries scan at most 4095 path
-steps before the requested subpath instead of starting at path step zero.
-
-Checkpoint values are streamed into a visible
-`gfaidx_path_checkpoints_tmp_*` directory beside the requested `.pcx`.
-`latest_path_checkpoints` points to the active directory. After a successful
-atomic rename, or after a handled error, the command removes both. If the
-process is interrupted, the remaining directory and symlink make the partial
-file easy to find and remove. Progress reports include completed paths, path
-steps, checkpoint counts, and elapsed time every 10 paths by default. Use
-`--progress_every_paths <N>` to change the interval or `0` to disable periodic
-progress.
-
-Example:
-
-```bash
-gfaidx index_path_checkpoints graph.indexed.gfa.gz
-```
-
-### `gfaidx get_path`
-
-Query an indexed graph's companion `.pdx` index in one of four modes:
-
-1. list indexed `P` path names and `W` walk coordinate identifiers
-2. full path lookup by canonical path ID
-3. full `W` lookup by structured fields
-4. node-set or subgraph lookup returning subpaths/subwalks
-
-```bash
-gfaidx get_path <in_gfa> [query mode options]
-```
-
-Arguments:
-
-- `in_gfa`
-  input indexed GFA graph; `get_path` looks for `<in_gfa>.pdx`
-
-General options:
-
-- `--ndx <path>`
-  optional override for the node hash index; for node-set queries, `get_path`
-  first tries `<in_gfa>.ndx`
-- `--pdx <path>`
-  optional override for the path index if the companion `.pdx` was renamed or
-  stored elsewhere
-- `--lnx <path>`
-  optional override for the node-length index used by `--with_walk_coords`;
-  defaults to `<in_gfa>.lnx` when present
-
-#### Mode 1: print path names
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --print_path_names
-```
-
-Output is tab-separated:
-
-- `P <path_name>` for original `P` records
-- `W <sample> <hap_index> <seq_id> <seq_start|*> <seq_end|*>` for original
-  `W` records
-
-This output can be filtered and supplied to
-`gfaidx index_coordinates --path_names_file` to coordinate-index selected paths
-or walks.
-
-#### Mode 2: exact path ID lookup
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --path_id <id>
-```
-
-Options:
-
-- `--path_id <id>`
-  canonical path ID
-
-Notes:
-
-- for `P` lines, this is the path name from the GFA
-- for `W` lines, the canonical key is `sample|hap|seq_id|start|end`
-
-Example:
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --path_id loopbackP
-```
-
-#### Mode 3: structured `W` lookup
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --sample <sample> --hap_index <hap> --seq_id <seq> [--seq_start <n|*>] [--seq_end <n|*>]
-```
-
-Options:
-
-- `--sample <sample>`
-  `W` sample ID
-- `--hap_index <hap>`
-  `W` haplotype index
-- `--seq_id <seq>`
-  `W` sequence ID
-- `--seq_start <n|*>`
-  optional exact start coordinate filter
-- `--seq_end <n|*>`
-  optional exact end coordinate filter
-
-If multiple `W` lines match and start/end are omitted, the lookup is rejected as ambiguous.
-
-Example:
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --sample HG002 --hap_index 1 --seq_id chr22
-```
-
-#### Mode 4: node-set or subgraph lookup
-
-Return all `P`/`W` runs that remain contiguous inside the requested node set.
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --nodes 1,2,3
-gfaidx get_path graph.indexed.gfa.gz --nodes_file nodes.txt
-gfaidx get_path graph.indexed.gfa.gz --subgraph_gfa subgraph.gfa
-```
-
-Node query options:
-
-- `--nodes <csv>`
-  comma-separated node IDs
-- `--nodes_file <path>`
-  file with node IDs, one per line or comma-separated per line
-- `--subgraph_gfa <path>`
-  GFA whose `S` lines define the node set
-
-Coordinate options for path output:
-
-- `--with_walk_coords`
-  try to emit exact `SeqStart`/`SeqEnd` for returned `W` subwalks and
-  coordinate-bearing names for no-overlap `P` subpaths
-- `--lnx <path>`
-  node-length sidecar used to avoid scanning all `S` lines; defaults to
-  `<in_gfa>.lnx` when present
-- `--pcx <path>`
-  optional path-coordinate checkpoints used to avoid scanning P/W paths from
-  step zero; defaults to `<in_gfa>.pcx` when present
-- `--source_gfa <path>`
-  original source GFA used as a fallback length source when `.lnx` is absent
-
-Coordinate rules:
-
-- only applies to node-set queries
-- affects `W` output coordinates and `P` output names
-- `.lnx` stores node-ID-aligned `uint32` segment lengths; fallback scanning takes
-  length from the sequence field first, then `LN:i:`
-- if anything is missing or inconsistent, `get_path` falls back to ordinary
-  subpath output and logs a warning
-
-Example:
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz \
-  --subgraph_gfa extracted_subgraph.gfa \
-  --with_walk_coords \
-  --source_gfa graph.gfa
-```
-
-If the companion `.ndx` file was renamed or moved, provide it explicitly with `--ndx`.
-
-### Build `.lnx` for existing indexes
-
-Existing indexed graphs do not need to be fully re-indexed to get node lengths.
-Build the sidecar directly from the indexed graph and matching `.ndx`:
-
-```bash
-python3 scripts/build_lnx.py graph.indexed.gfa.gz
-```
-
-Defaults:
-
-- input graph: `graph.gfa.gz`
-- node index: `graph.gfa.gz.ndx`
-- output: `graph.gfa.gz.lnx`
-
-Use `--ndx`, `--out`, or `--force` if the files were renamed or the output
-should be replaced.
-
-## Coordinate indexing examples
-
-Coordinate indexing depends on how the input GFA represents genomic sequence.
-Start by building the main graph and path indexes:
-
-```bash
-gfaidx index_gfa graph.gfa graph.indexed.gfa.gz
-```
-
-The commands below use the companion name
-`graph.indexed.gfa.gz.cdx`. Keeping that name lets `get_region` find the
-coordinate index automatically.
-
-### rGFA with `SN`, `SO`, and `SR` tags
-
-In an rGFA, reference coordinates are stored on `S` lines:
-
-```text
-S	node1	ACGT	SN:Z:chr1	SO:i:100	SR:i:0
-```
-
-`index_coordinates` automatically selects `SR:i:0` segments and groups them by
-their `SN` value. Do not provide `--reference` for this mode:
-
-```bash
-gfaidx index_coordinates \
-  graph.indexed.gfa.gz \
-  graph.indexed.gfa.gz.cdx
-```
-
-List the available `SN` coordinate tracks and their indexed bounds:
-
-```bash
-gfaidx get_region graph.indexed.gfa.gz --list_coordinates
-```
-
-Rows with `source` equal to `S` came from rGFA segment tags. Query using the
-exact value in the `sequence` column:
-
-```bash
-gfaidx get_region \
-  graph.indexed.gfa.gz \
-  chr1:1000000-1100000 \
-  chr1.region.gfa \
-  --mode bfs \
-  --max_nodes 100000
-```
-
-A pure rGFA does not record complete sample paths. Its reference nodes can seed
-a `--mode bfs` extraction, but `--mode all` cannot reconstruct
-haplotypes that are not represented by `P` or `W` records. Do not use
-`index_gfa --no_paths` for this workflow: `get_region` currently uses the
-otherwise empty `.pdx` node table to convert coordinate ranks back to node
-names.
-
-### GFA with `P` lines
-
-`P` lines do not have dedicated genomic start and end fields. By default,
-gfaidx gives a P path a 0-based path-local coordinate system by summing its
-segment lengths. When the path name ends in `:start-end`, such as
-`GRCh38#0#chr1:1830045-1840123`, gfaidx instead treats that suffix as the
-path's 0-based, half-open interval and queries it through the suffix-free
-namespace `GRCh38#0#chr1`. The encoded span must equal the summed segment
-lengths. This requires `*` overlaps; paths with overlap CIGARs are rejected
-because node lengths alone do not define their coordinates.
-
-Multiple P records may provide adjacent or disjoint fragments of one namespace:
-
-```text
-P  GRCh38#0#chr1:100-200  ...
-P  GRCh38#0#chr1:200-300  ...
-```
-
-A query such as `GRCh38#0#chr1:150-250` uses both fragments. Overlapping
-fragments with the same base namespace are rejected as ambiguous.
-
-First list the indexed paths:
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --print_path_names > paths.tsv
-```
-
-Keep the required `P` rows in a selection file. For example:
-
-```bash
-awk -F '\t' \
-  '$1 == "P" && ($2 == "CHM13#0#chr1" || $2 == "GRCh38#0#chr1")' \
-  paths.tsv > coordinate_paths.tsv
-```
-
-Build `.cdx` from that selection:
-
-```bash
-gfaidx index_coordinates \
-  graph.indexed.gfa.gz \
-  graph.indexed.gfa.gz.cdx \
-  --path_names_file coordinate_paths.tsv
-```
-
-Inspect the indexed ranges and query a selected path by its name:
-
-```bash
-gfaidx get_region graph.indexed.gfa.gz --list_coordinates
-gfaidx get_region \
-  graph.indexed.gfa.gz \
-  CHM13#0#chr1:1000000-1100000 \
-  chr1.region.gfa
-```
-
-Unselected P paths remain queryable on the fly when matching `.pdx` and `.lnx`
-files are available, but selecting frequently queried paths for `.cdx` avoids
-recomputing their coordinate positions.
-
-### GFA with `W` lines
-
-`W` records already contain a sample, haplotype, sequence name, and concrete
-`SeqStart`/`SeqEnd` coordinates. If the GFA header identifies reference samples
-with `RS:Z`, coordinate indexing without a selection file indexes those
-reference walks. Use `--reference` to select one reference sample:
-
-```bash
-gfaidx index_coordinates \
-  graph.indexed.gfa.gz \
-  graph.indexed.gfa.gz.cdx \
-  --reference CHM13
-```
-
-To select individual walks instead, print all P/W records and retain the desired
-`W` rows:
-
-```bash
-gfaidx get_path graph.indexed.gfa.gz --print_path_names > paths.tsv
-awk -F '\t' \
-  '$1 == "W" && $2 == "CHM13" && $4 == "chr1"' \
-  paths.tsv > coordinate_walks.tsv
-gfaidx index_coordinates \
-  graph.indexed.gfa.gz \
-  graph.indexed.gfa.gz.cdx \
-  --path_names_file coordinate_walks.tsv
-```
-
-List and query the resulting coordinate namespace:
-
-```bash
-gfaidx get_region graph.indexed.gfa.gz --list_coordinates
-gfaidx get_region \
-  graph.indexed.gfa.gz \
-  chr1:1000000-1100000 \
-  chr1.region.gfa \
-  --reference CHM13
-```
-
-When only one reference namespace contains the requested sequence,
-`--reference` may be omitted from the query.
-
-## How the path index works
-
-`.pdx` stores two linked views of the same path data:
-
-- path-first view
-  each path points to its contiguous step range
-- node-first view
-  each node points to a compressed posting block containing all `(path_id, step_rank)` occurrences
-
-This makes two workloads fast:
-
-- full path reconstruction
-- finding all subpaths that overlap a node set or extracted subgraph
-
-Node IDs (`.ndx` v2). `index_gfa` sorts nodes by Louvain community and, inside
-a community, by a locality key: the integer segment name when the graph
-builder numbered nodes along the paths (PGGB after `odgi sort`,
-Minigraph-Cactus), otherwise first appearance in the `L` lines. The node ID is
-the position in that order. Segment names stay the identity (they are what
-`.ndx` hashes); the integer is only a sort key. Each community owns a
-contiguous ID range, stored as a small start array in `.ndx`.
-
-Step table (`.pdx` v5, `delta`). Each step is stored as the LEB128 varint of
-`(zigzag(node_id - previous_node_id) << 1) | reverse`. Every 128 global steps
-the previous ID resets to 0, so each 128-step block decodes on its own; a
-superblock table (one 8-byte offset plus 32 two-byte offsets per 4096 steps)
-locates any block. Reading steps `[a, b)` of a path reads the covering blocks
-once and skips at most 127 values.
-
-Postings (`.pdx` v5, `slots`). Postings are coded in blocks of 32 consecutive
-node IDs. Inside a block, each path keeps the step ranks at the last node of
-the block it visited. Because neighbouring IDs are mostly consecutive steps of
-the same paths, an occurrence `(path, rank)` is usually predicted by
-`(path, rank - 1)` at an earlier node of the block, and only the subset of
-predicted occurrences (a bitmap or index list) is stored. Other occurrences
-are stored explicitly, relative to the path's last rank when it has one.
-Loops predict too, because every occurrence has its own slot. Readers keep the
-last decoded block, so runs of nearby node IDs (regions, BFS neighbourhoods)
-decode each block once.
-
-Compatibility. New binaries read v4 `.pdx` and headerless (legacy) `.ndx`
-files. Older binaries reject `.ndx` v2 and `.pdx` v5. `.pdx`, `.lnx` and
-`.cdx` contents depend on the node numbering and must be built from the same
-`.ndx`: `.pdx` stores a fingerprint of the numbering and `.cdx` a 32-bit tag
-of it, and queries refuse mismatched sets. `.pcx` stores cumulative sequence
-lengths, which do not depend on node IDs.
-
-Current query-time memory behavior:
-
-- path metadata is loaded eagerly
-- node metadata and node names are loaded lazily on demand
-- node-name resolution for node-set queries goes through `.ndx`, not a giant in-memory node-name hash map
-
-## Utility scripts
-
-### Repeated gfaidx thread-scaling and gbz-base interval benchmark
-
-`benchmark/scripts/benchmark_gfaidx_gbz_intervals.sh` runs repeated coordinate queries at
-multiple genomic locations for configurable gfaidx thread counts and gbz-base,
-records GNU `time -v` measurements, and generates first-execution, warm-cache,
-thread-scaling, and regional-variation summaries and plots. See
-[the repeated interval benchmark guide](docs/gfaidx_gbz_interval_benchmark.md)
-for the TSV schema and server command.
-
-### `.pdx` compression tooling
-
-- `scripts/pdx_size_breakdown.py` prints the section sizes of v4 and v5
-  `.pdx` files, with bytes per step and per posting (`--tsv` for tables).
-- `scripts/pdx_step_delta_estimate.py` estimates the delta step-table size of
-  a packed32 `.pdx` under alternative node orders (needs numpy).
-- `scripts/pdx_ab_benchmark.py` runs one query file against two binary/index
-  pairs, checks byte-identical outputs and reports warm and cold latency.
-- `scripts/sim_pangenome.py` simulates a Minigraph-Cactus-like GFA and
-  `scripts/rename_gfa_nodes.py` makes shuffled-integer and non-numeric
-  renamings for node-order tests.
-
-See [`docs/pdx_compression_results.md`](docs/pdx_compression_results.md) for
-the measurements behind the current formats.
-
-### `scripts/pdx_size_breakdown.py`
-
-Print a size breakdown for a `.pdx` file.
-
-```bash
-python3 scripts/pdx_size_breakdown.py graph.pdx
-```
-
-### `scripts/w_to_p.py` and `scripts/w_to_p.awk`
-
-Convert GFA 1.1 `W` lines to GFA 1.0 `P` lines for tools such as ODGI,
-which imports GFA 1.0 paths but does not import `W` records. The converted path
-name preserves the W metadata and source interval:
-
-```text
-W  GRCh38  0  chr1  1830045  1840123  ...
-P  GRCh38#0#chr1:1830045-1840123  ...
-```
-
-The converters also change an H-line `VN:Z` tag to `VN:Z:1.0`, convert `>`/`<`
-walk orientations to `+`/`-`, preserves optional W tags, and passes all other
-records through unchanged. When both W coordinates are `*`, the converter uses
-`sample#haplotype#sequence` without a coordinate suffix.
-
-```bash
-# Recommended for large chromosome-scale walks
-python3 scripts/w_to_p.py input.gfa output.gfa
-
-# Also record every W identity and its exact generated P name
-python3 scripts/w_to_p.py input.gfa output.gfa --mapping-out w_to_p.tsv
-
-# Portable AWK alternative for smaller files
-awk -f scripts/w_to_p.awk input.gfa > output.gfa
-odgi build -g output.gfa -o output.og
-```
-
-The Python converter uses a compiled bytes regular expression to find complete
-oriented steps and writes converted steps in bounded chunks. It still keeps one
-complete input W record in memory, but avoids the AWK implementation's
-character-by-character interpreted loop. Use `-` as either Python path to read
-stdin or write stdout.
-
-The `:start-end` suffix is part of the converted path name. It preserves where
-the W fragment came from. gfaidx recognizes this naming convention and uses the
-encoded interval as the P coordinate range. ODGI still numbers every imported P
-path locally from zero, so the same converted path has ODGI offsets starting at
-`0`, not `1830045`. ODGI does not reconstruct a chromosome-wide coordinate
-system from separate W fragments.
-
-## Python library
-
-The compiled `pygfaidx` package exposes an immutable, disk-backed
-`IndexedGraph` and an owned mutable `Graph`:
+## Other commands
+
+| Command | What it does |
+|---|---|
+| `index_coordinates` | Build the `.cdx` coordinate index for selected reference paths or rGFA segments. |
+| `get_path` | List all paths, print a whole path, or print the path pieces inside a set of nodes. |
+| `get_chunk` | Print one community block of the indexed graph. |
+| `index_paths` | Rebuild only the `.pdx` path index. |
+| `index_path_checkpoints` | Build the `.pcx` checkpoints for an index that lacks them. |
+
+Every command and option is described in the
+[command reference](docs/cli_reference.md).
+
+## C++ and Python libraries
+
+The same query engine is available as a C++ library and as the Python package
+`pygfaidx`. Both open an existing index and return subgraphs, paths and
+regions as in-memory graphs, or stream them line by line:
 
 ```python
 import pygfaidx
 
-index = pygfaidx.IndexedGraph("graph.indexed.gfa.gz")
-graph = index.get_subgraph(["s123"], max_nodes=1000)
-graph.write_gfa("subgraph.gfa")
+index = pygfaidx.IndexedGraph("graph.gfa.gz")
+graph = index.get_subgraph(["12345"], max_nodes=1000)
+graph.write_gfa("neighborhood.gfa")
 ```
 
-See [`README_pygfaidx.md`](README_pygfaidx.md) for node inspection, paths,
-coordinate queries, mutation, and explicit streaming.
+Indexes are built with the `gfaidx` command-line tool. See
+[README_pygfaidx.md](README_pygfaidx.md) for installing and using the Python
+package, and [README_library.md](README_library.md) for the C++ library. The
+[BubbleGun example](python/examples/bubblegun/README.md) runs bubble detection
+on a whole chromosome graph community by community, in a fraction of the
+memory.
 
-## Notes
+## Documentation
 
-- `index_gfa` and `index_paths` are separate on purpose
-- node-based `get_path` queries now depend on `.ndx`
-- full-path `get_path --path_id ...` does not need `.ndx`
-- `gfaidx` is Unix-only and is not intended to build or run on Windows
-- current `.ndx` lookup relies on a 64-bit FNV-1a hash plus a 32-bit FNV-1a hash; collision handling is still probabilistic rather than string-verified
+- [Command reference](docs/cli_reference.md): every command and option
+- [Coordinates](docs/coordinates.md): region queries on `W`-line, `P`-line and
+  rGFA graphs
+- [How gfaidx works](docs/how_it_works.md): the indexing steps, the index
+  files, and how queries use them
+- [Python package](README_pygfaidx.md) and [C++ library](README_library.md)
+- [Helper scripts](scripts/README.md)
+- [Making a release](docs/releasing.md)
+
+## Citation
+
+A paper describing gfaidx is in preparation. Until it is published, please
+cite this repository: <https://github.com/fawaz-dabbaghieh/gfaidx>.
+
+## License
+
+gfaidx is released under the [MIT License](LICENSE).
