@@ -27,8 +27,8 @@
      inkscape:deskcolor="#d1d1d1"
      inkscape:document-units="mm"
      inkscape:zoom="0.33880987"
-     inkscape:cx="1021.2217"
-     inkscape:cy="897.2584"
+     inkscape:cx="984.32788"
+     inkscape:cy="885.45236"
      inkscape:window-width="1472"
      inkscape:window-height="895"
      inkscape:window-x="0"
@@ -99,6 +99,13 @@
      inkscape:label="Layer 1"
      inkscape:groupmode="layer"
      id="layer1">
+    <rect
+       style="fill:#ffffff;fill-rule:evenodd;stroke-width:0.264583;fill-opacity:1"
+       id="rect1"
+       width="496.66501"
+       height="447.46704"
+       x="2.3427594"
+       y="2.3427594" />
     <g
        id="g1"
        transform="matrix(1.3921982,0,0,1.3921982,83.174334,48.423005)">
@@ -547,21 +554,21 @@
              transform="matrix(0.6977234,0,0,0.6977234,-102.62323,-185.52431)"><tspan
                x="405.64267"
                y="677.43048"
-               id="tspan9"><tspan
+               id="tspan14"><tspan
                  style="font-family:'JetBrains Mono NL';-inkscape-font-specification:'JetBrains Mono NL';fill:#000000;stroke-linejoin:round"
-                 id="tspan5">s4 --&gt; s9
+                 id="tspan1">s4 --&gt; s9
 </tspan></tspan><tspan
                x="405.64267"
                y="691.79446"
-               id="tspan11"><tspan
+               id="tspan16"><tspan
                  style="font-family:'JetBrains Mono NL';-inkscape-font-specification:'JetBrains Mono NL';fill:#000000;stroke-linejoin:round"
-                 id="tspan10">s4 --&gt; s5
+                 id="tspan15">s4 --&gt; s5
 </tspan></tspan><tspan
                x="405.64267"
                y="706.15842"
-               id="tspan13"><tspan
+               id="tspan18"><tspan
                  style="font-family:'JetBrains Mono NL';-inkscape-font-specification:'JetBrains Mono NL';fill:#000000;stroke-linejoin:round"
-                 id="tspan12">s12--&gt; s8
+                 id="tspan17">s12--&gt; s8
 </tspan></tspan></text>
           <rect
              style="fill:#000000;fill-opacity:0.15;stroke:none;stroke-width:0.766457;stroke-linecap:butt;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:0.994819"
