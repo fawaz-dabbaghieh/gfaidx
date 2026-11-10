@@ -60,8 +60,7 @@ ready-to-run binaries:
 
 ```bash
 tar -xzf gfaidx-v2.3.2-linux-x86_64.tar.gz
-mv gfaidx-v2.3.2-linux-x86_64/gfaidx ~/.local/bin/
-gfaidx --version
+./gfaidx --version
 ```
 
 The Linux binaries are statically linked and run on any distribution.
@@ -85,12 +84,13 @@ cmake --install build --prefix ~/.local    # optional
 The same command indexes every kind of GFA 1 graph, plain or gzipped:
 
 ```bash
-gfaidx index_gfa graph.gfa graph.gfa.gz
+gfaidx index_gfa graph.gfa.gz graph.indexed.gfa.gz
 ```
 
 This writes the indexed graph `graph.gfa.gz` and its sidecar files beside it:
 `.idx`, `.ndx`, `.lnx`, `.pdx`, `.pcx` and a `.params` summary of the run.
 Keep them together; the query commands find them by name.
+It can also take uncompressed gfa, but the output is a multi-member gzip file.
 
 Useful options:
 
@@ -98,8 +98,8 @@ Useful options:
 - `--tmp_dir DIR` puts temporary files in `DIR` instead of beside the input.
   Path indexing needs about 12 bytes of temporary space per path step, for
   example 54 GB for the 4.5 billion steps of the HPRC PGGB chromosome 1 graph.
-- `--max_chunk_nodes N` splits communities larger than `N` nodes, so queries
-  decompress smaller blocks.
+- `--max_chunk_nodes N` splits communities larger than `N` nodes, so queries decompress smaller blocks.
+- `--min_chunk_nodes N` merge communities smaller than `N` nodes, so not too many communities need to be decompressed
 
 What else is needed depends on the kind of graph:
 
@@ -109,8 +109,8 @@ An assembly graph, for example, has only `S` and `L` lines. Index it and query
 it from a node with [`get_subgraph`](#extract-a-neighborhood):
 
 ```bash
-gfaidx index_gfa assembly.gfa assembly.gfa.gz
-gfaidx get_subgraph assembly.gfa.gz utg000123 neighborhood.gfa --max_nodes 500
+gfaidx index_gfa assembly.gfa.gz assembly.indexed.gfa.gz
+gfaidx get_subgraph assembly.indexed.gfa.gz utg000123 neighborhood.gfa --max_nodes 500
 ```
 
 ### A pangenome with `W` lines (Minigraph-Cactus)
@@ -135,10 +135,11 @@ in `:start-end` gives that path's position. To store coordinates for the
 reference paths, list the paths, keep the ones you need, and index those:
 
 ```bash
-gfaidx index_gfa pggb.gfa pggb.gfa.gz --threads 8
-gfaidx get_path pggb.gfa.gz --print_path_names > paths.tsv
+gfaidx index_gfa pggb.gfa.gz pggb.indexed.gfa.gz --threads 8
+gfaidx get_path pggb.indexed.gfa.gz --print_path_names > paths.tsv
+# filtering for paths with CHM13 in their name
 awk -F '\t' '$1 == "P" && $2 ~ /^CHM13#/' paths.tsv > reference_paths.tsv
-gfaidx index_coordinates pggb.gfa.gz pggb.gfa.gz.cdx --path_names_file reference_paths.tsv
+gfaidx index_coordinates pggb.indexed.gfa.gz pggb.indexed.gfa.gz.cdx --path_names_file reference_paths.tsv
 ```
 
 ### An rGFA (minigraph)
@@ -148,8 +149,8 @@ lines. Region queries on an rGFA need the coordinate index, which picks up the
 `SR:i:0` segments automatically:
 
 ```bash
-gfaidx index_gfa minigraph.gfa minigraph.gfa.gz
-gfaidx index_coordinates minigraph.gfa.gz minigraph.gfa.gz.cdx
+gfaidx index_gfa minigraph.gfa.gz minigraph.indxed.gfa.gz
+gfaidx index_coordinates minigraph.indxed.gfa.gz minigraph.indxed.gfa.gz.cdx
 ```
 
 See [coordinates.md](docs/coordinates.md) for how coordinates work in each
@@ -158,7 +159,7 @@ kind of graph.
 ## Query a region
 
 ```bash
-gfaidx get_region <graph.gfa.gz> <sequence:start-end> <out.gfa> [options]
+gfaidx get_region <graph.indexed.gfa.gz> <sequence:start-end> <out.gfa> [options]
 ```
 
 `get_region` writes the part of the graph that covers a genomic interval as an
@@ -200,10 +201,10 @@ gfaidx get_region hprc.indexed.gfa.gz chr22:20000000-20100000 reference.gfa \
   --reference CHM13 --mode reference --context 1kb
 
 # A PGGB graph: the P path name is the sequence
-gfaidx get_region pggb.gfa.gz CHM13#0#chr1:1000000-1100000 region.gfa --with_coords
+gfaidx get_region pggb.indexed.gfa.gz CHM13#0#chr1:1000000-1100000 region.gfa --with_coords
 
 # An rGFA: the graph around the interval, up to 5,000 nodes
-gfaidx get_region minigraph.gfa.gz chr1:1000000-1100000 region.gfa \
+gfaidx get_region minigraph.indexed.gfa.gz chr1:1000000-1100000 region.gfa \
   --mode bfs --max_nodes 5000
 
 # List every sequence that can be queried, and its range
@@ -213,7 +214,7 @@ gfaidx get_region hprc.indexed.gfa.gz --list_coordinates
 ## Extract a neighborhood
 
 ```bash
-gfaidx get_subgraph <graph.gfa.gz> <node> <out.gfa> [options]
+gfaidx get_subgraph <graph.indexed.gfa.gz> <node_id> <out.gfa> [options]
 ```
 
 `get_subgraph` starts from one node and adds its neighbors, then theirs, in
@@ -223,13 +224,13 @@ both directions along the links, until it has `--max_nodes` nodes (default
 
 ```bash
 # 2,000 nodes around node 12345
-gfaidx get_subgraph graph.gfa.gz 12345 neighborhood.gfa --max_nodes 2000
+gfaidx get_subgraph graph.indexed.gfa.gz 12345 neighborhood.gfa --max_nodes 2000
 
 # The same, with coordinates on the path pieces
-gfaidx get_subgraph graph.gfa.gz 12345 neighborhood.gfa --max_nodes 2000 --with_coords
+gfaidx get_subgraph graph.indexed.gfa.gz 12345 neighborhood.gfa --max_nodes 2000 --with_coords
 
 # Nodes and links only, without paths
-gfaidx get_subgraph graph.gfa.gz 12345 neighborhood.gfa --max_nodes 2000 --no_paths
+gfaidx get_subgraph graph.indexed.gfa.gz 12345 neighborhood.gfa --max_nodes 2000 --no_paths
 ```
 
 ## Other commands
@@ -254,7 +255,7 @@ regions as in-memory graphs, or stream them line by line:
 ```python
 import pygfaidx
 
-index = pygfaidx.IndexedGraph("graph.gfa.gz")
+index = pygfaidx.IndexedGraph("graph.indexed.gfa.gz")
 graph = index.get_subgraph(["12345"], max_nodes=1000)
 graph.write_gfa("neighborhood.gfa")
 ```
